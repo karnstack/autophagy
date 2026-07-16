@@ -111,8 +111,8 @@ mise run demo
 
 ## Status
 
-The core engine, three review-only installation targets (Codex and Claude
-Code skills), local and hybrid retrieval, an optional local-model synthesis
+The core engine, two reversible installation targets (Codex and Claude Code
+skills), exact and hybrid retrieval, an optional local-model synthesis
 boundary, continuous watch/daemon ingestion, and a native read-only macOS app
 are all implemented and covered by the quality gate below. Version `0.1.0` is
 being prepared for release; see [CHANGELOG.md](CHANGELOG.md) for the full
