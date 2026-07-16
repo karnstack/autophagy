@@ -45,8 +45,9 @@ autophagy/
 
 `autophagy-events`, `autophagy-store`, `autophagy-core`, `autophagy-cli`, the
 native Claude Code and Codex adapters, and their shared conformance harness
-exist through PR 5. A crate or package is added when its PR contains an
-executable vertical slice; empty placeholder crates are avoided.
+exist through PR 5. `autophagy-patterns` and Evidence Packet v0.1 exist through
+PR 6. A crate or package is added when its PR contains an executable vertical
+slice; empty placeholder crates are avoided.
 
 ## Dependency direction
 

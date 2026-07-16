@@ -1,0 +1,24 @@
+[package]
+name = "autophagy-patterns"
+description = "Deterministic, evidence-linked pattern detectors for Autophagy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+autophagy-events = { path = "../autophagy-events" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+autophagy-core = { path = "../autophagy-core" }
+autophagy-store = { path = "../autophagy-store" }
+jsonschema = { version = "0.47", default-features = false }
+
+[lints]
+workspace = true

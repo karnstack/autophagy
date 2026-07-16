@@ -365,6 +365,34 @@ impl EventStore {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Return canonical events in deterministic evidence order.
+    ///
+    /// An exact project path limits the result when supplied. This deliberately
+    /// returns validated AEP envelopes rather than exposing `SQLite` rows to
+    /// detector crates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` fails or persisted event JSON no
+    /// longer satisfies the AEP contract.
+    pub fn list_events_for_detection(
+        &self,
+        project: Option<&str>,
+    ) -> Result<Vec<Event>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT event_json
+             FROM events
+             WHERE (?1 IS NULL OR project_path = ?1)
+             ORDER BY occurred_at, session_id, coalesce(sequence, 9223372036854775807), row_id",
+        )?;
+        let rows = statement.query_map([project], |row| row.get::<_, String>(0))?;
+        rows.map(|row| {
+            let json = row?;
+            Event::from_json_str(&json).map_err(StoreError::from)
+        })
+        .collect()
+    }
+
     /// Search the explicit redaction-approved FTS5 projection.
     ///
     /// # Errors
