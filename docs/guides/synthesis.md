@@ -34,7 +34,7 @@ The normative contracts are
 [`docs/specs/synthesis/0.2/`](../specs/synthesis/0.2/README.md) (manifest). The
 design rationale and privacy stance are in
 [ADR 0004](../decisions/0004-local-synthesis-boundary.md) and
-[ADR 0006](../decisions/0006-model-synthesis-providers.md).
+[ADR 0007](../decisions/0007-model-synthesis-providers.md).
 
 ## With and without a model
 

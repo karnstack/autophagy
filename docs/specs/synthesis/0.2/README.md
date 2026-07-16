@@ -49,5 +49,5 @@ This keeps the default path local-only.
 }
 ```
 
-See [ADR 0006](../../decisions/0006-model-synthesis-providers.md) for the design
+See [ADR 0007](../../decisions/0007-model-synthesis-providers.md) for the design
 rationale and the privacy stance.

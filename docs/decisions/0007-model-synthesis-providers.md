@@ -1,4 +1,4 @@
-# ADR 0006: Local model synthesis providers
+# ADR 0007: Local model synthesis providers
 
 - Status: accepted
 - Date: 2026-07-17

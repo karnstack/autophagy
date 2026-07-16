@@ -48,5 +48,5 @@ path moves to v0.2.
 Readers built for v0.1 keep working: the parser treats provenance as optional
 and preserves v0.1 packages exactly on round-trip. The registry accepts both
 `mutation/0.1` and `mutation/0.2` rows; see
-[ADR 0006](../../decisions/0006-model-synthesis-providers.md) for the full
+[ADR 0007](../../decisions/0007-model-synthesis-providers.md) for the full
 compatibility and migration story.
