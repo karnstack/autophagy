@@ -1,0 +1,12 @@
+{
+  "spec_version": "aep/0.1",
+  "event_id": "evt_call-3",
+  "session_id": "ses_session-1",
+  "timestamp": "2026-07-16T01:22:31Z",
+  "source": "codex",
+  "type": "tool.called",
+  "parent_event_id": "evt_call-3",
+  "tool": {
+    "name": "bash"
+  }
+}

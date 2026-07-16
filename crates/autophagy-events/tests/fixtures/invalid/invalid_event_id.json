@@ -1,0 +1,8 @@
+{
+  "spec_version": "aep/0.1",
+  "event_id": "event has spaces",
+  "session_id": "ses_session-1",
+  "timestamp": "2026-07-16T01:22:31Z",
+  "source": "generic-jsonl",
+  "type": "session.started"
+}
