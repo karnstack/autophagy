@@ -31,8 +31,8 @@ jobs:
           version: 2026.6.1
           cache: true
 
-      - name: Warm Rust toolchain
-        run: mise exec -- rustc --version
+      - name: Install Rust quality components
+        run: mise exec -- rustup component add clippy rustfmt
 
       - name: Run quality gate
         run: mise run check
