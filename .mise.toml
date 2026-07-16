@@ -1,6 +1,7 @@
 min_version = "2026.6.1"
 
 [tools]
+pandoc = "3.10"
 rust = "1.97.0"
 
 [tasks.fmt]
@@ -15,6 +16,10 @@ run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 description = "Run the complete Rust test suite"
 run = "cargo test --workspace --all-features"
 
+[tasks.docs]
+description = "Parse the normalized blueprint as GitHub-flavored Markdown"
+run = "pandoc docs/blueprint/*.md --from=gfm --to=html --fail-if-warnings --output=/dev/null"
+
 [tasks.check]
 description = "Run the pull-request quality gate"
-depends = ["fmt", "lint", "test"]
+depends = ["docs", "fmt", "lint", "test"]

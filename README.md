@@ -29,6 +29,7 @@ yet.
 ```text
 crates/autophagy-events/   AEP Rust types, parsing, and validation
 docs/architecture/        Planned component and storage boundaries
+docs/blueprint/           Complete normalized product and implementation brief
 docs/decisions/           Architecture decision records
 docs/roadmap/              Small pull-request delivery sequence
 docs/specs/aep/0.1/       Versioned AEP JSON Schema and examples
@@ -36,6 +37,8 @@ docs/specs/aep/0.1/       Versioned AEP JSON Schema and examples
 
 The intended repository structure is documented in
 [`docs/architecture/repository-structure.md`](docs/architecture/repository-structure.md).
+The complete product blueprint is available in
+[`docs/blueprint/`](docs/blueprint/README.md).
 
 ## Try the contract
 
