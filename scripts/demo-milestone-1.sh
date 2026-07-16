@@ -19,8 +19,12 @@ echo "Offline digest"
 cargo run --quiet -p autophagy-cli -- --database "$database" digest
 
 echo
-echo "Review-only mutation candidates"
-cargo run --quiet -p autophagy-cli -- --database "$database" mutations
+echo "Register review-only mutation candidates"
+cargo run --quiet -p autophagy-cli -- --database "$database" mutations propose
+
+echo
+echo "Persistent mutation registry"
+cargo run --quiet -p autophagy-cli -- --database "$database" mutations list
 
 echo
 echo "Retention preview"

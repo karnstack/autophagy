@@ -66,6 +66,34 @@ pub fn generate_candidates(findings: &[EvidencePacket]) -> Vec<GenerationOutcome
     outcomes
 }
 
+/// Compute the stable duplicate-equivalence key for registry insertion.
+///
+/// Equivalent candidates share a detector, intervention type, and normalized
+/// trigger selectors even when they were derived from different finding IDs.
+#[must_use]
+pub fn equivalence_key(package: &MutationPackage) -> String {
+    let mut material = format!(
+        "equivalence/v1\0{}\0agent_instruction",
+        package.source_detector.as_str()
+    );
+    let mut selectors = package
+        .triggers
+        .iter()
+        .map(|trigger| trigger.selector.as_str())
+        .collect::<Vec<_>>();
+    selectors.sort_unstable();
+    for selector in selectors {
+        material.push('\0');
+        material.push_str(selector);
+    }
+    let digest = Sha256::digest(material.as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("eqv_{encoded}")
+}
+
 fn failure_candidate(finding: &EvidencePacket) -> Option<MutationPackage> {
     let signature = finding.signature.strip_prefix("failure/v1|")?;
     let (operation, exit_code) = signature.rsplit_once("|exit:")?;

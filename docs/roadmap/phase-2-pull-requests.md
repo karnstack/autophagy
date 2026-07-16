@@ -5,6 +5,8 @@ evaluation, and permission boundaries.
 
 ## PR 1 — Mutation candidate contract
 
+Status: complete.
+
 - Mutation Package v0.1 schema and Rust validator
 - deterministic zero-permission `agent_instruction` candidates
 - exact evidence/counterexample lineage and insufficient-evidence refusal
@@ -14,6 +16,8 @@ Exit: the demo findings produce stable, schema-valid candidates that cannot be
 installed or executed.
 
 ## PR 2 — Candidate registry and challenge
+
+Status: complete.
 
 - immutable package registry and audited lifecycle transitions
 - duplicate/equivalent candidate detection

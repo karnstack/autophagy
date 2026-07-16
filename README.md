@@ -14,9 +14,10 @@ change because of what happened?”
 The local-only Milestone 1 engine is implemented: AEP v0.1, transactional
 SQLite storage, generic JSONL plus Claude Code and Codex adapters, deterministic
 evidence-linked findings, ingestion redaction, retention, export, and deletion.
-Phase 2 now generates review-only, zero-permission mutation candidates. No
-daemon, replay, installation, autonomous execution, or background capture ships
-yet.
+Phase 2 now generates and retains review-only, zero-permission mutation
+candidates in an audited local registry. Users can inspect, challenge, or reject
+them. No daemon, replay, installation, autonomous execution, or background
+capture ships yet.
 
 ## Principles
 
@@ -107,8 +108,8 @@ mise run demo
 
 The demo imports anonymized evidence, emits two deterministic patterns with
 exact evidence IDs, produces a digest that confirms no model or network was
-used, generates two zero-permission mutation candidates, and previews retention
-deletion. Its temporary database is removed on exit.
+used, registers two zero-permission mutation candidates, lists them, and
+previews retention deletion. Its temporary database is removed on exit.
 
 Useful privacy and lifecycle commands:
 
@@ -124,15 +125,17 @@ autophagy delete all --confirm delete-all
 See the [privacy and lifecycle guide](docs/guides/privacy-and-lifecycle.md) and
 [threat model](docs/security/threat-model.md) for guarantees and limitations.
 
-Inspect candidate packages directly:
+Register and review candidate packages:
 
 ```sh
-autophagy mutations
-autophagy --output json mutations --project /workspace/example
+autophagy mutations propose
+autophagy mutations list
+autophagy --output json mutations show mut_example
 ```
 
 See the [mutation candidate guide](docs/guides/mutation-candidates.md) for the
-contract, refusal behavior, and deliberately unavailable lifecycle actions.
+contract, challenge checklist, evidence retention, and unavailable activation
+actions.
 
 ## Try the contract
 
@@ -174,7 +177,8 @@ An AEP event looks like this:
 - Raw JSON is not copied into FTS5; tool input and free text require an explicit
   redaction-approved search projection.
 - Session deletion cascades through events, conflicts, and search rows, then
-  removes only artifacts that no remaining event references.
+  removes only artifacts that no remaining event references. A mutation is also
+  removed if any evidence it cites is deleted.
 
 ## Security and privacy
 

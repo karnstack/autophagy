@@ -5,8 +5,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use time::OffsetDateTime;
 
 use crate::{
-    DeleteAllSummary, DeleteSummary, InsertOutcome, PruneSummary, SearchHit, SearchProjection,
-    SessionSummary, SourceCursor, SourceIdentity, StoreError, StoreStats, migration, util,
+    DeleteAllSummary, DeleteSummary, InsertOutcome, MutationDetails, MutationRecord,
+    MutationRegisterOutcome, MutationRegistration, MutationTransition, MutationTransitionOutcome,
+    PruneSummary, SearchHit, SearchProjection, SessionSummary, SourceCursor, SourceIdentity,
+    StoreError, StoreStats, migration, util,
 };
 
 /// Transactional owner of one local Autophagy `SQLite` database.
@@ -455,6 +457,290 @@ impl EventStore {
         )?)
     }
 
+    /// Register one immutable candidate and its exact evidence links.
+    ///
+    /// Identical packages are idempotent. A different package under the same
+    /// ID is rejected, while an equivalent trigger/intervention returns the
+    /// existing candidate without writing a duplicate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for conflicting content, missing evidence,
+    /// serialization, or transaction failures.
+    pub fn register_mutation(
+        &mut self,
+        registration: &MutationRegistration,
+    ) -> Result<MutationRegisterOutcome, StoreError> {
+        let package_json = serde_json::to_string(&registration.package)?;
+        let content_hash = util::sha256(package_json.as_bytes());
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing_hash) = transaction
+            .query_row(
+                "SELECT content_hash FROM mutation_candidates WHERE mutation_id = ?1",
+                [&registration.mutation_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+        {
+            if existing_hash.as_slice() == content_hash {
+                return Ok(MutationRegisterOutcome::Duplicate {
+                    mutation_id: registration.mutation_id.clone(),
+                });
+            }
+            return Err(StoreError::MutationContentConflict {
+                mutation_id: registration.mutation_id.clone(),
+            });
+        }
+        if let Some(existing_mutation_id) = transaction
+            .query_row(
+                "SELECT mutation_id FROM mutation_candidates
+                 WHERE equivalence_key = ?1 OR source_finding_id = ?2",
+                params![registration.equivalence_key, registration.source_finding_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(MutationRegisterOutcome::EquivalentExisting {
+                mutation_id: registration.mutation_id.clone(),
+                existing_mutation_id,
+            });
+        }
+        let now = util::now_timestamp()?;
+        transaction.execute(
+            "INSERT INTO mutation_candidates(
+                mutation_id, source_finding_id, source_detector, equivalence_key,
+                spec_version, semantic_version, state, package_json, content_hash,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'candidate', ?7, ?8, ?9, ?9)",
+            params![
+                registration.mutation_id,
+                registration.source_finding_id,
+                registration.source_detector,
+                registration.equivalence_key,
+                registration.spec_version,
+                registration.semantic_version,
+                package_json,
+                content_hash.as_slice(),
+                now,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO mutation_transitions(
+                mutation_id, from_state, to_state, reason, metadata_json, occurred_at
+             ) VALUES (?1, NULL, 'candidate', 'generated from evidence', '{}', ?2)",
+            params![registration.mutation_id, now],
+        )?;
+        insert_mutation_evidence(
+            &transaction,
+            &registration.mutation_id,
+            "support",
+            &registration.supporting_event_ids,
+        )?;
+        insert_mutation_evidence(
+            &transaction,
+            &registration.mutation_id,
+            "counterexample",
+            &registration.counterexample_event_ids,
+        )?;
+        transaction.commit()?;
+        Ok(MutationRegisterOutcome::Inserted {
+            mutation_id: registration.mutation_id.clone(),
+        })
+    }
+
+    /// List candidates in most-recently-updated order.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database or persisted JSON failures.
+    pub fn list_mutations(&self) -> Result<Vec<MutationRecord>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT mutation_id, source_finding_id, source_detector, equivalence_key,
+                    spec_version, semantic_version, state, package_json,
+                    challenge_json, rejection_reason, created_at, updated_at
+             FROM mutation_candidates
+             ORDER BY updated_at DESC, mutation_id",
+        )?;
+        let rows = statement.query_map([], raw_mutation_record)?;
+        rows.map(|row| mutation_record(row?)).collect()
+    }
+
+    /// Return one candidate and its complete lifecycle audit.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the candidate is missing or data is invalid.
+    pub fn get_mutation(&self, mutation_id: &str) -> Result<MutationDetails, StoreError> {
+        let raw = self
+            .connection
+            .query_row(
+                "SELECT mutation_id, source_finding_id, source_detector, equivalence_key,
+                        spec_version, semantic_version, state, package_json,
+                        challenge_json, rejection_reason, created_at, updated_at
+                 FROM mutation_candidates WHERE mutation_id = ?1",
+                [mutation_id],
+                raw_mutation_record,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::MutationNotFound {
+                mutation_id: mutation_id.to_owned(),
+            })?;
+        let mutation = mutation_record(raw)?;
+        let mut statement = self.connection.prepare(
+            "SELECT transition_id, mutation_id, from_state, to_state, reason,
+                    metadata_json, occurred_at
+             FROM mutation_transitions
+             WHERE mutation_id = ?1
+             ORDER BY occurred_at, transition_id",
+        )?;
+        let rows = statement.query_map([mutation_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        let transitions = rows
+            .map(|row| {
+                let (
+                    transition_id,
+                    mutation_id,
+                    from_state,
+                    to_state,
+                    reason,
+                    metadata,
+                    occurred_at,
+                ) = row?;
+                Ok(MutationTransition {
+                    transition_id,
+                    mutation_id,
+                    from_state,
+                    to_state,
+                    reason,
+                    metadata: serde_json::from_str(&metadata)?,
+                    occurred_at,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        Ok(MutationDetails {
+            mutation,
+            transitions,
+        })
+    }
+
+    /// Mark a candidate challenged after the caller validates every checklist item.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for a missing candidate, invalid transition, or
+    /// database/serialization failure.
+    pub fn challenge_mutation(
+        &mut self,
+        mutation_id: &str,
+        assessment: &serde_json::Value,
+    ) -> Result<MutationTransitionOutcome, StoreError> {
+        self.transition_mutation(
+            mutation_id,
+            "challenged",
+            "challenge checklist completed",
+            assessment,
+        )
+    }
+
+    /// Reject a candidate or challenged mutation with an auditable reason.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for blank reasons, a missing candidate, invalid
+    /// transition, or database failure.
+    pub fn reject_mutation(
+        &mut self,
+        mutation_id: &str,
+        reason: &str,
+    ) -> Result<MutationTransitionOutcome, StoreError> {
+        if reason.trim().is_empty() {
+            return Err(StoreError::InvalidMutationReason);
+        }
+        self.transition_mutation(mutation_id, "rejected", reason, &serde_json::json!({}))
+    }
+
+    fn transition_mutation(
+        &mut self,
+        mutation_id: &str,
+        to_state: &'static str,
+        reason: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<MutationTransitionOutcome, StoreError> {
+        let metadata_json = serde_json::to_string(metadata)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let from_state = transaction
+            .query_row(
+                "SELECT state FROM mutation_candidates WHERE mutation_id = ?1",
+                [mutation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::MutationNotFound {
+                mutation_id: mutation_id.to_owned(),
+            })?;
+        if from_state == to_state {
+            return Ok(MutationTransitionOutcome {
+                mutation_id: mutation_id.to_owned(),
+                from_state: from_state.clone(),
+                to_state: from_state,
+                changed: false,
+            });
+        }
+        let allowed = matches!(
+            (from_state.as_str(), to_state),
+            ("candidate", "challenged") | ("candidate" | "challenged", "rejected")
+        );
+        if !allowed {
+            return Err(StoreError::MutationStateTransition {
+                mutation_id: mutation_id.to_owned(),
+                from_state,
+                to_state,
+            });
+        }
+        let now = util::now_timestamp()?;
+        let (challenge_json, rejection_reason) = if to_state == "challenged" {
+            (Some(metadata_json.as_str()), None)
+        } else {
+            (None, Some(reason))
+        };
+        transaction.execute(
+            "UPDATE mutation_candidates
+             SET state = ?2, challenge_json = coalesce(?3, challenge_json),
+                 rejection_reason = ?4, updated_at = ?5
+             WHERE mutation_id = ?1",
+            params![mutation_id, to_state, challenge_json, rejection_reason, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO mutation_transitions(
+                mutation_id, from_state, to_state, reason, metadata_json, occurred_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                mutation_id,
+                from_state,
+                to_state,
+                reason,
+                metadata_json,
+                now
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(MutationTransitionOutcome {
+            mutation_id: mutation_id.to_owned(),
+            from_state,
+            to_state: to_state.to_owned(),
+            changed: true,
+        })
+    }
+
     /// Delete a session, its events, search rows, conflicts, and orphaned artifacts.
     ///
     /// # Errors
@@ -482,6 +768,7 @@ impl EventStore {
             transaction.query_row("SELECT count(*) FROM artifacts", [], |row| {
                 row.get::<_, i64>(0)
             })?;
+        let mutations_before = count_mutations(&transaction)?;
 
         transaction.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
         transaction.execute(
@@ -496,12 +783,14 @@ impl EventStore {
             transaction.query_row("SELECT count(*) FROM artifacts", [], |row| {
                 row.get::<_, i64>(0)
             })?;
+        let mutations_after = count_mutations(&transaction)?;
         transaction.commit()?;
 
         Ok(DeleteSummary {
             session_deleted: true,
             events_deleted,
             artifacts_deleted: artifacts_before - artifacts_after,
+            mutations_deleted: mutations_before - mutations_after,
         })
     }
 
@@ -515,11 +804,17 @@ impl EventStore {
         let cursors_deleted =
             self.connection
                 .query_row("SELECT count(*) FROM source_cursors", [], |row| row.get(0))?;
+        let mutations_deleted =
+            self.connection
+                .query_row("SELECT count(*) FROM mutation_candidates", [], |row| {
+                    row.get(0)
+                })?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute("DELETE FROM imports", [])?;
         transaction.execute("DELETE FROM source_cursors", [])?;
+        transaction.execute("DELETE FROM mutation_candidates", [])?;
         transaction.execute("DELETE FROM sessions", [])?;
         transaction.execute("DELETE FROM artifacts", [])?;
         transaction.execute("DELETE FROM sources", [])?;
@@ -531,6 +826,7 @@ impl EventStore {
             artifacts_deleted: before.artifacts,
             conflicts_deleted: before.conflicts,
             cursors_deleted,
+            mutations_deleted,
         })
     }
 
@@ -572,6 +868,7 @@ impl EventStore {
             transaction.query_row("SELECT count(*) FROM artifacts", [], |row| {
                 row.get::<_, i64>(0)
             })?;
+        let mutations_before = count_mutations(&transaction)?;
         transaction.execute(
             "DELETE FROM sessions
              WHERE last_event_at < ?1 AND (?2 IS NULL OR project_path = ?2)",
@@ -589,10 +886,12 @@ impl EventStore {
             transaction.query_row("SELECT count(*) FROM artifacts", [], |row| {
                 row.get::<_, i64>(0)
             })?;
+        let mutations_after = count_mutations(&transaction)?;
         let summary = PruneSummary {
             sessions_deleted,
             events_deleted,
             artifacts_deleted: artifacts_before - artifacts_after,
+            mutations_deleted: mutations_before - mutations_after,
             dry_run,
         };
         if dry_run {
@@ -617,6 +916,82 @@ fn configure(connection: &Connection) -> Result<(), rusqlite::Error> {
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(())
+}
+
+struct RawMutationRecord {
+    mutation_id: String,
+    source_finding_id: String,
+    source_detector: String,
+    equivalence_key: String,
+    spec_version: String,
+    semantic_version: String,
+    state: String,
+    package_json: String,
+    challenge_json: Option<String>,
+    rejection_reason: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+fn raw_mutation_record(row: &rusqlite::Row<'_>) -> Result<RawMutationRecord, rusqlite::Error> {
+    Ok(RawMutationRecord {
+        mutation_id: row.get(0)?,
+        source_finding_id: row.get(1)?,
+        source_detector: row.get(2)?,
+        equivalence_key: row.get(3)?,
+        spec_version: row.get(4)?,
+        semantic_version: row.get(5)?,
+        state: row.get(6)?,
+        package_json: row.get(7)?,
+        challenge_json: row.get(8)?,
+        rejection_reason: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+fn mutation_record(raw: RawMutationRecord) -> Result<MutationRecord, StoreError> {
+    Ok(MutationRecord {
+        mutation_id: raw.mutation_id,
+        source_finding_id: raw.source_finding_id,
+        source_detector: raw.source_detector,
+        equivalence_key: raw.equivalence_key,
+        spec_version: raw.spec_version,
+        semantic_version: raw.semantic_version,
+        state: raw.state,
+        package: serde_json::from_str(&raw.package_json)?,
+        challenge: raw
+            .challenge_json
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
+        rejection_reason: raw.rejection_reason,
+        created_at: raw.created_at,
+        updated_at: raw.updated_at,
+    })
+}
+
+fn insert_mutation_evidence(
+    transaction: &Transaction<'_>,
+    mutation_id: &str,
+    role: &str,
+    event_ids: &[String],
+) -> Result<(), StoreError> {
+    for (ordinal, event_id) in event_ids.iter().enumerate() {
+        let stored_ordinal = i64::try_from(ordinal)
+            .map_err(|_| StoreError::MutationEvidenceOrdinalOutOfRange { ordinal })?;
+        transaction.execute(
+            "INSERT INTO mutation_evidence(mutation_id, event_id, role, ordinal)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![mutation_id, event_id, role, stored_ordinal],
+        )?;
+    }
+    Ok(())
+}
+
+fn count_mutations(transaction: &Transaction<'_>) -> Result<i64, rusqlite::Error> {
+    transaction.query_row("SELECT count(*) FROM mutation_candidates", [], |row| {
+        row.get(0)
+    })
 }
 
 fn validate_source(source: &SourceIdentity) -> Result<(), StoreError> {

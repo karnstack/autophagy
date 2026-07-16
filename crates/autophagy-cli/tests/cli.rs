@@ -177,6 +177,7 @@ fn codex_rollouts_import_and_reimport_incrementally() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let database = directory.path().join("autophagy.db");
@@ -207,9 +208,18 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
         2
     );
 
-    let mutations = run_json(&database, ["mutations"]);
-    let candidates = mutations["result"].as_array().expect("candidates");
+    let mutations = run_json(&database, ["mutations", "propose"]);
+    let candidates = mutations["result"]["generated"]
+        .as_array()
+        .expect("candidates");
     assert_eq!(candidates.len(), 2);
+    assert_eq!(
+        mutations["result"]["registrations"]
+            .as_array()
+            .expect("registrations")
+            .len(),
+        2
+    );
     for outcome in candidates {
         assert_eq!(outcome["status"], "candidate");
         assert_eq!(outcome["package"]["state"], "candidate");
@@ -222,6 +232,93 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
         );
     }
 
+    let repeated = run_json(&database, ["mutations", "propose"]);
+    assert!(
+        repeated["result"]["registrations"]
+            .as_array()
+            .expect("registrations")
+            .iter()
+            .all(|registration| registration["status"] == "duplicate")
+    );
+
+    let registry = run_json(&database, ["mutations", "list"]);
+    let registry = registry["result"].as_array().expect("registry");
+    assert_eq!(registry.len(), 2);
+    let failure_id = registry
+        .iter()
+        .find(|mutation| mutation["source_detector"] == "repeated_command_failure")
+        .expect("failure mutation")["mutation_id"]
+        .as_str()
+        .expect("mutation ID")
+        .to_owned();
+    let correction_id = registry
+        .iter()
+        .find(|mutation| mutation["source_detector"] == "repeated_user_correction")
+        .expect("correction mutation")["mutation_id"]
+        .as_str()
+        .expect("mutation ID")
+        .to_owned();
+
+    let incomplete = command(&database)
+        .args([
+            "mutations",
+            "challenge",
+            &failure_id,
+            "--check",
+            "coincidence-considered",
+        ])
+        .output()
+        .expect("incomplete challenge");
+    assert!(!incomplete.status.success());
+    assert!(String::from_utf8_lossy(&incomplete.stderr).contains("missing checks"));
+
+    let challenged = run_json(
+        &database,
+        [
+            "mutations",
+            "challenge",
+            &failure_id,
+            "--check",
+            "coincidence-considered",
+            "--check",
+            "sessions-comparable",
+            "--check",
+            "trigger-observable",
+            "--check",
+            "legitimate-uses-bounded",
+            "--check",
+            "equivalent-searched",
+            "--check",
+            "counterexamples-reviewed",
+            "--note",
+            "reviewed against the fixture",
+        ],
+    );
+    assert_eq!(challenged["result"]["to_state"], "challenged");
+    assert_eq!(challenged["result"]["changed"], true);
+
+    let shown = run_json(&database, ["mutations", "show", &failure_id]);
+    assert_eq!(shown["result"]["mutation"]["state"], "challenged");
+    assert_eq!(
+        shown["result"]["transitions"]
+            .as_array()
+            .expect("transitions")
+            .len(),
+        2
+    );
+
+    let rejected = run_json(
+        &database,
+        [
+            "mutations",
+            "reject",
+            &correction_id,
+            "--reason",
+            "rule is too broad",
+        ],
+    );
+    assert_eq!(rejected["result"]["to_state"], "rejected");
+
     let exported = command(&database).arg("export").output().expect("export");
     assert!(exported.status.success());
     let lines = String::from_utf8(exported.stdout).expect("UTF-8 export");
@@ -233,9 +330,18 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
     let deleted = run_json(&database, ["delete", "session", "ses_failure_1"]);
     assert_eq!(deleted["result"]["session_deleted"], true);
     assert_eq!(deleted["result"]["events_deleted"], 1);
+    assert_eq!(deleted["result"]["mutations_deleted"], 1);
+    assert_eq!(
+        run_json(&database, ["mutations", "list"])["result"]
+            .as_array()
+            .expect("registry")
+            .len(),
+        1
+    );
 
     let preview = run_json(&database, ["prune", "--older-than-days", "0", "--dry-run"]);
     assert_eq!(preview["result"]["events_deleted"], 10);
+    assert_eq!(preview["result"]["mutations_deleted"], 1);
     assert_eq!(preview["result"]["dry_run"], true);
     assert_eq!(
         run_json(&database, ["sessions"])["result"]
@@ -247,11 +353,18 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
 
     let pruned = run_json(&database, ["prune", "--older-than-days", "0"]);
     assert_eq!(pruned["result"]["events_deleted"], 10);
+    assert_eq!(pruned["result"]["mutations_deleted"], 1);
     assert_eq!(pruned["result"]["dry_run"], false);
     assert!(
         run_json(&database, ["sessions"])["result"]
             .as_array()
             .expect("sessions")
+            .is_empty()
+    );
+    assert!(
+        run_json(&database, ["mutations", "list"])["result"]
+            .as_array()
+            .expect("registry")
             .is_empty()
     );
 }

@@ -41,6 +41,8 @@ boundaries.
 | Dangling deleted evidence | Foreign-key cascades and orphan-artifact cleanup |
 | Silent ID overwrite | Conflicting immutable event bodies are quarantined |
 | Candidate gains execution authority | Mutation Package v0.1 permits only zero-permission instructions |
+| Candidate survives evidence deletion | Any removed cited event cascades deletion of the candidate and its audit |
+| Unreviewed candidate advances | Challenge requires all six explicit adversarial checks |
 
 ## Residual risks
 
@@ -63,6 +65,8 @@ boundaries.
 5. Destructive operations are explicit, scoped, and report their effect.
 6. Candidate generation cannot install content, execute commands, write files,
    read environment variables, or access the network.
+7. Candidate packages are immutable; lifecycle state changes are append-only
+   audited transitions outside the package.
 
 Report failures of these invariants privately using the process in
 [`SECURITY.md`](../../SECURITY.md).
