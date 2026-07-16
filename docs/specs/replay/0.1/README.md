@@ -15,6 +15,12 @@ scenario records exact source event IDs, selectors observable before the
 outcome, the expected action, and an annotated counterfactual outcome for
 positive cases. The CLI requires every cited event to remain in the local store.
 
+Review drafts are also Replay Suite v0.1 documents. They use the explicit
+`unknown` counterfactual outcome for positive cases extracted from mutation
+evidence and nearby session context. Structural validation accepts that state,
+but deterministic evaluation rejects it until a reviewer changes every
+`unknown` value to `expected_result` or `contradiction`.
+
 The deterministic evaluator performs exact selector matching and produces one
 of four classifications: `success`, `no_op`, `contradiction`, or
 `false_intervention`. Reports always include `mutation_executed: false` and

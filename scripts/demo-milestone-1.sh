@@ -4,7 +4,8 @@ set -eu
 database="${TMPDIR:-/tmp}/autophagy-milestone-1-$$.db"
 install_repository="${TMPDIR:-/tmp}/autophagy-install-target-$$"
 failure_mutation="mut_d6b7a340eb2fb6f18bee4a20932b9c954adb4975f3ea8136bf0bd264b3ec431c"
-trap 'rm -f "$database" "$database-shm" "$database-wal"; rm -rf "$install_repository"' EXIT HUP INT TERM
+replay_draft="${TMPDIR:-/tmp}/autophagy-replay-draft-$$.json"
+trap 'rm -f "$database" "$database-shm" "$database-wal" "$replay_draft"; rm -rf "$install_repository"' EXIT HUP INT TERM
 mkdir -p "$install_repository"
 mkdir -p "$install_repository/.git"
 
@@ -47,6 +48,12 @@ cargo run --quiet -p autophagy-cli -- --database "$database" \
   --check legitimate-uses-bounded \
   --check equivalent-searched \
   --check counterexamples-reviewed
+
+echo
+echo "Export evidence-linked replay review draft"
+cargo run --quiet -p autophagy-cli -- --database "$database" \
+  mutations replay-draft "$failure_mutation" \
+  --suite "$replay_draft"
 
 echo
 echo "Deterministic non-executable replay"

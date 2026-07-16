@@ -53,8 +53,9 @@ motifs. `autophagy-redaction` and the offline digestion/privacy CLI complete
 Milestone 1 through PR 7. `autophagy-mutations` begins Phase 2 with the
 review-only Mutation Package v0.1 contract, while `autophagy-store` owns the
 immutable candidate registry, evidence links, lifecycle audit, and replay
-reports. `autophagy-replay` adds versioned annotated decision points and
-deterministic non-executable evaluation. `autophagy-shadow` measures would-be
+reports. `autophagy-replay` derives evidence-linked decision-point review
+drafts, preserves unknown counterfactuals, and performs deterministic
+non-executable evaluation. `autophagy-shadow` measures would-be
 trigger precision without intervention, and `autophagy-install` owns the single
 repo-scoped Codex skill materializer and rollback boundary. A crate or package
 is added when its PR contains an executable vertical slice; empty placeholder

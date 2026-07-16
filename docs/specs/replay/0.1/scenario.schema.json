@@ -27,7 +27,9 @@
       "items": { "type": "string", "minLength": 1 }
     },
     "expected_action": { "enum": ["intervene", "no_op"] },
-    "counterfactual_outcome": { "enum": ["expected_result", "contradiction"] },
+    "counterfactual_outcome": {
+      "enum": ["unknown", "expected_result", "contradiction"]
+    },
     "note": { "type": "string", "minLength": 1 }
   },
   "allOf": [

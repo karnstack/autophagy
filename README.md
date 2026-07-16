@@ -22,6 +22,8 @@ capture ships yet.
 
 Alpha expansion adds a third deterministic family: repeated successful recovery
 motifs with direct-retry counterexamples and conservative preflight candidates.
+It also derives Replay Suite review drafts from exact mutation evidence while
+keeping every unreviewed counterfactual outcome explicitly unknown.
 
 ## Principles
 
@@ -117,9 +119,10 @@ mise run demo
 
 The demo imports anonymized evidence, emits three deterministic patterns with
 exact evidence IDs, produces a digest that confirms no model or network was
-used, registers zero-permission mutation candidates, challenges one, runs
-replay and shadow evaluation, installs a repo-scoped Codex skill, uninstalls it,
-and previews retention deletion. Its temporary data is removed on exit.
+used, registers zero-permission mutation candidates, challenges one, exports
+an evidence-linked replay review draft, runs replay and shadow evaluation,
+installs a repo-scoped Codex skill, uninstalls it, and previews retention
+deletion. Its temporary data is removed on exit.
 
 Useful privacy and lifecycle commands:
 
@@ -145,8 +148,9 @@ autophagy --output json mutations show mut_example
 
 See the [mutation candidate guide](docs/guides/mutation-candidates.md) for the
 contract, challenge checklist, evidence retention, and unavailable activation
-actions. The [replay guide](docs/guides/replay.md) documents annotated scenarios,
-classification, thresholds, and the non-execution boundary.
+actions. The [replay guide](docs/guides/replay.md) documents evidence-linked
+draft extraction, counterfactual review, classification, thresholds, and the
+non-execution boundary.
 The [shadow and installation guide](docs/guides/shadow-and-installation.md)
 documents precision measurement, explicit permission review, the Codex target,
 and rollback guarantees.

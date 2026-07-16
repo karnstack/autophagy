@@ -259,6 +259,52 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
         .expect("mutation ID")
         .to_owned();
 
+    let review_draft = directory.path().join("command-preflight-draft.json");
+    let extracted = run_json(
+        &database,
+        [
+            "mutations",
+            "replay-draft",
+            &failure_id,
+            "--suite",
+            review_draft.to_str().expect("UTF-8 path"),
+            "--context-events",
+            "1",
+        ],
+    );
+    assert_eq!(extracted["command"], "mutations_replay_draft");
+    assert_eq!(extracted["result"]["scenarios"], 4);
+    assert_eq!(extracted["result"]["intervention_scenarios"], 3);
+    assert_eq!(extracted["result"]["no_op_scenarios"], 1);
+    assert_eq!(extracted["result"]["unreviewed_scenarios"], 3);
+    let written_draft: Value =
+        serde_json::from_slice(&fs::read(&review_draft).expect("read review draft"))
+            .expect("review draft JSON");
+    assert_eq!(written_draft, extracted["result"]["draft"]);
+    assert_eq!(
+        written_draft["scenarios"]
+            .as_array()
+            .expect("draft scenarios")
+            .iter()
+            .filter(|scenario| scenario["counterfactual_outcome"] == "unknown")
+            .count(),
+        3
+    );
+    let unreviewed = command(&database)
+        .args([
+            "mutations",
+            "replay",
+            &failure_id,
+            "--scenarios",
+            review_draft.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("unreviewed replay");
+    assert!(!unreviewed.status.success());
+    assert!(
+        String::from_utf8_lossy(&unreviewed.stderr).contains("unreviewed counterfactual outcomes")
+    );
+
     let incomplete = command(&database)
         .args([
             "mutations",

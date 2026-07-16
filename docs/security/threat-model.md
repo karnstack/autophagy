@@ -45,6 +45,7 @@ boundaries.
 | Candidate survives evidence deletion | Any removed cited event cascades deletion of the candidate and its audit |
 | Unreviewed candidate advances | Challenge requires all six explicit adversarial checks |
 | Replay fixture executes untrusted content | Replay v0.1 performs exact string matching only; reports assert no mutation or model execution |
+| Extracted replay invents causal outcomes | Review drafts preserve `unknown`; evaluation refuses every unreviewed intervention case |
 | Easy-only replay creates false confidence | Passing requires intervention and no-op coverage plus package thresholds |
 | Shadow mode changes agent behavior | Shadow evaluator only exact-matches annotations and asserts `mutation_applied: false` |
 | Installer overwrites user content | Codex skill target uses create-new semantics and refuses existing paths |
