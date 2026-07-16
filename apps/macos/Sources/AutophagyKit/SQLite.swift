@@ -31,12 +31,18 @@ public final class Database {
 
     /// Open `path` for read-only access.
     ///
+    /// - Parameter allowImmutable: when `true` (the default) a WAL-mode database
+    ///   with no live `-wal` sidecar is opened with SQLite's `immutable=1` so a
+    ///   cleanly checkpointed file reads correctly (see ``readonlyDSN(for:allowImmutable:)``).
+    ///   Pass `false` to force a plain read-only open — the fallback used when an
+    ///   `immutable` connection fails to read (e.g. the file changed underneath it).
     /// - Throws: ``SQLiteError/open(_:)`` if the file is missing, unreadable, or
     ///   not a SQLite database.
-    public init(readonlyPath path: String) throws {
+    public init(readonlyPath path: String, allowImmutable: Bool = true) throws {
         var handle: OpaquePointer?
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI
-        let status = sqlite3_open_v2(Self.readonlyDSN(for: path), &handle, flags, nil)
+        let dsn = Self.readonlyDSN(for: path, allowImmutable: allowImmutable)
+        let status = sqlite3_open_v2(dsn, &handle, flags, nil)
         guard status == SQLITE_OK, let handle else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             if let handle { sqlite3_close_v2(handle) }
@@ -70,13 +76,14 @@ public final class Database {
     /// When a non-empty `-wal` sidecar is present a writer is (or recently was)
     /// active and WAL-resident rows may not yet be in the main file, so we open
     /// normally to see them and to avoid `immutable`'s no-change assumption.
-    static func readonlyDSN(for path: String) -> String {
+    /// `allowImmutable == false` forces the plain open regardless (the retry
+    /// path once an `immutable` connection has proven unable to read).
+    static func readonlyDSN(for path: String, allowImmutable: Bool) -> String {
         let encoded = path.addingPercentEncoding(
             withAllowedCharacters: Self.uriPathAllowed
         ) ?? path
-        return liveWALSidecarExists(for: path)
-            ? "file:\(encoded)"
-            : "file:\(encoded)?immutable=1"
+        let useImmutable = allowImmutable && !liveWALSidecarExists(for: path)
+        return useImmutable ? "file:\(encoded)?immutable=1" : "file:\(encoded)"
     }
 
     /// Whether a non-empty `-wal` sidecar sits next to `path`.
@@ -89,13 +96,19 @@ public final class Database {
     }
 
     /// Characters that need no percent-encoding inside a SQLite `file:` URI
-    /// path. Everything else (spaces, `?`, `#`, `%`, …) is encoded so paths with
-    /// reserved characters open correctly.
-    private static let uriPathAllowed: CharacterSet = {
-        var set = CharacterSet.alphanumerics
-        set.insert(charactersIn: "/-._~")
-        return set
-    }()
+    /// path. Restricted to ASCII unreserved characters plus `/`; everything else
+    /// — spaces, `?`, `#`, `%`, and any non-ASCII byte — is percent-encoded so
+    /// paths with reserved or Unicode characters open correctly. (Non-ASCII must
+    /// be encoded: SQLite expects UTF-8 percent-octets in a `file:` URI.)
+    private static let uriPathAllowed: CharacterSet =
+        CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/-._~")
+
+    /// Whether a trivial read succeeds on this connection. Used to detect an
+    /// `immutable` open that cannot actually read (so the caller can retry with
+    /// a plain read-only open) rather than silently degrading to empty views.
+    public func canRead() -> Bool {
+        (try? queryScalarInt("SELECT count(*) FROM sqlite_master;")) != nil
+    }
 
     /// Run a statement for its side effects. Private on purpose: the only
     /// side-effecting SQL this type ever runs is the `PRAGMA` set in `init`.

@@ -19,7 +19,7 @@ enum FixtureDatabase {
         return path
     }
 
-    /// A database carrying the full v6 schema subset the app reads, with one
+    /// A database carrying the full v8 schema subset the app reads, with one
     /// source, several sessions/events, and one challenged + one rejected
     /// mutation candidate (with evidence links and transitions).
     static func populated() -> String {

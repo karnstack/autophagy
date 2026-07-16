@@ -79,19 +79,32 @@ final class AppModel: ObservableObject {
     }
 
     /// Re-run all queries against the open database.
+    ///
+    /// Re-opens the connection first so the read reflects the current on-disk
+    /// state: a cleanly checkpointed database is opened as a frozen `immutable`
+    /// snapshot, so without re-opening a reload would never surface rows written
+    /// since the reader was created (e.g. after a CLI import).
     func reload() {
         guard let reader else { return }
-        overview = reader.overview()
+        reader.refresh()
+        let currentOverview = reader.overview()
+        overview = currentOverview
         sessions = reader.sessions()
         patterns = reader.evidencePackets()
         mutations = reader.mutations()
-        menuBar = reader.menuBarSnapshot()
+        menuBar = reader.menuBarSnapshot(overview: currentOverview)
     }
 
     /// Refresh only the menu-bar summary. Cheap enough to call on menu open
-    /// without reloading every view's content.
+    /// without reloading every view's content. Re-opens the connection so the
+    /// summary advances past the initial snapshot.
     func refreshMenuBar() {
-        menuBar = reader?.menuBarSnapshot() ?? .disconnected
+        guard let reader else {
+            menuBar = .disconnected
+            return
+        }
+        reader.refresh()
+        menuBar = reader.menuBarSnapshot()
     }
 
     /// Return to onboarding and forget the remembered choice.

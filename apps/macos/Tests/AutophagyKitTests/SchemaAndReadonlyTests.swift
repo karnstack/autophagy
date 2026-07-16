@@ -100,6 +100,46 @@ struct SchemaAndReadonlyTests {
         #expect(reader.mutations().count == 2)
     }
 
+    @Test func refreshSurfacesRowsWrittenAfterOpen() throws {
+        // A cleanly checkpointed database is opened as a frozen immutable
+        // snapshot. The reader must advance past that snapshot on refresh so a
+        // viewer sees rows the engine wrote after the reader was created.
+        let path = FixtureDatabase.populated()
+        let temp = TempPath(path)
+        for suffix in ["-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: path + suffix)
+        }
+
+        let reader = try DatabaseReader(path: temp.path)
+        #expect(reader.sessions().count == 2)
+
+        // A separate *writable* connection — the engine's role, never the app's
+        // — adds a session, checkpoints, and leaves the file cleanly closed.
+        var writer: OpaquePointer?
+        #expect(sqlite3_open(path, &writer) == SQLITE_OK)
+        FixtureDatabase.exec(writer!, """
+        INSERT INTO sources(source_id, adapter, instance_key, display_name,
+                            first_seen_at, last_seen_at)
+        VALUES (2,'generic-jsonl','demo2','Demo2',
+                '2026-07-16T12:00:00Z','2026-07-16T12:00:00Z');
+        """)
+        FixtureDatabase.exec(writer!, """
+        INSERT INTO sessions(session_id, source_id, project_path, first_event_at,
+                             last_event_at, event_count)
+        VALUES ('ses_c',2,'/workspace/c','2026-07-16T12:00:00Z',
+                '2026-07-16T12:00:00Z',0);
+        """)
+        FixtureDatabase.exec(writer!, "PRAGMA wal_checkpoint(TRUNCATE);")
+        sqlite3_close(writer)
+        for suffix in ["-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: path + suffix)
+        }
+
+        // The frozen snapshot still reads its original state until re-opened.
+        reader.refresh()
+        #expect(reader.sessions().count == 3)
+    }
+
     @Test func nonAutophagyDatabaseIsRejectedNotCrashed() throws {
         let temp = TempPath(FixtureDatabase.make(schemaVersion: 0) { db in
             FixtureDatabase.exec(db, "CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);")
