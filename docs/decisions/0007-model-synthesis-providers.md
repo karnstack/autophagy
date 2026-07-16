@@ -77,7 +77,7 @@ The two shapes never mix and both remain first-class:
   validates, and round-trips byte-for-byte. A cross-field validator enforces the
   pairing (`0.1` ⇔ deterministic ⇔ no provenance; `0.2` ⇔ model synthesis ⇔
   provenance present).
-- The registry accepts both versions. Migration `0007_mutation_provenance`
+- The registry accepts both versions. Migration `0008_mutation_provenance`
   relaxes only the `mutation_candidates.spec_version` CHECK from a single literal
   to `('mutation/0.1', 'mutation/0.2')`, following the immutable-migration rule
   (new ordered migration, old ones untouched) and the established

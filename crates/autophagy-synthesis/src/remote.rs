@@ -159,9 +159,17 @@ fn send_json(
     api_key: Option<&str>,
     body: &Value,
 ) -> Result<String, ProviderError> {
+    // Redirects are DISABLED. ureq follows redirects by default, and a loopback
+    // endpoint that answered 3xx with a non-loopback `Location` would make ureq
+    // re-send the request — evidence and all — off the machine, bypassing the
+    // locality guard (which only inspects the configured URL). `max_redirects(0)`
+    // plus `max_redirects_will_error(false)` makes ureq return the 3xx response
+    // to us instead of following it; we then treat any 3xx as a transport error.
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(config.connect_timeout))
         .timeout_global(Some(config.request_timeout))
+        .max_redirects(0)
+        .max_redirects_will_error(false)
         .build()
         .into();
     let payload = serde_json::to_vec(body).map_err(|error| ProviderError::Transport {
@@ -177,6 +185,16 @@ fn send_json(
     let mut response = request
         .send(&payload[..])
         .map_err(|error| transport_error(config, &error))?;
+    if response.status().is_redirection() {
+        return Err(ProviderError::Transport {
+            endpoint: config.endpoint.clone(),
+            reason: format!(
+                "endpoint attempted an HTTP redirect (status {}); redirects are refused so \
+                 evidence is never re-sent to a different, possibly non-loopback, host",
+                response.status().as_u16()
+            ),
+        });
+    }
     response
         .body_mut()
         .read_to_string()

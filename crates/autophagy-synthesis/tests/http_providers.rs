@@ -12,8 +12,9 @@ use std::{
     time::Duration,
 };
 
-use autophagy_mutations::TriggerKind;
-use autophagy_mutations::{GenerationOutcome, MutationSpecVersion, generate_candidate};
+use autophagy_mutations::{
+    GenerationOutcome, MutationSpecVersion, TriggerKind, generate_candidate,
+};
 use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
 use autophagy_store::EventStore;
 use autophagy_synthesis::{
@@ -130,6 +131,25 @@ impl MockServer {
     /// Serve one request with the given status and JSON body.
     fn serve(status: u16, body: String) -> Self {
         Self::serve_after(status, body, Duration::ZERO)
+    }
+
+    /// Serve one request with a 307 redirect to `location`, then capture whether
+    /// a *second* request ever arrives (it must not: redirects are disabled).
+    fn serve_redirect(location: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
+        let location = location.to_owned();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let request = read_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            request
+        });
+        Self { endpoint, handle }
     }
 
     /// Serve one request after a delay (to force client-side timeouts).
@@ -342,6 +362,63 @@ fn connection_refused_surfaces_a_clean_provider_error() {
 }
 
 #[test]
+fn loopback_endpoint_redirect_to_remote_host_is_not_followed() {
+    // The vuln: a loopback endpoint answers 3xx with a non-loopback Location.
+    // If redirects were followed, ureq would re-send the request (evidence IDs
+    // and all) to that remote host, bypassing the locality guard. Redirects are
+    // disabled, so this must surface a structured transport error, not a follow.
+    let fixture = candidate_fixture();
+    let mock = MockServer::serve_redirect("http://evil.example.com/api/chat");
+    let manifest = manifest(ModelFormat::Ollama, &mock.endpoint, Some(1500));
+    let provider = OllamaProvider::from_manifest(&manifest, false);
+
+    let outcome = synthesize_candidate(&fixture.finding, &manifest, &provider);
+    let _ = mock.received_request();
+
+    let SynthesisOutcome::ProviderError { message, .. } = outcome else {
+        panic!("a redirect must produce a structured error, got {outcome:?}");
+    };
+    // The guard fired (the redirect was returned to us, not followed). Had ureq
+    // followed to evil.example.com, the failure would be a connection/DNS error,
+    // not a redirect refusal.
+    assert!(message.contains("redirect"), "message: {message}");
+    assert!(
+        !message.contains("evil.example.com"),
+        "the redirect target must never be contacted or echoed: {message}"
+    );
+}
+
+#[test]
+fn transport_error_path_never_echoes_the_api_key() {
+    // With an API key configured, a transport failure (connection refused) must
+    // still never leak the key value into the error surfaced to the user.
+    let fixture = candidate_fixture();
+    let key_value = std::env::var("CARGO_PKG_NAME").expect("cargo sets CARGO_PKG_NAME");
+    // A closed loopback port: the request fails after the key is attached.
+    let mut manifest = manifest(
+        ModelFormat::OpenAiCompatible,
+        "http://127.0.0.1:9",
+        Some(800),
+    );
+    manifest.api_key_env = Some("CARGO_PKG_NAME".to_owned());
+    let provider = OpenAiCompatibleProvider::from_manifest(&manifest, false);
+
+    let outcome = synthesize_candidate(&fixture.finding, &manifest, &provider);
+    let SynthesisOutcome::ProviderError { ref message, .. } = outcome else {
+        panic!("expected a transport error, got {outcome:?}");
+    };
+    assert!(
+        !message.contains(&key_value),
+        "transport error must never echo the API key value: {message}"
+    );
+    let outcome_json = serde_json::to_string(&outcome).expect("serialize outcome");
+    assert!(
+        !outcome_json.contains(&key_value),
+        "serialized outcome must never contain the API key value"
+    );
+}
+
+#[test]
 fn non_loopback_endpoint_is_refused_without_the_flag() {
     let fixture = candidate_fixture();
     let manifest = manifest(ModelFormat::Ollama, "http://model.example.com:11434", None);
@@ -450,6 +527,9 @@ fn request_from(finding: &EvidencePacket) -> Option<SynthesisRequest> {
 
 #[test]
 fn prompt_is_deterministic_and_carries_only_template_fields() {
+    // A raw tool input from the corpus with irregular spacing. The deterministic
+    // template normalizes it away, so it must never appear in the prompt.
+    const RAW_PAYLOAD_MARKER: &str = "mise   run check";
     let fixture = candidate_fixture();
     let request = request_from(&fixture.finding).expect("request");
     // Deterministic: same request always yields the same prompt.
@@ -463,6 +543,17 @@ fn prompt_is_deterministic_and_carries_only_template_fields() {
     // The system prompt states the JSON-only, cite-only, zero-permission rules.
     assert!(SYSTEM_PROMPT.contains("JSON"));
     assert!(SYSTEM_PROMPT.contains("permission"));
+    // Negative: only normalized, template-derived fields leave the process —
+    // never raw payloads. The raw marker is genuine corpus content but must not
+    // survive into the prompt.
+    assert!(
+        CORPUS.contains(RAW_PAYLOAD_MARKER),
+        "sanity: the raw marker must be genuine corpus content"
+    );
+    assert!(
+        !prompt.contains(RAW_PAYLOAD_MARKER),
+        "raw payload text must never leak into the model prompt"
+    );
 }
 
 #[test]
@@ -485,11 +576,12 @@ fn measured_prompt_size_over_the_fixture_corpus_is_bounded() {
         "PROMPT MEASUREMENT: candidates={count} max_prompt_chars={max_chars} \
          approx_prompt_tokens={approx_tokens} response_cap_tokens={MAX_COMPLETION_TOKENS}"
     );
-    // A structured, template-only prompt stays small: guard against accidental
-    // bloat (for example, ever including raw transcripts).
+    // A structured, template-only prompt stays small. This bound pins the figure
+    // quoted in docs/guides/synthesis.md (~693 approx tokens max); keep the doc
+    // and this bound in lockstep so the quoted number cannot drift silently.
     assert!(
-        approx_tokens < 2000,
-        "prompt unexpectedly large ({approx_tokens} approx tokens)"
+        approx_tokens <= 750,
+        "prompt exceeded the documented bound ({approx_tokens} approx tokens)"
     );
 }
 
