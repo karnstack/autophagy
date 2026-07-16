@@ -38,6 +38,7 @@ keeping every unreviewed counterfactual outcome explicitly unknown.
 ```text
 adapters/claude-code/      Native transcript discovery and AEP normalization
 adapters/codex/            Schema-tolerant Codex rollout normalization
+apps/macos/                Native read-only SwiftUI database inspector
 crates/autophagy-adapter-test-support/  Shared native-adapter conformance checks
 crates/autophagy-cli/      User-facing import, sessions, and search commands
 crates/autophagy-core/     Reusable streaming import application services

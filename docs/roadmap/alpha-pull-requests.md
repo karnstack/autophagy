@@ -48,6 +48,8 @@ evaluation gates.
 
 ## PR 5 — Native read-only experience
 
+Status: complete.
+
 - macOS onboarding and database selection
 - sessions, patterns, mutations, and lifecycle audit views
 - privacy settings and destructive-action confirmation
