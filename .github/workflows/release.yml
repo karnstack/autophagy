@@ -1,0 +1,134 @@
+name: Release
+
+# Dormant until a human pushes a `v*` tag. `workflow_dispatch` builds and
+# uploads the same artifacts for a manual smoke test but never creates a
+# release. Tag pushes additionally create a DRAFT GitHub release; a human still
+# has to publish it.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and upload workflow artifacts only; never create a release.
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-cli:
+    name: build CLI (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install tools with mise
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          version: 2026.6.1
+          cache: true
+
+      - name: Build autophagy CLI
+        run: mise exec -- cargo build --release --locked -p autophagy-cli
+
+      - name: Package CLI artifact
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          staging="autophagy-$TARGET"
+          mkdir -p "dist/$staging"
+          cp target/release/autophagy "dist/$staging/"
+          cp README.md LICENSE CHANGELOG.md "dist/$staging/"
+          tar -czf "dist/$staging.tar.gz" -C dist "$staging"
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: autophagy-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-macos-app:
+    name: build macOS app bundle
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build release app bundle
+        run: ./scripts/make-app-bundle.sh --configuration release
+        working-directory: apps/macos
+
+      - name: Package app bundle
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf dist/autophagy-macos-arm64-app.tar.gz -C apps/macos/build Autophagy.app
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: autophagy-macos-app
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  draft-release:
+    name: create draft GitHub release
+    needs:
+      - build-cli
+      - build-macos-app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Only tag pushes create a release; workflow_dispatch stays artifact-only.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find artifacts -type f -name '*.tar.gz' | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "no release assets were produced" >&2
+            exit 1
+          fi
+          printf 'attaching asset: %s\n' "${assets[@]}"
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --draft \
+            --title "$TAG" \
+            --notes "Draft release for $TAG. Review the attached artifacts, then publish manually." \
+            "${assets[@]}"
