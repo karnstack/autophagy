@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/replay/0.1/result.schema.json",
+  "title": "Autophagy Replay Result v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version",
+    "replay_id",
+    "mutation_id",
+    "mutation_version",
+    "scenario_set_hash",
+    "results",
+    "summary",
+    "policy",
+    "threshold_failures",
+    "passed",
+    "mutation_executed",
+    "model_used"
+  ],
+  "properties": {
+    "spec_version": { "const": "replay-result/0.1" },
+    "replay_id": { "type": "string", "pattern": "^rpl_[a-f0-9]{64}$" },
+    "mutation_id": { "type": "string", "pattern": "^mut_[A-Za-z0-9._:-]+$" },
+    "mutation_version": { "type": "string", "minLength": 1 },
+    "scenario_set_hash": { "type": "string", "pattern": "^rsh_[a-f0-9]{64}$" },
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scenario_id",
+          "source_event_ids",
+          "observed_trigger_selectors",
+          "triggered",
+          "expected_action",
+          "disposition"
+        ],
+        "properties": {
+          "scenario_id": { "type": "string", "pattern": "^rps_[A-Za-z0-9._:-]+$" },
+          "source_event_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]+$" }
+          },
+          "observed_trigger_selectors": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "triggered": { "type": "boolean" },
+          "expected_action": { "enum": ["intervene", "no_op"] },
+          "disposition": {
+            "enum": ["success", "no_op", "contradiction", "false_intervention"]
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenarios",
+        "successes",
+        "no_ops",
+        "contradictions",
+        "false_interventions",
+        "success_rate_bps",
+        "false_intervention_rate_bps"
+      ],
+      "properties": {
+        "scenarios": { "type": "integer", "minimum": 1 },
+        "successes": { "type": "integer", "minimum": 0 },
+        "no_ops": { "type": "integer", "minimum": 0 },
+        "contradictions": { "type": "integer", "minimum": 0 },
+        "false_interventions": { "type": "integer", "minimum": 0 },
+        "success_rate_bps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "false_intervention_rate_bps": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_replays",
+        "minimum_success_rate_bps",
+        "maximum_false_positive_rate_bps"
+      ],
+      "properties": {
+        "minimum_replays": { "type": "integer", "minimum": 1 },
+        "minimum_success_rate_bps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "maximum_false_positive_rate_bps": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      }
+    },
+    "threshold_failures": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "insufficient_scenarios",
+          "missing_intervention_coverage",
+          "missing_no_op_coverage",
+          "success_rate_below_minimum",
+          "false_intervention_rate_above_maximum"
+        ]
+      }
+    },
+    "passed": { "type": "boolean" },
+    "mutation_executed": { "const": false },
+    "model_used": { "const": false }
+  }
+}

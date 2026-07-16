@@ -66,8 +66,10 @@ Dry-run executes the same retention transaction and rolls it back. Pruning and
 session deletion cascade through events, FTS, conflicts, and event-artifact
 links, then remove orphaned artifacts. Any mutation candidate citing a deleted
 support or counterexample event is removed with its lifecycle audit; deletion
-summaries report that count. Delete-all also removes candidates, sources, import
-records, and incremental cursors.
+summaries report that count. The same rule applies to events cited by replay
+scenarios, preventing a passing evaluation from outliving its local evidence.
+Delete-all also removes candidates, sources, import records, and incremental
+cursors.
 
 SQLite uses `secure_delete`, but filesystem snapshots, backups, exported files,
 and previous database copies remain outside Autophagy's control. `VACUUM` is not

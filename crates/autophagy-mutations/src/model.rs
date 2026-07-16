@@ -29,6 +29,8 @@ pub enum LifecycleState {
     Candidate,
     /// Challenge checklist passed; replay is the next allowed gate.
     Challenged,
+    /// Deterministic replay coverage and thresholds passed.
+    ReplayPassed,
     /// A user rejected the candidate before activation.
     Rejected,
 }
@@ -40,6 +42,7 @@ impl LifecycleState {
         match self {
             Self::Candidate => "candidate",
             Self::Challenged => "challenged",
+            Self::ReplayPassed => "replay_passed",
             Self::Rejected => "rejected",
         }
     }

@@ -35,6 +35,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "immutable mutation candidate registry",
         sql: include_str!("../migrations/0003_mutation_registry.sql"),
     },
+    Migration {
+        version: 4,
+        description: "deterministic mutation replay evaluation",
+        sql: include_str!("../migrations/0004_replay_evaluation.sql"),
+    },
 ];
 
 pub(crate) fn apply(connection: &mut Connection) -> Result<(), StoreError> {
@@ -94,8 +99,8 @@ fn load_applied(connection: &Connection) -> Result<BTreeMap<i64, Vec<u8>>, rusql
 mod tests {
     use rusqlite::{Connection, params};
 
-    use super::apply;
-    use crate::StoreError;
+    use super::{BOOTSTRAP_SQL, MIGRATIONS, apply};
+    use crate::{StoreError, util};
 
     #[test]
     fn changed_applied_migration_is_rejected() {
@@ -121,14 +126,92 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO schema_migrations(version, description, checksum, applied_at)
-                 VALUES (4, 'future', ?1, '2026-07-16T00:00:00Z')",
+                 VALUES (5, 'future', ?1, '2026-07-16T00:00:00Z')",
                 params![[7_u8; 32].as_slice()],
             )
             .expect("future migration");
 
         assert!(matches!(
             apply(&mut connection),
-            Err(StoreError::DatabaseTooNew { version: 4 })
+            Err(StoreError::DatabaseTooNew { version: 5 })
         ));
+    }
+
+    #[test]
+    fn replay_migration_preserves_existing_candidate_and_audit() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .expect("foreign keys");
+        connection
+            .execute_batch(BOOTSTRAP_SQL)
+            .expect("migration table");
+        for migration in &MIGRATIONS[..3] {
+            connection.execute_batch(migration.sql).expect("old DDL");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version, description, checksum, applied_at)
+                     VALUES (?1, ?2, ?3, '2026-07-16T00:00:00Z')",
+                    params![
+                        migration.version,
+                        migration.description,
+                        util::sha256(migration.sql.as_bytes()).as_slice(),
+                    ],
+                )
+                .expect("old migration record");
+        }
+        connection
+            .execute(
+                "INSERT INTO mutation_candidates(
+                    mutation_id, source_finding_id, source_detector, equivalence_key,
+                    spec_version, semantic_version, state, package_json, content_hash,
+                    created_at, updated_at
+                 ) VALUES (
+                    'mut_upgrade', 'fnd_upgrade', 'test', 'eqv_upgrade',
+                    'mutation/0.1', '0.1.0', 'challenged', '{}', zeroblob(32),
+                    '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z'
+                 )",
+                [],
+            )
+            .expect("old candidate");
+        connection
+            .execute(
+                "INSERT INTO mutation_transitions(
+                    mutation_id, from_state, to_state, reason, metadata_json, occurred_at
+                 ) VALUES (
+                    'mut_upgrade', 'candidate', 'challenged', 'reviewed', '{}',
+                    '2026-07-16T00:00:00Z'
+                 )",
+                [],
+            )
+            .expect("old audit");
+
+        apply(&mut connection).expect("upgrade");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM mutation_candidates WHERE mutation_id = 'mut_upgrade'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("candidate state"),
+            "challenged"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM mutation_transitions WHERE mutation_id = 'mut_upgrade'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("audit count"),
+            1
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("schema version"),
+            4
+        );
     }
 }

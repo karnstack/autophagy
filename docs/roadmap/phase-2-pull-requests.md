@@ -28,6 +28,8 @@ activate it.
 
 ## PR 3 — Replay scenario contract
 
+Status: complete.
+
 - versioned decision-point and replay-result schemas
 - non-executable instruction replay fixtures
 - success, no-op, contradiction, and false-intervention measurement
