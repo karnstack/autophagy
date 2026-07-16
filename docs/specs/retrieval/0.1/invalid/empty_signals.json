@@ -1,0 +1,8 @@
+{
+  "spec_version": "retrieval/0.1",
+  "match_kind": "exact_signature",
+  "rank_score_bps": 10000,
+  "signals": [],
+  "applied_filters": [],
+  "tie_break": "documented rule"
+}

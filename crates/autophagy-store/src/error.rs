@@ -118,6 +118,9 @@ pub enum StoreError {
     /// Full-text search queries cannot be blank.
     #[error("search query must not be empty or whitespace")]
     EmptySearchQuery,
+    /// A retrieval supplied neither a full-text query nor an exact signature.
+    #[error("retrieval requires a text query, an exact signature, or both")]
+    EmptyRetrievalQuery,
     /// A mutation ID was not present in the registry.
     #[error("mutation '{mutation_id}' was not found")]
     MutationNotFound {

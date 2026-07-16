@@ -1,17 +1,31 @@
-use std::{collections::BTreeSet, path::Path, time::Duration};
+use std::{collections::BTreeMap, collections::BTreeSet, path::Path, time::Duration};
 
 use autophagy_events::{Event, EventKind};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
+    types::Value as SqlValue,
+};
 use time::OffsetDateTime;
 
 use crate::{
     DeleteAllSummary, DeleteSummary, InsertOutcome, InstallationRegistration,
     InstallationTransitionOutcome, MutationDetails, MutationInstallationRecord, MutationRecord,
     MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
-    MutationTransition, MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome,
-    ReplayRegistration, SearchHit, SearchProjection, SessionSummary, ShadowRegisterOutcome,
-    ShadowRegistration, SourceCursor, SourceIdentity, StoreError, StoreStats, migration, util,
+    MutationTransition, MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal,
+    RankingSignalKind, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
+    RetrievalFilterField, RetrievalHit, RetrievalMatchKind, RetrievalQuery, SearchHit,
+    SearchProjection, SessionSummary, ShadowRegisterOutcome, ShadowRegistration, SourceCursor,
+    SourceIdentity, StoreError, StoreStats, migration, util,
 };
+
+/// Score contribution for an exact normalized-signature match, in basis points.
+const EXACT_SIGNATURE_BPS: u32 = 10_000;
+/// Score contribution for a full-text match, in basis points.
+const FULL_TEXT_BPS: u32 = 5_000;
+/// Stable statement of the deterministic total ordering and tie-break rule.
+const TIE_BREAK: &str = "rank_score_bps descending (exact-signature matches outrank full-text-only \
+matches); within full-text matches, bm25 ascending; then occurred_at \
+descending (recency); then event_id ascending";
 
 /// Transactional owner of one local Autophagy `SQLite` database.
 pub struct EventStore {
@@ -161,6 +175,7 @@ impl EventStore {
     ///
     /// Returns [`StoreError`] when validation, serialization, provenance, or a
     /// transactional `SQLite` operation fails.
+    #[allow(clippy::too_many_lines)]
     pub fn insert_event(
         &mut self,
         source: &SourceIdentity,
@@ -262,6 +277,17 @@ impl EventStore {
                 search.searchable_text.as_deref().unwrap_or_default(),
             ],
         )?;
+
+        if let Some(signature) = search
+            .signature
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            transaction.execute(
+                "INSERT INTO event_signatures(event_row_id, signature) VALUES (?1, ?2)",
+                params![row_id, signature],
+            )?;
+        }
 
         insert_artifacts(&transaction, row_id, event)?;
         update_session_rollup(&transaction, event, &occurred_at)?;
@@ -428,6 +454,181 @@ impl EventStore {
                 event_id: row.get(0)?,
                 rank: row.get(1)?,
                 snippet: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Deterministically recall evidence by exact signature, full text, or both.
+    ///
+    /// Exact normalized-signature matches always outrank full-text-only matches
+    /// (exact-first hybrid ranking). The four repository, recency, event-kind,
+    /// and outcome filters narrow both match sources identically. Every hit
+    /// carries its exact event identifier and a versioned, deterministic ranking
+    /// explanation stating why it ranked where it did. No model is consulted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::EmptyRetrievalQuery`] when neither a full-text query
+    /// nor an exact signature is supplied, and [`StoreError`] for invalid FTS5
+    /// queries, timestamp formatting, or a `SQLite` failure.
+    pub fn retrieve(&self, query: &RetrievalQuery) -> Result<Vec<RetrievalHit>, StoreError> {
+        let text = query
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let signature = query.signature.as_deref().filter(|value| !value.is_empty());
+        if text.is_none() && signature.is_none() {
+            return Err(StoreError::EmptyRetrievalQuery);
+        }
+        if query.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let filters = retrieval_filters(query)?;
+        let signature_rows = match signature {
+            Some(signature) => self.signature_matches(signature, &filters, query.limit)?,
+            None => Vec::new(),
+        };
+        let text_rows = match text {
+            Some(text) => self.text_matches(text, &filters, query.limit)?,
+            None => Vec::new(),
+        };
+
+        let text_by_id = text_rows
+            .iter()
+            .map(|matched| {
+                (
+                    matched.row.event_id.clone(),
+                    (matched.bm25, matched.snippet.clone()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let signature_ids = signature_rows
+            .iter()
+            .map(|row| row.event_id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let mut scored: Vec<ScoredHit> = Vec::new();
+        for row in signature_rows {
+            if let Some((bm25, snippet)) = text_by_id.get(&row.event_id) {
+                scored.push(ScoredHit {
+                    match_kind: RetrievalMatchKind::SignatureAndFullText,
+                    score: EXACT_SIGNATURE_BPS + FULL_TEXT_BPS,
+                    bm25: Some(*bm25),
+                    snippet: Some(snippet.clone()),
+                    row,
+                });
+            } else {
+                scored.push(ScoredHit {
+                    match_kind: RetrievalMatchKind::ExactSignature,
+                    score: EXACT_SIGNATURE_BPS,
+                    bm25: None,
+                    snippet: None,
+                    row,
+                });
+            }
+        }
+        for matched in text_rows {
+            if signature_ids.contains(&matched.row.event_id) {
+                continue;
+            }
+            scored.push(ScoredHit {
+                match_kind: RetrievalMatchKind::FullText,
+                score: FULL_TEXT_BPS,
+                bm25: Some(matched.bm25),
+                snippet: Some(matched.snippet),
+                row: matched.row,
+            });
+        }
+
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| compare_bm25(left.bm25, right.bm25))
+                .then_with(|| right.row.occurred_at.cmp(&left.row.occurred_at))
+                .then_with(|| left.row.event_id.cmp(&right.row.event_id))
+        });
+        scored.truncate(query.limit as usize);
+
+        Ok(scored
+            .into_iter()
+            .map(|hit| hit.into_retrieval_hit(&filters.applied))
+            .collect())
+    }
+
+    fn signature_matches(
+        &self,
+        signature: &str,
+        filters: &RetrievalFilters,
+        limit: u32,
+    ) -> Result<Vec<RetrievalRow>, StoreError> {
+        let sql = format!(
+            "SELECT e.event_id, e.session_id, e.event_type, e.occurred_at,
+                    e.project_path, s.signature
+             FROM event_signatures s
+             JOIN events e ON e.row_id = s.event_row_id
+             WHERE s.signature = ?{filters}
+             ORDER BY e.occurred_at DESC, e.event_id ASC
+             LIMIT ?",
+            filters = filters.sql
+        );
+        let mut binds = Vec::with_capacity(filters.params.len() + 2);
+        binds.push(SqlValue::Text(signature.to_owned()));
+        binds.extend(filters.params.iter().cloned());
+        binds.push(SqlValue::Integer(i64::from(limit)));
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(binds), |row| {
+            Ok(RetrievalRow {
+                event_id: row.get(0)?,
+                session_id: row.get(1)?,
+                event_type: row.get(2)?,
+                occurred_at: row.get(3)?,
+                project: row.get(4)?,
+                signature: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    fn text_matches(
+        &self,
+        text: &str,
+        filters: &RetrievalFilters,
+        limit: u32,
+    ) -> Result<Vec<TextMatch>, StoreError> {
+        let sql = format!(
+            "SELECT e.event_id, e.session_id, e.event_type, e.occurred_at,
+                    e.project_path, sig.signature,
+                    bm25(events_fts),
+                    snippet(events_fts, -1, '[', ']', ' … ', 16)
+             FROM events_fts
+             JOIN events e ON e.row_id = events_fts.rowid
+             LEFT JOIN event_signatures sig ON sig.event_row_id = e.row_id
+             WHERE events_fts MATCH ?{filters}
+             ORDER BY bm25(events_fts), e.occurred_at DESC, e.event_id ASC
+             LIMIT ?",
+            filters = filters.sql
+        );
+        let mut binds = Vec::with_capacity(filters.params.len() + 2);
+        binds.push(SqlValue::Text(text.to_owned()));
+        binds.extend(filters.params.iter().cloned());
+        binds.push(SqlValue::Integer(i64::from(limit)));
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(binds), |row| {
+            Ok(TextMatch {
+                row: RetrievalRow {
+                    event_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    occurred_at: row.get(3)?,
+                    project: row.get(4)?,
+                    signature: row.get(5)?,
+                },
+                bm25: row.get(6)?,
+                snippet: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -1981,4 +2182,175 @@ fn update_session_rollup(
         ],
     )?;
     Ok(())
+}
+
+/// Compiled filter clause plus its ordered parameters and echoed descriptions.
+struct RetrievalFilters {
+    applied: Vec<RetrievalFilter>,
+    sql: String,
+    params: Vec<SqlValue>,
+}
+
+/// Compile the four retrieval filters into one shared, parameterized clause.
+///
+/// The same clause and parameters are appended to both the exact-signature and
+/// full-text queries so a filter includes or excludes identically regardless of
+/// which match source found the event.
+fn retrieval_filters(query: &RetrievalQuery) -> Result<RetrievalFilters, StoreError> {
+    let mut applied = Vec::new();
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<SqlValue> = Vec::new();
+
+    if let Some(project) = query
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        clauses.push("e.project_path = ?".to_owned());
+        params.push(SqlValue::Text(project.to_owned()));
+        applied.push(RetrievalFilter {
+            field: RetrievalFilterField::Project,
+            value: project.to_owned(),
+        });
+    }
+    if let Some(since) = query.since {
+        let since = util::canonical_timestamp(since)?;
+        clauses.push("e.occurred_at >= ?".to_owned());
+        params.push(SqlValue::Text(since.clone()));
+        applied.push(RetrievalFilter {
+            field: RetrievalFilterField::Since,
+            value: since,
+        });
+    }
+    let kinds = query
+        .event_kinds
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !kinds.is_empty() {
+        let placeholders = vec!["?"; kinds.len()].join(", ");
+        clauses.push(format!("e.event_type IN ({placeholders})"));
+        for kind in &kinds {
+            params.push(SqlValue::Text(kind.clone()));
+        }
+        applied.push(RetrievalFilter {
+            field: RetrievalFilterField::EventKind,
+            value: kinds.join(","),
+        });
+    }
+    if let Some(outcome) = query.outcome {
+        clauses.push("e.event_type IN (?, ?)".to_owned());
+        for event_type in outcome.event_types() {
+            params.push(SqlValue::Text(event_type.to_owned()));
+        }
+        applied.push(RetrievalFilter {
+            field: RetrievalFilterField::Outcome,
+            value: outcome.as_str().to_owned(),
+        });
+    }
+
+    let sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", clauses.join(" AND "))
+    };
+    Ok(RetrievalFilters {
+        applied,
+        sql,
+        params,
+    })
+}
+
+/// Common columns projected by both retrieval match sources.
+struct RetrievalRow {
+    event_id: String,
+    session_id: String,
+    event_type: String,
+    occurred_at: String,
+    project: Option<String>,
+    signature: Option<String>,
+}
+
+/// One full-text match with its bm25 relevance and snippet.
+struct TextMatch {
+    row: RetrievalRow,
+    bm25: f64,
+    snippet: String,
+}
+
+/// One scored candidate hit before final ordering and truncation.
+struct ScoredHit {
+    row: RetrievalRow,
+    match_kind: RetrievalMatchKind,
+    score: u32,
+    bm25: Option<f64>,
+    snippet: Option<String>,
+}
+
+impl ScoredHit {
+    fn into_retrieval_hit(self, applied_filters: &[RetrievalFilter]) -> RetrievalHit {
+        let mut signals = Vec::new();
+        if matches!(
+            self.match_kind,
+            RetrievalMatchKind::ExactSignature | RetrievalMatchKind::SignatureAndFullText
+        ) {
+            signals.push(RankingSignal {
+                kind: RankingSignalKind::ExactSignature,
+                contribution_bps: EXACT_SIGNATURE_BPS,
+                detail: self.row.signature.as_ref().map_or_else(
+                    || "exact normalized signature match".to_owned(),
+                    |signature| format!("exact match on signature {signature}"),
+                ),
+            });
+        }
+        if let Some(bm25) = self.bm25 {
+            signals.push(RankingSignal {
+                kind: RankingSignalKind::FullText,
+                contribution_bps: FULL_TEXT_BPS,
+                detail: format!("full-text match (bm25 {bm25})"),
+            });
+        }
+        signals.push(RankingSignal {
+            kind: RankingSignalKind::Recency,
+            contribution_bps: 0,
+            detail: format!(
+                "occurred_at {} breaks ties within a tier (newer first)",
+                self.row.occurred_at
+            ),
+        });
+
+        RetrievalHit {
+            event_id: self.row.event_id,
+            session_id: self.row.session_id,
+            event_type: self.row.event_type,
+            occurred_at: self.row.occurred_at,
+            project: self.row.project,
+            signature: self.row.signature,
+            snippet: self.snippet,
+            explanation: RankingExplanation {
+                spec_version: "retrieval/0.1",
+                match_kind: self.match_kind,
+                rank_score_bps: self.score,
+                signals,
+                applied_filters: applied_filters.to_vec(),
+                tie_break: TIE_BREAK,
+            },
+        }
+    }
+}
+
+/// Order two bm25 relevances ascending (better matches first) deterministically.
+///
+/// Within a single score tier both operands are always present, so the mixed
+/// cases only guard against misuse and never affect real orderings.
+fn compare_bm25(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }

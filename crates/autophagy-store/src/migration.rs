@@ -45,6 +45,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "shadow evaluation and reversible installation",
         sql: include_str!("../migrations/0005_shadow_install.sql"),
     },
+    Migration {
+        version: 6,
+        description: "exact normalized-signature retrieval index",
+        sql: include_str!("../migrations/0006_retrieval_signature.sql"),
+    },
 ];
 
 pub(crate) fn apply(connection: &mut Connection) -> Result<(), StoreError> {
@@ -131,14 +136,14 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO schema_migrations(version, description, checksum, applied_at)
-                 VALUES (6, 'future', ?1, '2026-07-16T00:00:00Z')",
+                 VALUES (7, 'future', ?1, '2026-07-16T00:00:00Z')",
                 params![[7_u8; 32].as_slice()],
             )
             .expect("future migration");
 
         assert!(matches!(
             apply(&mut connection),
-            Err(StoreError::DatabaseTooNew { version: 6 })
+            Err(StoreError::DatabaseTooNew { version: 7 })
         ));
     }
 
@@ -238,7 +243,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .expect("schema version"),
-            5
+            6
         );
     }
 }

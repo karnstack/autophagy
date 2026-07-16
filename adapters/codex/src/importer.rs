@@ -388,6 +388,11 @@ fn search_projection(event: &Event, options: &CodexImportOptions) -> SearchProje
     SearchProjection {
         tool_input_text,
         searchable_text: (!searchable_text.is_empty()).then_some(searchable_text),
+        signature: options
+            .index_tool_input
+            .then(|| autophagy_events::signature::normalize_operation(event))
+            .flatten()
+            .map(|operation| operation.operation_key()),
     }
 }
 

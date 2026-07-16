@@ -1,0 +1,14 @@
+{
+  "spec_version": "retrieval/0.2",
+  "match_kind": "full_text",
+  "rank_score_bps": 5000,
+  "signals": [
+    {
+      "kind": "full_text",
+      "contribution_bps": 5000,
+      "detail": "full-text match (bm25 -0.8)"
+    }
+  ],
+  "applied_filters": [],
+  "tie_break": "documented rule"
+}

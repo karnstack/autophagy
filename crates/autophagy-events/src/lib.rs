@@ -7,6 +7,7 @@
 mod error;
 mod event;
 mod id;
+pub mod signature;
 
 pub use error::{EventParseError, ValidationError, ValidationErrors};
 pub use event::{Artifact, ArtifactKind, Event, EventKind, SpecVersion, ToolCall};

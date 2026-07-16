@@ -8,8 +8,9 @@ use autophagy_events::{
 use autophagy_store::{
     DeleteAllSummary, DeleteSummary, EventStore, InsertOutcome, InstallationRegistration,
     InstallationTransitionOutcome, MutationRegisterOutcome, MutationRegistration, PruneSummary,
-    ReplayRegisterOutcome, ReplayRegistration, SearchProjection, ShadowRegisterOutcome,
-    ShadowRegistration, SourceCursor, SourceIdentity, StoreError, StoreStats,
+    ReplayRegisterOutcome, ReplayRegistration, RetrievalMatchKind, RetrievalOutcome,
+    RetrievalQuery, SearchProjection, ShadowRegisterOutcome, ShadowRegistration, SourceCursor,
+    SourceIdentity, StoreError, StoreStats,
 };
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -29,7 +30,7 @@ fn migrations_persist_and_reopen_cleanly() {
 
     {
         let mut store = EventStore::open(&database).expect("store should open");
-        assert_eq!(store.schema_version().expect("schema version"), 5);
+        assert_eq!(store.schema_version().expect("schema version"), 6);
         assert!(matches!(
             store
                 .insert_event(&source, &event, &SearchProjection::default())
@@ -39,7 +40,7 @@ fn migrations_persist_and_reopen_cleanly() {
     }
 
     let reopened = EventStore::open(&database).expect("store should reopen");
-    assert_eq!(reopened.schema_version().expect("schema version"), 5);
+    assert_eq!(reopened.schema_version().expect("schema version"), 6);
     assert_eq!(
         reopened
             .get_event(event.event_id.as_str())
@@ -104,6 +105,7 @@ fn insertion_rolls_up_sessions_and_indexes_only_approved_text() {
     let approved = SearchProjection {
         tool_input_text: Some("pytest translation".to_owned()),
         searchable_text: Some("generated client was stale".to_owned()),
+        signature: None,
     };
 
     store
@@ -195,6 +197,7 @@ fn duplicate_is_a_noop_and_conflicting_content_is_quarantined() {
             &SearchProjection {
                 tool_input_text: None,
                 searchable_text: Some("first projection".to_owned()),
+                signature: None,
             },
         )
         .expect("first insert");
@@ -211,6 +214,7 @@ fn duplicate_is_a_noop_and_conflicting_content_is_quarantined() {
                 &SearchProjection {
                     tool_input_text: None,
                     searchable_text: Some("must not replace projection".to_owned()),
+                    signature: None,
                 },
             )
             .expect("duplicate insert"),
@@ -366,6 +370,7 @@ fn deleting_sessions_cascades_search_and_only_orphaned_artifacts() {
             &SearchProjection {
                 tool_input_text: None,
                 searchable_text: Some("delete marker one".to_owned()),
+                signature: None,
             },
         )
         .expect("first insert");
@@ -376,6 +381,7 @@ fn deleting_sessions_cascades_search_and_only_orphaned_artifacts() {
             &SearchProjection {
                 tool_input_text: None,
                 searchable_text: Some("delete marker two".to_owned()),
+                signature: None,
             },
         )
         .expect("second insert");
@@ -849,4 +855,388 @@ fn file_artifact(path: &str) -> Artifact {
         digest: None,
         metadata: BTreeMap::new(),
     }
+}
+
+const RETRIEVAL_SCHEMA: &str = include_str!("../../../docs/specs/retrieval/0.1/schema.json");
+const RETRIEVAL_VALID: &[&str] = &[
+    include_str!("../../../docs/specs/retrieval/0.1/valid/exact_signature.json"),
+    include_str!("../../../docs/specs/retrieval/0.1/valid/hybrid_with_filters.json"),
+];
+const RETRIEVAL_INVALID: &[&str] = &[
+    include_str!("../../../docs/specs/retrieval/0.1/invalid/unknown_match_kind.json"),
+    include_str!("../../../docs/specs/retrieval/0.1/invalid/bad_spec_version.json"),
+    include_str!("../../../docs/specs/retrieval/0.1/invalid/score_out_of_range.json"),
+    include_str!("../../../docs/specs/retrieval/0.1/invalid/empty_signals.json"),
+    include_str!("../../../docs/specs/retrieval/0.1/invalid/unknown_field.json"),
+    include_str!("../../../docs/specs/retrieval/0.1/invalid/bad_signal_kind.json"),
+];
+
+#[test]
+fn ranking_explanations_match_the_versioned_schema() {
+    let schema: Value = serde_json::from_str(RETRIEVAL_SCHEMA).expect("schema JSON");
+    assert_eq!(
+        schema["properties"]["spec_version"]["const"],
+        "retrieval/0.1"
+    );
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+
+    for fixture in RETRIEVAL_VALID {
+        let instance: Value = serde_json::from_str(fixture).expect("valid fixture JSON");
+        assert!(validator.is_valid(&instance), "schema rejected {fixture}");
+    }
+    for fixture in RETRIEVAL_INVALID {
+        let instance: Value = serde_json::from_str(fixture).expect("invalid fixture JSON");
+        assert!(!validator.is_valid(&instance), "schema accepted {fixture}");
+    }
+
+    // A ranking explanation produced by the store conforms to its own contract.
+    let store = seed_retrieval_store();
+    let hits = store
+        .retrieve(&RetrievalQuery {
+            text: Some("succeeded".to_owned()),
+            signature: Some(BUILD_SIG.to_owned()),
+            project: Some("/repo/alpha".to_owned()),
+            outcome: Some(RetrievalOutcome::Success),
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("retrieve");
+    assert!(!hits.is_empty());
+    for hit in &hits {
+        let explanation = serde_json::to_value(&hit.explanation).expect("serialize explanation");
+        assert!(
+            validator.is_valid(&explanation),
+            "store produced an explanation the schema rejects: {explanation}"
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retrieval_event(
+    event_id: &str,
+    session_id: &str,
+    kind: EventKind,
+    command: &str,
+    exit_code: Option<i64>,
+    project: &str,
+    timestamp: &str,
+    sequence: u64,
+) -> Event {
+    let mut event = session_event(event_id, session_id, kind, timestamp, sequence);
+    event.project = Some(project.to_owned());
+    event.tool = Some(ToolCall {
+        name: "bash".to_owned(),
+        input: Some(Value::String(command.to_owned())),
+        exit_code,
+        duration_ms: Some(50),
+        metadata: BTreeMap::new(),
+    });
+    event
+}
+
+fn retrieval_projection(searchable: &str, signature: &str) -> SearchProjection {
+    SearchProjection {
+        tool_input_text: None,
+        searchable_text: Some(searchable.to_owned()),
+        signature: Some(signature.to_owned()),
+    }
+}
+
+fn hit_ids(hits: &[autophagy_store::RetrievalHit]) -> Vec<&str> {
+    hits.iter().map(|hit| hit.event_id.as_str()).collect()
+}
+
+const BUILD_SIG: &str = "operation/v1|shell|cargo build";
+const TEST_SIG: &str = "operation/v1|shell|npm test";
+
+fn seed_retrieval_store() -> EventStore {
+    let mut store = EventStore::open_in_memory().expect("store");
+    let source = source("instance-retrieval");
+    let events = [
+        // Session A, project alpha: two runs of `cargo build`.
+        (
+            retrieval_event(
+                "evt_a1",
+                "ses_alpha",
+                EventKind::ToolFailed,
+                "cargo build",
+                Some(1),
+                "/repo/alpha",
+                "2026-07-10T00:00:00Z",
+                0,
+            ),
+            retrieval_projection("compile error occurred", BUILD_SIG),
+        ),
+        (
+            retrieval_event(
+                "evt_a2",
+                "ses_alpha",
+                EventKind::ToolCompleted,
+                "cargo build",
+                Some(0),
+                "/repo/alpha",
+                "2026-07-11T00:00:00Z",
+                1,
+            ),
+            retrieval_projection("build succeeded cleanly", BUILD_SIG),
+        ),
+        // Session B, project beta: a `cargo build` failure and an `npm test`.
+        (
+            retrieval_event(
+                "evt_b1",
+                "ses_beta",
+                EventKind::ToolFailed,
+                "cargo build",
+                Some(2),
+                "/repo/beta",
+                "2026-07-12T00:00:00Z",
+                0,
+            ),
+            retrieval_projection("linker failed loudly", BUILD_SIG),
+        ),
+        (
+            retrieval_event(
+                "evt_b2",
+                "ses_beta",
+                EventKind::ToolCompleted,
+                "npm test",
+                Some(0),
+                "/repo/beta",
+                "2026-07-13T00:00:00Z",
+                1,
+            ),
+            retrieval_projection("suite succeeded overall", TEST_SIG),
+        ),
+    ];
+    for (event, projection) in &events {
+        store
+            .insert_event(&source, event, projection)
+            .expect("insert retrieval event");
+    }
+    store
+}
+
+#[test]
+fn exact_signature_lookup_orders_by_recency_then_id() {
+    let store = seed_retrieval_store();
+    let hits = store
+        .retrieve(&RetrievalQuery {
+            signature: Some(BUILD_SIG.to_owned()),
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("signature lookup");
+    // Newest matching event first; every hit is an exact-signature match.
+    assert_eq!(hit_ids(&hits), ["evt_b1", "evt_a2", "evt_a1"]);
+    assert!(hits.iter().all(|hit| {
+        hit.explanation.match_kind == RetrievalMatchKind::ExactSignature
+            && hit.explanation.rank_score_bps == 10_000
+            && hit.explanation.spec_version == "retrieval/0.1"
+    }));
+}
+
+#[test]
+fn exact_signature_matches_outrank_full_text_only_matches() {
+    let store = seed_retrieval_store();
+    let hits = store
+        .retrieve(&RetrievalQuery {
+            text: Some("succeeded".to_owned()),
+            signature: Some(BUILD_SIG.to_owned()),
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("hybrid retrieval");
+    // evt_a2 matches both the signature and the text (highest), then the
+    // remaining exact-signature matches, then the full-text-only match evt_b2.
+    assert_eq!(hit_ids(&hits), ["evt_a2", "evt_b1", "evt_a1", "evt_b2"]);
+    assert_eq!(
+        hits[0].explanation.match_kind,
+        RetrievalMatchKind::SignatureAndFullText
+    );
+    assert_eq!(hits[0].explanation.rank_score_bps, 15_000);
+    assert_eq!(
+        hits[1].explanation.match_kind,
+        RetrievalMatchKind::ExactSignature
+    );
+    assert_eq!(hits[1].explanation.rank_score_bps, 10_000);
+    assert_eq!(hits[3].explanation.match_kind, RetrievalMatchKind::FullText);
+    assert_eq!(hits[3].explanation.rank_score_bps, 5_000);
+    // The exact-signature tier strictly outranks the full-text-only tier.
+    assert!(hits[2].explanation.rank_score_bps > hits[3].explanation.rank_score_bps);
+}
+
+#[test]
+fn filters_include_and_exclude_deterministically() {
+    let store = seed_retrieval_store();
+
+    let by_project = store
+        .retrieve(&RetrievalQuery {
+            signature: Some(BUILD_SIG.to_owned()),
+            project: Some("/repo/alpha".to_owned()),
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("project filter");
+    assert_eq!(hit_ids(&by_project), ["evt_a2", "evt_a1"]);
+    assert!(by_project.iter().all(|hit| {
+        hit.explanation
+            .applied_filters
+            .iter()
+            .any(|filter| filter.value == "/repo/alpha")
+    }));
+
+    let failures = store
+        .retrieve(&RetrievalQuery {
+            signature: Some(BUILD_SIG.to_owned()),
+            outcome: Some(RetrievalOutcome::Failure),
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("outcome filter");
+    assert_eq!(hit_ids(&failures), ["evt_b1", "evt_a1"]);
+
+    let completed = store
+        .retrieve(&RetrievalQuery {
+            signature: Some(BUILD_SIG.to_owned()),
+            event_kinds: vec!["tool.completed".to_owned()],
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("event-kind filter");
+    assert_eq!(hit_ids(&completed), ["evt_a2"]);
+
+    let recent = store
+        .retrieve(&RetrievalQuery {
+            signature: Some(BUILD_SIG.to_owned()),
+            since: Some(OffsetDateTime::parse("2026-07-11T00:00:00Z", &Rfc3339).expect("since")),
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("recency filter");
+    assert_eq!(hit_ids(&recent), ["evt_b1", "evt_a2"]);
+}
+
+#[test]
+fn identical_timestamps_break_ties_by_event_id() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    let source = source("instance-tie");
+    for event_id in ["evt_tie_b", "evt_tie_a"] {
+        store
+            .insert_event(
+                &source,
+                &retrieval_event(
+                    event_id,
+                    "ses_tie",
+                    EventKind::ToolFailed,
+                    "cargo build",
+                    Some(1),
+                    "/repo/alpha",
+                    "2026-07-14T00:00:00Z",
+                    u64::from(event_id != "evt_tie_b"),
+                ),
+                &retrieval_projection("same instant", BUILD_SIG),
+            )
+            .expect("tie event");
+    }
+    let hits = store
+        .retrieve(&RetrievalQuery {
+            signature: Some(BUILD_SIG.to_owned()),
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("tie retrieval");
+    // Equal score and equal timestamp resolve by ascending event_id.
+    assert_eq!(hit_ids(&hits), ["evt_tie_a", "evt_tie_b"]);
+}
+
+#[test]
+fn empty_retrieval_query_is_rejected() {
+    let store = seed_retrieval_store();
+    assert!(matches!(
+        store.retrieve(&RetrievalQuery {
+            limit: 10,
+            ..RetrievalQuery::default()
+        }),
+        Err(StoreError::EmptyRetrievalQuery)
+    ));
+}
+
+#[test]
+fn signature_index_preserves_idempotency_quarantine_and_deletion() {
+    let mut store = seed_retrieval_store();
+    let source = source("instance-retrieval");
+    let query = RetrievalQuery {
+        signature: Some(BUILD_SIG.to_owned()),
+        limit: 10,
+        ..RetrievalQuery::default()
+    };
+    assert_eq!(store.retrieve(&query).expect("baseline").len(), 3);
+
+    // Reimporting an identical event is a no-op and does not duplicate the index.
+    assert!(matches!(
+        store
+            .insert_event(
+                &source,
+                &retrieval_event(
+                    "evt_a1",
+                    "ses_alpha",
+                    EventKind::ToolFailed,
+                    "cargo build",
+                    Some(1),
+                    "/repo/alpha",
+                    "2026-07-10T00:00:00Z",
+                    0,
+                ),
+                &retrieval_projection("compile error occurred", BUILD_SIG),
+            )
+            .expect("duplicate insert"),
+        InsertOutcome::Duplicate { .. }
+    ));
+    assert_eq!(store.retrieve(&query).expect("after duplicate").len(), 3);
+
+    // A conflicting reuse of an event ID quarantines and never re-indexes.
+    let mut conflicting = retrieval_event(
+        "evt_a1",
+        "ses_alpha",
+        EventKind::ToolFailed,
+        "cargo build --release",
+        Some(9),
+        "/repo/alpha",
+        "2026-07-10T00:00:00Z",
+        0,
+    );
+    conflicting
+        .metadata
+        .insert("drift".to_owned(), json!("conflicting"));
+    assert!(matches!(
+        store
+            .insert_event(
+                &source,
+                &conflicting,
+                &retrieval_projection("conflicting", "operation/v1|shell|cargo build --release"),
+            )
+            .expect("conflict insert"),
+        InsertOutcome::ConflictQuarantined { .. }
+    ));
+    assert_eq!(
+        hit_ids(&store.retrieve(&query).expect("after conflict")).len(),
+        3
+    );
+    assert!(
+        store
+            .retrieve(&RetrievalQuery {
+                signature: Some("operation/v1|shell|cargo build --release".to_owned()),
+                limit: 10,
+                ..RetrievalQuery::default()
+            })
+            .expect("conflict signature")
+            .is_empty()
+    );
+
+    // Deleting a session cascades its signature index rows.
+    store.delete_session("ses_alpha").expect("delete session");
+    assert_eq!(
+        hit_ids(&store.retrieve(&query).expect("after delete")),
+        ["evt_b1"]
+    );
 }

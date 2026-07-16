@@ -3,9 +3,78 @@
 use std::io::Cursor;
 
 use autophagy_core::{ImportDiagnosticCode, ImportOptions, import_jsonl};
-use autophagy_store::{EventStore, StoreStats};
+use autophagy_store::{EventStore, RetrievalMatchKind, RetrievalQuery, StoreStats};
 
 const MIXED: &str = include_str!("fixtures/mixed.jsonl");
+const RETRIEVAL: &str = include_str!("../../../evals/fixtures/retrieval/deterministic.jsonl");
+
+const BUILD_SIG: &str = "operation/v1|shell|cargo build";
+
+fn hit_ids(hits: &[autophagy_store::RetrievalHit]) -> Vec<String> {
+    hits.iter().map(|hit| hit.event_id.clone()).collect()
+}
+
+#[test]
+fn retrieval_corpus_recalls_exact_and_hybrid_matches_predictably() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    let mut options = ImportOptions::new("fixture:retrieval");
+    options.index_tool_input = true;
+    options.index_metadata = vec!["note".to_owned()];
+    let summary = import_jsonl(Cursor::new(RETRIEVAL), Some(&mut store), &options).expect("import");
+    assert_eq!(summary.inserted, 4);
+
+    // Exact normalized-signature lookup collapses `bash`, `exec_command`, and
+    // whitespace variants into one signature and orders by recency.
+    let exact = store
+        .retrieve(&RetrievalQuery {
+            signature: Some(BUILD_SIG.to_owned()),
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("exact");
+    assert_eq!(hit_ids(&exact), ["evt_r3", "evt_r2", "evt_r1"]);
+
+    // Hybrid: an exact-signature-plus-text match leads, then remaining
+    // exact-signature matches, then the full-text-only match.
+    let hybrid = store
+        .retrieve(&RetrievalQuery {
+            text: Some("succeeded".to_owned()),
+            signature: Some(BUILD_SIG.to_owned()),
+            limit: 10,
+            ..RetrievalQuery::default()
+        })
+        .expect("hybrid");
+    assert_eq!(hit_ids(&hybrid), ["evt_r2", "evt_r3", "evt_r1", "evt_r4"]);
+    assert_eq!(
+        hybrid[0].explanation.match_kind,
+        RetrievalMatchKind::SignatureAndFullText
+    );
+    assert_eq!(
+        hybrid[3].explanation.match_kind,
+        RetrievalMatchKind::FullText
+    );
+}
+
+#[test]
+fn signature_index_respects_the_tool_input_redaction_gate() {
+    // Without explicit tool-input indexing approval, no signature is indexed,
+    // so exact-signature lookup recalls nothing even though events are stored.
+    let mut store = EventStore::open_in_memory().expect("store");
+    let mut options = ImportOptions::new("fixture:retrieval-gated");
+    options.index_metadata = vec!["note".to_owned()];
+    let summary = import_jsonl(Cursor::new(RETRIEVAL), Some(&mut store), &options).expect("import");
+    assert_eq!(summary.inserted, 4);
+    assert!(
+        store
+            .retrieve(&RetrievalQuery {
+                signature: Some(BUILD_SIG.to_owned()),
+                limit: 10,
+                ..RetrievalQuery::default()
+            })
+            .expect("gated retrieval")
+            .is_empty()
+    );
+}
 
 #[test]
 fn streams_selected_records_and_reports_bounded_diagnostics() {

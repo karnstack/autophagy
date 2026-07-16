@@ -27,6 +27,8 @@ counterfactual label before evaluation.
 
 ## PR 3 — Exact and hybrid retrieval
 
+Status: complete.
+
 - exact normalized signature lookup alongside FTS5
 - repository, recency, event-kind, and outcome filters
 - versioned ranking explanations and retrieval evaluation fixtures
