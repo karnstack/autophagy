@@ -1,208 +1,184 @@
 # Autophagy
 
-**The self-improvement layer for local coding agents.**
+**Your coding AI keeps making the same mistakes. Autophagy notices, and teaches
+it to stop.**
 
-Autophagy observes local coding-agent sessions, detects repeated failures and
-successful recovery paths, and turns them into tested, versioned, reversible
-behavioral improvements called mutations.
+Coding assistants like Claude Code and Codex are great at writing code, but
+they forget everything between sessions — so the same failed command, the
+same wrong assumption, the same fix you had to explain last week happens again
+this week. Autophagy quietly watches how your AI assistant works on your own
+computer, spots the mistakes it keeps repeating and what actually fixed them,
+and turns those into small, reviewed lessons the assistant can use next time.
+Nothing leaves your machine unless you decide it should.
 
-Memory asks, “What happened before?” Autophagy asks, “What should permanently
-change because of what happened?”
+## What it does
 
-## Status
+- **Watches your AI coding sessions**, locally, as they happen — no cloud, no
+  account required.
+- **Finds the repeats**: the same command failing over and over, the same
+  correction you keep giving, and the fix that actually worked afterward.
+- **Suggests small "lessons"** — precise, narrowly-scoped improvements, never
+  vague advice — each one linked back to the exact moments that justify it.
+- **You review and approve everything.** Nothing is installed or changed on
+  your behalf without you looking at it first.
+- **Tests a lesson against your own history before it's ever used**, so you
+  can see whether it would have helped in the past, not just hope it helps in
+  the future.
+- **Stays on your machine.** Autophagy is offline by default; it only reaches
+  out to a model if you explicitly configure one.
 
-The local-only Milestone 1 engine is implemented: AEP v0.1, transactional
-SQLite storage, generic JSONL plus Claude Code and Codex adapters, deterministic
-evidence-linked findings, ingestion redaction, retention, export, and deletion.
-Phase 2 is implemented end to end for one deliberately narrow target. Users can
-inspect, challenge, replay, shadow-test, explicitly install, and reversibly
-uninstall a zero-permission instruction as a repo-scoped Codex skill. No daemon,
-executable replay, autonomous installation, global skill writes, or background
-capture ships yet.
+## Works with
 
-The alpha is complete. It adds a third deterministic family — repeated
-successful recovery motifs with direct-retry counterexamples and conservative
-preflight candidates — and derives Replay Suite review drafts from exact
-mutation evidence while keeping every unreviewed counterfactual outcome
-explicitly unknown. It also adds exact and hybrid retrieval (`autophagy search`
-combines exact normalized-signature lookup with FTS5 and attaches a versioned
-ranking explanation to every result), a provider-neutral local synthesis
-boundary that lets a local model propose richer mutations without bypassing any
-contract or evaluation gate, and a native read-only macOS app for inspecting
-sessions, patterns, mutations, and lifecycle audits. The first release is being
-prepared; the workspace version is `0.1.0-alpha.1` and nothing is published yet.
+Claude Code, Codex, [Pi](https://github.com/badlogic/pi-mono), OpenCode, or any
+tool that can export a plain JSONL transcript.
 
-## Principles
+**Optional:** plug in a local model (via [Ollama](https://ollama.com)) or a
+local OpenAI-compatible server to get richer, more nuanced suggestions.
+Autophagy works fully without one — the built-in deterministic engine needs no
+model at all. With one, every request's cost is measured in tokens and shown
+to you; nothing is sent anywhere without your manifest saying so. See the
+[synthesis guide](docs/guides/synthesis.md).
 
-- Local-first and offline by default
-- Evidence over eloquence
-- Models propose; deterministic evaluation proves
-- Concrete, permission-scoped, reversible behavior only
-- Honest silence when evidence is insufficient
+## Quick start
 
-## Repository map
-
-```text
-adapters/claude-code/      Native transcript discovery and AEP normalization
-adapters/codex/            Schema-tolerant Codex rollout normalization
-adapters/opencode/         Schema-tolerant OpenCode session-storage normalization
-adapters/pi/               Schema-tolerant Pi session transcript normalization
-apps/macos/                Native read-only SwiftUI database inspector
-crates/autophagy-adapter-test-support/  Shared native-adapter conformance checks
-crates/autophagy-cli/      User-facing import, sessions, and search commands
-crates/autophagy-core/     Reusable streaming import application services
-crates/autophagy-events/   AEP Rust types, parsing, and validation
-crates/autophagy-install/  Explicit reversible Codex skill materialization
-crates/autophagy-mutations/ Versioned review-only mutation candidates
-crates/autophagy-patterns/ Model-free recurrence detectors and evidence packets
-crates/autophagy-redaction/ Secret rules and project/artifact path policy
-crates/autophagy-replay/    Non-executable deterministic replay evaluation
-crates/autophagy-shadow/    Observation-only trigger precision measurement
-crates/autophagy-store/    SQLite migrations, idempotency, FTS, and deletion
-docs/architecture/        Planned component and storage boundaries
-docs/blueprint/           Complete normalized product and implementation brief
-docs/decisions/           Architecture decision records
-docs/roadmap/              Small pull-request delivery sequence
-docs/specs/aep/0.1/       Versioned AEP JSON Schema and examples
-docs/specs/evidence/0.1/  Versioned deterministic finding contract
-docs/specs/mutation/0.1/  Versioned mutation package contract
-docs/specs/replay/0.1/    Versioned replay scenario and result contracts
-docs/specs/shadow/0.1/    Versioned shadow observation and result contracts
-```
-
-The intended repository structure is documented in
-[`docs/architecture/repository-structure.md`](docs/architecture/repository-structure.md).
-The complete product blueprint is available in
-[`docs/blueprint/`](docs/blueprint/README.md).
-
-## Install / Build from source
-
-Autophagy is local-first and builds entirely offline once its toolchain is in
-place. There are no published binaries yet, so build from source.
-
-Install [mise](https://mise.jdx.dev/), which pins the exact Rust toolchain and
-tasks, then build the `autophagy` CLI:
+Install [mise](https://mise.jdx.dev/), which pins the exact toolchain, then
+build the `autophagy` command-line tool:
 
 ```sh
-mise install                                              # install the pinned toolchain (once)
-mise exec -- cargo build --release -p autophagy-cli       # build target/release/autophagy
-mise exec -- cargo install --path crates/autophagy-cli    # optional: put `autophagy` on PATH
+mise install
+mise exec -- cargo build --release -p autophagy-cli
 ```
 
-Run the full quality gate before proposing changes:
-
-```sh
-mise run check                                            # fmt + lint + test + docs + actionlint
-```
-
-The optional native read-only macOS inspector builds with Swift (macOS 13+, no
-full Xcode required):
-
-```sh
-swift build -c release --package-path apps/macos
-apps/macos/scripts/make-app-bundle.sh --configuration release   # produces Autophagy.app
-```
-
-Per-command usage lives in the [guides](docs/guides/); the crate layout is in
-[`docs/architecture/repository-structure.md`](docs/architecture/repository-structure.md).
-
-## Try the CLI
-
-Import the anonymized demo corpus into an explicit local database:
+Point it at a sample history and see what it finds:
 
 ```sh
 mise exec -- cargo run -p autophagy-cli -- \
   --database /tmp/autophagy-demo.db \
-  import evals/fixtures/generic-jsonl/demo.jsonl \
-  --instance-key demo \
-  --index-metadata summary
+  import evals/fixtures/generic-jsonl/demo.jsonl --instance-key demo
 
-mise exec -- cargo run -p autophagy-cli -- \
-  --database /tmp/autophagy-demo.db sessions
-
-mise exec -- cargo run -p autophagy-cli -- \
-  --database /tmp/autophagy-demo.db search stale
+mise exec -- cargo run -p autophagy-cli -- --database /tmp/autophagy-demo.db patterns
 ```
 
-See the [generic JSONL guide](docs/guides/generic-jsonl.md) for dry-run,
-project selection, standard input, JSON output, privacy controls, and exit-code
-semantics.
+The first command imports a small anonymized transcript; the second lists the
+repeated problems it detected, each with exact evidence.
 
-Preview the exact Claude Code transcripts selected without writing a database:
+Import your own real history from Claude Code or Codex instead:
 
 ```sh
-mise exec -- cargo run -p autophagy-cli -- --output json \
-  import --adapter claude-code --dry-run
+mise exec -- cargo run -p autophagy-cli -- import --adapter claude-code
+mise exec -- cargo run -p autophagy-cli -- import --adapter codex
 ```
 
-See the [Claude Code adapter guide](docs/guides/claude-code.md) for incremental
-cursoring, subagents, content policy, and the normalization capability matrix.
-
-Preview Codex rollout discovery without changing the database:
+Let it keep watching in the background instead of re-running import by hand:
 
 ```sh
-mise exec -- cargo run -p autophagy-cli -- --output json \
-  import --adapter codex --dry-run
+mise exec -- cargo run -p autophagy-cli -- watch
 ```
 
-The [Codex adapter guide](docs/guides/codex.md) documents its intentionally
-narrow compatibility matrix and the upstream transcript-stability boundary.
+This checks for new activity on an interval and imports only what's new; see
+the [watch and daemon guide](docs/guides/watch-and-daemon.md) for installing it
+as a proper background service on macOS or Linux.
 
-The [deterministic findings guide](docs/guides/deterministic-findings.md)
-documents recurrence thresholds, signature normalization, counterexamples, and
-the versioned Evidence Packet contract.
+Prefer a window over a terminal? Build the native macOS app (read-only, no
+Xcode required):
 
-## Run the offline demo
+```sh
+swift build -c release --package-path apps/macos
+apps/macos/scripts/make-app-bundle.sh --configuration release
+open apps/macos/build/Autophagy.app
+```
+
+It shows your sessions, the patterns found, and every suggested lesson with
+its full history — see the [macOS app guide](docs/guides/macos-app.md).
+
+Try the whole loop end to end, offline, in one command:
 
 ```sh
 mise run demo
 ```
 
-The demo imports anonymized evidence, emits three deterministic patterns with
-exact evidence IDs, produces a digest that confirms no model or network was
-used, registers zero-permission mutation candidates, challenges one, exports
-an evidence-linked replay review draft, runs replay and shadow evaluation,
-installs a repo-scoped Codex skill, uninstalls it, and previews retention
-deletion. Its temporary data is removed on exit.
+## Principles
 
-Useful privacy and lifecycle commands:
+- **Nothing changes without your OK.** Every suggestion sits and waits for
+  review; nothing installs itself.
+- **It shows its receipts.** Every suggestion links to the exact sessions and
+  moments it came from — no "trust me."
+- **Silence over guessing.** When the evidence is thin, Autophagy says so
+  instead of inventing a confident-sounding answer.
+- **Your data stays yours.** Local-first and offline by default; secrets are
+  filtered out before anything is stored or searched.
+- **Reversible, always.** Anything Autophagy installs, it can cleanly remove.
 
-```sh
-autophagy import history.jsonl --exclude-path '**/private/**'
-autophagy export > autophagy-export.jsonl
-autophagy prune --older-than-days 30 --dry-run
-autophagy prune --older-than-days 30
-autophagy delete session ses_example
-autophagy delete all --confirm delete-all
+## Status
+
+The core engine, three review-only installation targets (Codex and Claude
+Code skills), local and hybrid retrieval, an optional local-model synthesis
+boundary, continuous watch/daemon ingestion, and a native read-only macOS app
+are all implemented and covered by the quality gate below. Version `0.1.0` is
+being prepared for release; see [CHANGELOG.md](CHANGELOG.md) for the full
+history and [docs/roadmap/](docs/roadmap/) for how it was built, one small
+pull request at a time.
+
+## For developers
+
+Autophagy is a Rust workspace (edition 2024) with one strict dependency
+direction:
+
+```text
+adapters -> events -> store -> patterns -> mutations -> {replay, shadow, install}
+                         \        /
+                          core --+-- cli
 ```
 
-See the [privacy and lifecycle guide](docs/guides/privacy-and-lifecycle.md) and
-[threat model](docs/security/threat-model.md) for guarantees and limitations.
+| Path | What it is |
+| --- | --- |
+| `adapters/claude-code/`, `adapters/codex/`, `adapters/pi/`, `adapters/opencode/` | Native transcript discovery and AEP normalization per agent |
+| `apps/macos/` | Native read-only SwiftUI database inspector |
+| `crates/autophagy-events/` | AEP (Agent Event Protocol) Rust types, parsing, validation |
+| `crates/autophagy-store/` | SQLite migrations, idempotency, FTS, quarantine, cascading deletion |
+| `crates/autophagy-redaction/` | Secret rules and path policy, applied at ingestion |
+| `crates/autophagy-core/` | Streaming import application services |
+| `crates/autophagy-patterns/` | Deterministic, model-free recurrence detectors |
+| `crates/autophagy-mutations/` | Review-only mutation candidate registry (immutable, audit-logged) |
+| `crates/autophagy-replay/` | Non-executable deterministic replay evaluation |
+| `crates/autophagy-shadow/` | Observation-only trigger precision measurement |
+| `crates/autophagy-synthesis/` | Provider-neutral local-model synthesis boundary |
+| `crates/autophagy-install/` | The only crate that writes outside the database: explicit, reversible skill/daemon materialization |
+| `crates/autophagy-cli/` | User-facing commands; ties everything together |
 
-Register and review candidate packages:
+Contracts (AEP, evidence, mutation, replay, shadow, retrieval, synthesis) are
+versioned JSON Schema plus fixtures in [`docs/specs/`](docs/specs/).
+Architecture decisions are recorded in [`docs/decisions/`](docs/decisions/);
+the planned repository structure is in
+[`docs/architecture/repository-structure.md`](docs/architecture/repository-structure.md);
+the full product blueprint is in [`docs/blueprint/`](docs/blueprint/README.md).
 
-```sh
-autophagy mutations propose
-autophagy mutations list
-autophagy --output json mutations show mut_example
-```
+Engineering constraints (non-negotiable, from `AGENTS.md`): local-only and
+offline-capable by default; never persist secrets or raw cloud payloads
+without explicit consent; every derived finding retains exact evidence
+identifiers; deterministic and inspectable over model-generated prose;
+protocols and schemas are versioned before they change; no autonomous
+execution permissions by default.
 
-See the [mutation candidate guide](docs/guides/mutation-candidates.md) for the
-contract, challenge checklist, evidence retention, and unavailable activation
-actions. The [replay guide](docs/guides/replay.md) documents evidence-linked
-draft extraction, counterfactual review, classification, thresholds, and the
-non-execution boundary.
-The [shadow and installation guide](docs/guides/shadow-and-installation.md)
-documents precision measurement, explicit permission review, the Codex target,
-and rollback guarantees.
+Per-command usage lives in the [guides](docs/guides/):
+[generic JSONL](docs/guides/generic-jsonl.md),
+[Claude Code](docs/guides/claude-code.md), [Codex](docs/guides/codex.md),
+[Pi](docs/guides/pi.md), [OpenCode](docs/guides/opencode.md),
+[deterministic findings](docs/guides/deterministic-findings.md),
+[retrieval](docs/guides/retrieval.md),
+[mutation candidates](docs/guides/mutation-candidates.md),
+[replay](docs/guides/replay.md),
+[shadow and installation](docs/guides/shadow-and-installation.md),
+[synthesis](docs/guides/synthesis.md),
+[watch and daemon](docs/guides/watch-and-daemon.md),
+[macOS app](docs/guides/macos-app.md), and
+[privacy and lifecycle](docs/guides/privacy-and-lifecycle.md).
 
-## Try the contract
-
-Install [mise](https://mise.jdx.dev/), then run:
+Run the full quality gate before proposing changes:
 
 ```sh
 mise install
-mise run check
+mise run check   # fmt + lint + test + docs + actionlint
 ```
 
 An AEP event looks like this:
@@ -227,23 +203,18 @@ An AEP event looks like this:
 }
 ```
 
-## Storage guarantees
-
-- AEP validation runs before a transaction writes any rows.
-- Reimporting an identical event is a no-op.
-- Reusing an event ID with different content creates an auditable quarantine
-  record and never overwrites canonical evidence.
-- Raw JSON is not copied into FTS5; tool input and free text require an explicit
-  redaction-approved search projection.
-- Session deletion cascades through events, conflicts, and search rows, then
-  removes only artifacts that no remaining event references. A mutation is also
-  removed if any evidence it cites is deleted.
+Storage guarantees: AEP validation runs before a transaction writes any rows;
+reimporting an identical event is a no-op; reusing an event ID with different
+content quarantines rather than overwrites; raw JSON is never copied into
+search — only a redaction-approved projection is; deleting a session cascades
+through events, conflicts, and search rows, and removes a mutation if any
+evidence it cites is deleted.
 
 ## Security and privacy
 
-Autophagy processes private developer activity. Cloud processing and telemetry
-will remain disabled by default. Please read [SECURITY.md](SECURITY.md) before
-reporting a vulnerability.
+Autophagy processes private developer activity. Cloud processing and
+telemetry remain disabled by default. Please read
+[SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
 ## License
 
