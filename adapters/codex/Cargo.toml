@@ -1,6 +1,6 @@
 [package]
-name = "autophagy-adapter-claude-code"
-description = "Incremental Claude Code transcript adapter for Autophagy"
+name = "autophagy-adapter-codex"
+description = "Incremental Codex rollout adapter for Autophagy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

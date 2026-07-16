@@ -1,0 +1,10 @@
+{"timestamp":"2026-07-16T09:00:00Z","type":"session_meta","payload":{"id":"019f-fixture","timestamp":"2026-07-16T09:00:00Z","cwd":"/workspace/demo","originator":"codex_cli_rs","cli_version":"1.0.0","source":"cli"}}
+{"timestamp":"2026-07-16T09:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-07-16T09:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Run the fixture check."}}
+{"timestamp":"2026-07-16T09:00:02Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"mise run check\",\"workdir\":\"/workspace/demo\"}","call_id":"call-1"}}
+{"timestamp":"2026-07-16T09:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"{\"output\":\"ok\",\"metadata\":{\"exit_code\":0}}"}}
+{"timestamp":"2026-07-16T09:00:04Z","type":"event_msg","payload":{"type":"agent_message","message":"The check passed."}}
+{"timestamp":"2026-07-16T09:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"{\"path\":\"/workspace/demo/src/lib.rs\"}","call_id":"call-2"}}
+{"timestamp":"2026-07-16T09:00:06Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-2","output":[{"type":"input_text","text":"{\"status\":\"failed\",\"exit_code\":1}"}]}}
+{"timestamp":"2026-07-16T09:00:07Z","type":"compacted","payload":{"message":"Fixture context summary","replacement_history":[]}}
+{"timestamp":"2026-07-16T09:00:08Z","type":"world_state","payload":{"full":true,"state":{}}}

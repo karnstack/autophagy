@@ -10,6 +10,9 @@ use std::{
 use autophagy_adapter_claude_code::{
     ClaudeImportOptions, ClaudeImportSummary, default_projects_root, import_claude_code,
 };
+use autophagy_adapter_codex::{
+    CodexImportOptions, CodexImportSummary, default_sessions_root, import_codex,
+};
 use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
 use autophagy_store::{EventStore, SearchHit, SessionSummary, StoreError};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -46,13 +49,14 @@ enum OutputFormat {
 enum ImportAdapter {
     GenericJsonl,
     ClaudeCode,
+    Codex,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Import normalized AEP JSONL or native agent history.
     Import {
-        /// Input file/root. `-` means stdin for generic JSONL or Claude's default history root.
+        /// Input file/root. `-` means stdin for generic JSONL or the adapter's default history root.
         #[arg(default_value = "-", value_name = "PATH")]
         input: PathBuf,
 
@@ -76,7 +80,7 @@ enum Commands {
         #[arg(long)]
         include_subagents: bool,
 
-        /// Persist Claude prompt, response, and tool-result text in event metadata.
+        /// Persist native-adapter prompt, response, and tool-result text in event metadata.
         #[arg(long)]
         include_content: bool,
 
@@ -128,6 +132,7 @@ enum CommandReport {
 enum ImportReport {
     Generic(ImportSummary),
     ClaudeCode(ClaudeImportSummary),
+    Codex(CodexImportSummary),
 }
 
 impl ImportReport {
@@ -135,6 +140,7 @@ impl ImportReport {
         match self {
             Self::Generic(summary) => summary.has_issues(),
             Self::ClaudeCode(summary) => summary.has_issues(),
+            Self::Codex(summary) => summary.has_issues(),
         }
     }
 }
@@ -160,6 +166,10 @@ enum CliError {
     ClaudeImport(#[from] autophagy_adapter_claude_code::ClaudeImportError),
     #[error(transparent)]
     ClaudeDiscovery(#[from] autophagy_adapter_claude_code::DiscoveryError),
+    #[error(transparent)]
+    CodexImport(#[from] autophagy_adapter_codex::CodexImportError),
+    #[error(transparent)]
+    CodexDiscovery(#[from] autophagy_adapter_codex::CodexDiscoveryError),
     #[error("could not serialize command output: {0}")]
     Json(#[from] serde_json::Error),
     #[error("could not determine the platform-local application data directory")]
@@ -242,6 +252,30 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
                 };
                 Ok(CommandReport::Import(ImportReport::ClaudeCode(summary)))
             }
+            ImportAdapter::Codex => {
+                let input = if input == Path::new("-") {
+                    default_sessions_root()?
+                } else {
+                    input
+                };
+                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                let mut options = CodexImportOptions::new(input, instance_key);
+                options.display_name = display_name;
+                options.projects = projects;
+                options.include_content = include_content;
+                options.index_tool_input = index_tool_input;
+                options.index_metadata = index_metadata;
+                options.dry_run = dry_run;
+                options.max_diagnostics = max_diagnostics;
+                let summary = if dry_run {
+                    import_codex(None, &options)?
+                } else {
+                    let database = resolve_database_path(cli.database)?;
+                    let mut store = open_store(&database)?;
+                    import_codex(Some(&mut store), &options)?
+                };
+                Ok(CommandReport::Import(ImportReport::Codex(summary)))
+            }
         },
         Commands::Sessions { limit } => {
             let database = resolve_database_path(cli.database)?;
@@ -307,6 +341,7 @@ fn write_report(
                 ImportReport::ClaudeCode(summary) => {
                     write_claude_import_summary(&mut writer, summary)?;
                 }
+                ImportReport::Codex(summary) => write_codex_import_summary(&mut writer, summary)?,
             },
             CommandReport::Sessions(sessions) => {
                 writeln!(writer, "SESSION\tSOURCE\tEVENTS\tLAST EVENT\tPROJECT")?;
@@ -328,6 +363,43 @@ fn write_report(
                 }
             }
         },
+    }
+    Ok(())
+}
+
+fn write_codex_import_summary(
+    writer: &mut impl Write,
+    summary: &CodexImportSummary,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{} files · {} records · {} events · {} inserted · {} duplicates · {} conflicts · {} unsupported · {} rejected{}",
+        summary.discovery.files.len(),
+        summary.records_seen,
+        summary.events_emitted,
+        summary.inserted,
+        summary.duplicates,
+        summary.conflicts,
+        summary.unsupported,
+        summary.rejected,
+        if summary.dry_run { " · dry run" } else { "" }
+    )?;
+    for file in &summary.discovery.files {
+        writeln!(writer, "{}\t{} bytes", file.relative_path, file.size_bytes)?;
+    }
+    for diagnostic in &summary.diagnostics {
+        writeln!(
+            writer,
+            "{}:{} [{}] {}",
+            diagnostic.file, diagnostic.line, diagnostic.code, diagnostic.message
+        )?;
+    }
+    if summary.diagnostics_suppressed > 0 {
+        writeln!(
+            writer,
+            "{} additional diagnostics suppressed",
+            summary.diagnostics_suppressed
+        )?;
     }
     Ok(())
 }

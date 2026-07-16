@@ -43,10 +43,10 @@ autophagy/
 └── website/
 ```
 
-`autophagy-events`, `autophagy-store`, `autophagy-core`, `autophagy-cli`, and
-the native Claude Code adapter exist through PR 4. A crate or package is added
-when its PR contains an executable vertical slice; empty placeholder crates are
-avoided.
+`autophagy-events`, `autophagy-store`, `autophagy-core`, `autophagy-cli`, the
+native Claude Code and Codex adapters, and their shared conformance harness
+exist through PR 5. A crate or package is added when its PR contains an
+executable vertical slice; empty placeholder crates are avoided.
 
 ## Dependency direction
 
