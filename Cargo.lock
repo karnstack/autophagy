@@ -142,6 +142,7 @@ dependencies = [
  "autophagy-replay",
  "autophagy-shadow",
  "autophagy-store",
+ "autophagy-synthesis",
  "clap",
  "directories",
  "serde",
@@ -273,6 +274,21 @@ dependencies = [
  "tempfile",
  "thiserror",
  "time",
+]
+
+[[package]]
+name = "autophagy-synthesis"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "autophagy-core",
+ "autophagy-mutations",
+ "autophagy-patterns",
+ "autophagy-store",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

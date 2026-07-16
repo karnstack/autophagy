@@ -14,6 +14,7 @@ members = [
   "crates/autophagy-replay",
   "crates/autophagy-shadow",
   "crates/autophagy-store",
+  "crates/autophagy-synthesis",
 ]
 
 [workspace.package]

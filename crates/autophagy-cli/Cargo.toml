@@ -23,6 +23,7 @@ autophagy-patterns = { path = "../autophagy-patterns" }
 autophagy-replay = { path = "../autophagy-replay" }
 autophagy-shadow = { path = "../autophagy-shadow" }
 autophagy-store = { path = "../autophagy-store" }
+autophagy-synthesis = { path = "../autophagy-synthesis" }
 clap.workspace = true
 directories.workspace = true
 serde.workspace = true

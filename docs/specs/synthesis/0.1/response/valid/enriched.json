@@ -1,0 +1,23 @@
+{
+  "title": "Refresh the stale lockfile before `cargo build`",
+  "statement": "The recurring `cargo build` exit-code-101 failure follows an out-of-date lockfile, and refreshing it first removes the failure.",
+  "expected_result": "Matching `cargo build` attempts succeed on the first try once the lockfile is refreshed, with no repeated exit-code-101 failures.",
+  "instruction": "Before running `cargo build`, check whether Cargo.lock is older than Cargo.toml. When it is, run `cargo update` first; otherwise leave the workflow unchanged.",
+  "failure_cases": [
+    "The lockfile can be intentionally pinned, so refreshing it may be unwanted.",
+    "The failure can be transient and unrelated to the lockfile."
+  ],
+  "exclusions": [
+    "Do not refresh the lockfile when the repository pins dependencies deliberately."
+  ],
+  "supporting_event_ids": ["evt_build_a", "evt_build_b"],
+  "counterexample_event_ids": [],
+  "trigger_selectors": ["failure/v1|shell|cargo build|exit:101"],
+  "permissions": {
+    "filesystem_read": [],
+    "filesystem_write": [],
+    "commands": [],
+    "environment": [],
+    "network": false
+  }
+}

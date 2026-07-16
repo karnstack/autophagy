@@ -1,0 +1,11 @@
+{
+  "spec_version": "synthesis-manifest/0.1",
+  "name": "qwen3-coder",
+  "format": "ollama",
+  "path": "qwen3-coder:30b",
+  "revision": "30b-a3b",
+  "capabilities": ["mutation_synthesis", "extraction"],
+  "resource_hints": {
+    "min_memory_mb": 24576
+  }
+}

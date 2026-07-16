@@ -1,0 +1,9 @@
+{
+  "spec_version": "synthesis-manifest/0.1",
+  "name": "qwen3-8b-q4",
+  "format": "safetensors",
+  "path": "~/.autophagy/models/qwen3-8b-q4",
+  "revision": "q4_k_m",
+  "capabilities": ["mutation_synthesis"],
+  "resource_hints": { "min_memory_mb": 8192 }
+}

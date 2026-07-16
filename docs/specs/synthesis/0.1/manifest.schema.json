@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/synthesis/0.1/manifest.schema.json",
+  "title": "Autophagy Local Model Manifest v0.1",
+  "description": "A versioned, local declaration of a synthesis model: what it is, where it lives, and the capabilities it declares. Loading a manifest never downloads a model or makes a network call.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version",
+    "name",
+    "format",
+    "path",
+    "revision",
+    "capabilities",
+    "resource_hints"
+  ],
+  "properties": {
+    "spec_version": { "const": "synthesis-manifest/0.1" },
+    "name": { "type": "string", "minLength": 1 },
+    "format": {
+      "enum": ["gguf", "ollama", "mlx", "openai_compatible", "deterministic"]
+    },
+    "path": { "type": "string", "minLength": 1 },
+    "revision": { "type": "string", "minLength": 1 },
+    "digest": { "type": "string", "minLength": 1 },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["mutation_synthesis", "embedding", "extraction"] }
+    },
+    "resource_hints": { "$ref": "#/$defs/resource_hints" }
+  },
+  "$defs": {
+    "resource_hints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_memory_mb"],
+      "properties": {
+        "min_memory_mb": { "type": "integer", "minimum": 1 },
+        "recommended_memory_mb": { "type": "integer", "minimum": 1 },
+        "context_window_tokens": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}
