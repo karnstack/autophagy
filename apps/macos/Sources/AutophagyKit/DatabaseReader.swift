@@ -6,7 +6,7 @@ import Foundation
 /// (or unexpectedly shaped) schema yields empty results rather than an error,
 /// so the UI never crashes on a database it only partly understands.
 public final class DatabaseReader {
-    private let db: Database
+    private var db: Database
 
     /// The absolute path this reader opened.
     public let path: String
@@ -16,7 +16,35 @@ public final class DatabaseReader {
     /// - Throws: ``SQLiteError`` if the file cannot be opened.
     public init(path: String) throws {
         self.path = path
-        db = try Database(readonlyPath: path)
+        db = try Self.openReadable(path: path)
+    }
+
+    /// Re-open the connection so the next read reflects the current on-disk
+    /// state. A cleanly checkpointed WAL database is opened `immutable`, i.e. as
+    /// a frozen point-in-time snapshot; without re-opening, a viewer would never
+    /// see rows written after the reader was first created (for example after a
+    /// CLI import). Re-opening is cheap — it reads the file header — so callers
+    /// can do it before every reload/refresh.
+    public func refresh() {
+        if let fresh = try? Self.openReadable(path: path) {
+            db = fresh
+        }
+    }
+
+    /// Open a connection that can actually read `path`.
+    ///
+    /// Prefers the `immutable`/auto open (which is how a cleanly checkpointed
+    /// WAL database becomes readable at all), but if that connection cannot read
+    /// — the file changed under an `immutable` snapshot, or some other WAL edge
+    /// case — it retries once with a plain read-only open before giving up.
+    private static func openReadable(path: String) throws -> Database {
+        let preferred = try Database(readonlyPath: path, allowImmutable: true)
+        if preferred.canRead() { return preferred }
+        if let plain = try? Database(readonlyPath: path, allowImmutable: false),
+           plain.canRead() {
+            return plain
+        }
+        return preferred
     }
 
     // MARK: - Schema
@@ -183,18 +211,33 @@ public final class DatabaseReader {
 
     /// The mutation candidate registry, newest first.
     public func mutations() -> [MutationSummary] {
+        mutationSummaries(limit: nil)
+    }
+
+    /// Candidate summaries, newest first, optionally capped by `limit`.
+    ///
+    /// The title lives in the package JSON, so it is read directly with
+    /// `json_extract` rather than decoding the whole Mutation Package. Combined
+    /// with the `LIMIT`, the recent-candidates path does only bounded work — it
+    /// never decodes every registered package to keep a handful of rows.
+    private func mutationSummaries(limit: Int?) -> [MutationSummary] {
         guard db.objectExists("mutation_candidates") else { return [] }
+        // `limit`, when present, is an `Int` supplied by this module (never user
+        // input), so interpolating it is injection-safe; SQLite cannot bind a
+        // LIMIT as a text parameter through this reader's text-only bind path.
+        let limitClause = limit.map { "LIMIT \($0)" } ?? ""
         let sql = """
         SELECT mutation_id, source_detector, state, semantic_version, spec_version,
-               created_at, updated_at, package_json
+               created_at, updated_at, json_extract(package_json, '$.title')
         FROM mutation_candidates
-        ORDER BY created_at DESC, mutation_id ASC;
+        ORDER BY created_at DESC, mutation_id ASC
+        \(limitClause);
         """
         return (try? db.query(sql) { row in
-            let package = MutationPackage.decode(from: row.string(7) ?? "{}")
+            let id = row.string(0) ?? ""
             return MutationSummary(
-                id: row.string(0) ?? "",
-                title: package?.title ?? (row.string(0) ?? ""),
+                id: id,
+                title: row.string(7) ?? id,
                 state: row.string(2) ?? "",
                 detector: row.string(1) ?? "",
                 semanticVersion: row.string(3) ?? "",
@@ -203,6 +246,53 @@ public final class DatabaseReader {
                 updatedAt: row.string(6) ?? ""
             )
         }) ?? []
+    }
+
+    /// Candidate counts grouped by lifecycle state, state-ascending. A cheap
+    /// aggregate for the menu-bar summary; empty when the registry is absent.
+    public func mutationStateCounts() -> [MutationStateCount] {
+        guard db.objectExists("mutation_candidates") else { return [] }
+        let sql = """
+        SELECT state, count(*)
+        FROM mutation_candidates
+        GROUP BY state
+        ORDER BY state ASC;
+        """
+        return (try? db.query(sql) { row in
+            MutationStateCount(state: row.string(0) ?? "", count: row.int(1) ?? 0)
+        }) ?? []
+    }
+
+    /// The most recent candidates, newest first, capped at `limit`.
+    public func recentMutations(limit: Int) -> [MutationSummary] {
+        guard limit > 0 else { return [] }
+        return Array(mutations().prefix(limit))
+    }
+
+    /// Assemble the always-available menu-bar summary from cheap read-only
+    /// queries. Connection state, quick counts, per-state candidate counts, and
+    /// the N most recent candidates — nothing here writes or leaves the machine.
+    public func menuBarSnapshot(recentLimit: Int = 5) -> MenuBarSnapshot {
+        menuBarSnapshot(overview: overview(), recentLimit: recentLimit)
+    }
+
+    /// Assemble the menu-bar summary from an already-computed ``DatabaseOverview``,
+    /// so a caller reloading every view does not query the same counts twice.
+    public func menuBarSnapshot(
+        overview: DatabaseOverview,
+        recentLimit: Int = 5
+    ) -> MenuBarSnapshot {
+        MenuBarSnapshot(
+            isConnected: true,
+            databaseFileName: URL(fileURLWithPath: path).lastPathComponent,
+            databasePath: path,
+            schema: overview.schema.compatibility,
+            sessionCount: overview.sessionCount,
+            eventCount: overview.eventCount,
+            candidateCount: overview.mutationCount,
+            stateCounts: mutationStateCounts(),
+            recentCandidates: recentMutations(limit: recentLimit)
+        )
     }
 
     /// Full detail for one candidate: package, evidence lineage, audit log, and

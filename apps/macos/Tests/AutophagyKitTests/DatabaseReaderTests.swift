@@ -83,6 +83,59 @@ struct DatabaseReaderTests {
         #expect(overview.indexedFreeTextRows == 2) // two rows have non-empty text
     }
 
+    @Test func installationRecordCarriesTarget() throws {
+        let temp = TempPath(FixtureDatabase.populated())
+        let reader = try DatabaseReader(path: temp.path)
+        let detail = try #require(reader.mutationDetail(id: "mut_1"))
+        let install = try #require(detail.installation)
+        #expect(install.target == "claude_code_repo_skill")
+        #expect(install.targetDisplayName == "Claude Code repo skill")
+        #expect(install.state == "installed")
+    }
+
+    @Test func mutationStateCountsGroupByState() throws {
+        let temp = TempPath(FixtureDatabase.populated())
+        let reader = try DatabaseReader(path: temp.path)
+        let counts = reader.mutationStateCounts()
+        // challenged (mut_1) and rejected (mut_2), state-ascending.
+        #expect(counts == [
+            MutationStateCount(state: "challenged", count: 1),
+            MutationStateCount(state: "rejected", count: 1)
+        ])
+    }
+
+    @Test func recentMutationsAreNewestFirstAndCapped() throws {
+        let temp = TempPath(FixtureDatabase.populated())
+        let reader = try DatabaseReader(path: temp.path)
+        // mut_2 was created after mut_1, so it leads; limit 1 keeps only it.
+        #expect(reader.recentMutations(limit: 1).map(\.id) == ["mut_2"])
+        #expect(reader.recentMutations(limit: 0).isEmpty)
+    }
+
+    @Test func menuBarSnapshotAssemblesConnectedState() throws {
+        let temp = TempPath(FixtureDatabase.populated())
+        let reader = try DatabaseReader(path: temp.path)
+        let snapshot = reader.menuBarSnapshot(recentLimit: 5)
+        #expect(snapshot.isConnected)
+        #expect(snapshot.schema == .supported(version: 8))
+        #expect(snapshot.sessionCount == 2)
+        #expect(snapshot.eventCount == 3)
+        #expect(snapshot.candidateCount == 2)
+        #expect(snapshot.databaseFileName?.hasSuffix(".db") == true)
+        #expect(snapshot.stateCounts.map(\.state) == ["challenged", "rejected"])
+        // Newest candidate first.
+        #expect(snapshot.recentCandidates.first?.id == "mut_2")
+    }
+
+    @Test func disconnectedSnapshotIsEmpty() {
+        let snapshot = MenuBarSnapshot.disconnected
+        #expect(!snapshot.isConnected)
+        #expect(snapshot.databaseFileName == nil)
+        #expect(snapshot.schema == nil)
+        #expect(snapshot.candidateCount == 0)
+        #expect(snapshot.recentCandidates.isEmpty)
+    }
+
     @Test func missingEventPresentsAsAbsentLink() throws {
         // Delete a cited event directly in the fixture to simulate an orphan.
         let path = FixtureDatabase.populated()
