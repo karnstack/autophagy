@@ -56,3 +56,14 @@ Status: complete.
 
 Exit: the complete local loop is inspectable without using JSON output or raw
 SQLite tools.
+
+## Release readiness
+
+Status: in progress.
+
+All five alpha slices above are complete, closing the alpha sequence. The first
+release is now being prepared: the root `CHANGELOG.md` consolidates the history
+of pull requests #1–#18, and `.github/workflows/release.yml` builds the CLI and
+macOS app bundle and drafts a GitHub release on a `v*` tag push. The workspace
+version remains `0.1.0-alpha.1` and nothing is published yet — a human performs
+the actual release.

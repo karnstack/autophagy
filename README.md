@@ -20,10 +20,17 @@ uninstall a zero-permission instruction as a repo-scoped Codex skill. No daemon,
 executable replay, autonomous installation, global skill writes, or background
 capture ships yet.
 
-Alpha expansion adds a third deterministic family: repeated successful recovery
-motifs with direct-retry counterexamples and conservative preflight candidates.
-It also derives Replay Suite review drafts from exact mutation evidence while
-keeping every unreviewed counterfactual outcome explicitly unknown.
+The alpha is complete. It adds a third deterministic family — repeated
+successful recovery motifs with direct-retry counterexamples and conservative
+preflight candidates — and derives Replay Suite review drafts from exact
+mutation evidence while keeping every unreviewed counterfactual outcome
+explicitly unknown. It also adds exact and hybrid retrieval (`autophagy search`
+combines exact normalized-signature lookup with FTS5 and attaches a versioned
+ranking explanation to every result), a provider-neutral local synthesis
+boundary that lets a local model propose richer mutations without bypassing any
+contract or evaluation gate, and a native read-only macOS app for inspecting
+sessions, patterns, mutations, and lifecycle audits. The first release is being
+prepared; the workspace version is `0.1.0-alpha.1` and nothing is published yet.
 
 ## Principles
 
@@ -65,6 +72,37 @@ The intended repository structure is documented in
 [`docs/architecture/repository-structure.md`](docs/architecture/repository-structure.md).
 The complete product blueprint is available in
 [`docs/blueprint/`](docs/blueprint/README.md).
+
+## Install / Build from source
+
+Autophagy is local-first and builds entirely offline once its toolchain is in
+place. There are no published binaries yet, so build from source.
+
+Install [mise](https://mise.jdx.dev/), which pins the exact Rust toolchain and
+tasks, then build the `autophagy` CLI:
+
+```sh
+mise install                                              # install the pinned toolchain (once)
+mise exec -- cargo build --release -p autophagy-cli       # build target/release/autophagy
+mise exec -- cargo install --path crates/autophagy-cli    # optional: put `autophagy` on PATH
+```
+
+Run the full quality gate before proposing changes:
+
+```sh
+mise run check                                            # fmt + lint + test + docs + actionlint
+```
+
+The optional native read-only macOS inspector builds with Swift (macOS 13+, no
+full Xcode required):
+
+```sh
+swift build -c release --package-path apps/macos
+apps/macos/scripts/make-app-bundle.sh --configuration release   # produces Autophagy.app
+```
+
+Per-command usage lives in the [guides](docs/guides/); the crate layout is in
+[`docs/architecture/repository-structure.md`](docs/architecture/repository-structure.md).
 
 ## Try the CLI
 
