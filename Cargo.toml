@@ -7,6 +7,7 @@ members = [
   "crates/autophagy-cli",
   "crates/autophagy-core",
   "crates/autophagy-events",
+  "crates/autophagy-patterns",
   "crates/autophagy-store",
 ]
 

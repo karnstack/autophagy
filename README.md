@@ -14,7 +14,8 @@ change because of what happened?”
 Autophagy is in foundation development. Agent Event Protocol (AEP) v0.1, the
 transactional local SQLite event store, generic JSONL CLI vertical slice, and
 incremental Claude Code and Codex history adapters are implemented. No daemon
-or background capture ships yet.
+or background capture ships yet. Deterministic repeated-failure and explicit
+user-correction detectors now emit versioned, evidence-linked packets.
 
 ## Principles
 
@@ -33,6 +34,7 @@ crates/autophagy-adapter-test-support/  Shared native-adapter conformance checks
 crates/autophagy-cli/      User-facing import, sessions, and search commands
 crates/autophagy-core/     Reusable streaming import application services
 crates/autophagy-events/   AEP Rust types, parsing, and validation
+crates/autophagy-patterns/ Model-free recurrence detectors and evidence packets
 crates/autophagy-store/    SQLite migrations, idempotency, FTS, and deletion
 docs/architecture/        Planned component and storage boundaries
 docs/blueprint/           Complete normalized product and implementation brief
@@ -87,6 +89,10 @@ mise exec -- cargo run -p autophagy-cli -- --output json \
 
 The [Codex adapter guide](docs/guides/codex.md) documents its intentionally
 narrow compatibility matrix and the upstream transcript-stability boundary.
+
+The [deterministic findings guide](docs/guides/deterministic-findings.md)
+documents recurrence thresholds, signature normalization, counterexamples, and
+the versioned Evidence Packet contract.
 
 ## Try the contract
 

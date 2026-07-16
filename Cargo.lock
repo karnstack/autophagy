@@ -166,6 +166,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "autophagy-patterns"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "autophagy-core",
+ "autophagy-events",
+ "autophagy-store",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+]
+
+[[package]]
 name = "autophagy-store"
 version = "0.1.0-alpha.1"
 dependencies = [
