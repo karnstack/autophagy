@@ -1,5 +1,7 @@
+use serde::Serialize;
+
 /// Stable provenance for one adapter installation or history directory.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SourceIdentity {
     /// Adapter identifier; must match the AEP event's `source` value.
     pub adapter: String,
@@ -32,7 +34,7 @@ impl SourceIdentity {
 ///
 /// Project paths and tool names come from the already policy-processed AEP
 /// envelope. Tool input and event payload text require this explicit projection.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct SearchProjection {
     /// Sanitized tool input. Raw event input is not indexed automatically.
     pub tool_input_text: Option<String>,
@@ -41,7 +43,8 @@ pub struct SearchProjection {
 }
 
 /// Result of attempting to persist one event.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum InsertOutcome {
     /// A new immutable event row was created.
     Inserted {
@@ -63,7 +66,7 @@ pub enum InsertOutcome {
 }
 
 /// Compact session record returned by storage queries.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SessionSummary {
     /// AEP session identifier.
     pub session_id: String,
@@ -86,7 +89,7 @@ pub struct SessionSummary {
 }
 
 /// One full-text search result.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SearchHit {
     /// Exact AEP evidence identifier.
     pub event_id: String,
@@ -97,7 +100,7 @@ pub struct SearchHit {
 }
 
 /// Row counts useful for diagnostics and idempotency assertions.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct StoreStats {
     /// Number of source instances.
     pub sources: i64,
@@ -112,7 +115,7 @@ pub struct StoreStats {
 }
 
 /// Effect of deleting one session.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct DeleteSummary {
     /// Whether a session row existed and was removed.
     pub session_deleted: bool,

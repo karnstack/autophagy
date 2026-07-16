@@ -1,0 +1,5 @@
+{"spec_version":"aep/0.1","event_id":"evt_start","session_id":"ses_fixture","timestamp":"2026-07-16T06:00:00Z","sequence":0,"source":"generic-jsonl","type":"session.started","project":"/repo/a"}
+{"spec_version":"aep/0.1","event_id":"evt_failure","session_id":"ses_fixture","timestamp":"2026-07-16T06:01:00Z","sequence":1,"source":"generic-jsonl","type":"tool.failed","project":"/repo/a","tool":{"name":"bash","input":"secret-tool-token","exit_code":1},"metadata":{"search":"generated client was stale"}}
+{"spec_version":
+{"spec_version":"aep/0.1","event_id":"evt_invalid","session_id":"ses_fixture","timestamp":"2026-07-16T06:02:00Z","source":"generic-jsonl","type":"tool.failed","project":"/repo/a"}
+{"spec_version":"aep/0.1","event_id":"evt_other","session_id":"ses_other","timestamp":"2026-07-16T06:03:00Z","sequence":0,"source":"generic-jsonl","type":"session.started","project":"/repo/b"}

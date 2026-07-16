@@ -43,9 +43,9 @@ autophagy/
 └── website/
 ```
 
-`autophagy-events` and `autophagy-store` exist through PR 2. A crate or package
-is added when its PR contains an executable vertical slice; empty placeholder
-crates are avoided.
+`autophagy-events`, `autophagy-store`, `autophagy-core`, and `autophagy-cli`
+exist through PR 3. A crate or package is added when its PR contains an
+executable vertical slice; empty placeholder crates are avoided.
 
 ## Dependency direction
 

@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/autophagy-events", "crates/autophagy-store"]
+members = [
+  "crates/autophagy-cli",
+  "crates/autophagy-core",
+  "crates/autophagy-events",
+  "crates/autophagy-store",
+]
 
 [workspace.package]
 version = "0.1.0-alpha.1"
@@ -10,6 +15,8 @@ license = "Apache-2.0"
 repository = "https://github.com/karnstack/autophagy"
 
 [workspace.dependencies]
+clap = { version = "4.6.2", features = ["derive", "env"] }
+directories = "6.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"

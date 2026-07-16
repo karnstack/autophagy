@@ -100,6 +100,13 @@ fn insertion_rolls_up_sessions_and_indexes_only_approved_text() {
     assert_eq!(session.started_at.as_deref(), Some("2026-07-16T01:00:00Z"));
     assert_eq!(session.ended_at.as_deref(), Some("2026-07-16T01:20:00Z"));
     assert_eq!(session.project_path.as_deref(), Some("/workspace/project"));
+    assert_eq!(store.list_sessions(1).expect("session list"), vec![session]);
+    assert!(
+        store
+            .list_sessions(0)
+            .expect("empty session list")
+            .is_empty()
+    );
 
     let hits = store.search("generated", 10).expect("approved search");
     assert_eq!(hits.len(), 1);
@@ -256,7 +263,7 @@ fn provenance_and_sequence_conflicts_roll_back_atomically() {
             &sequence_conflict,
             &SearchProjection::default()
         ),
-        Err(StoreError::Database(_))
+        Err(StoreError::SessionSequenceConflict { .. })
     ));
     assert_eq!(
         store.stats().expect("stats"),
