@@ -11,10 +11,9 @@ change because of what happened?”
 
 ## Status
 
-Autophagy is in foundation development. The first pull request defines Agent
-Event Protocol (AEP) v0.1 and the Rust types that all collectors, storage, and
-detectors will share. No daemon, session importer, or background capture ships
-yet.
+Autophagy is in foundation development. Agent Event Protocol (AEP) v0.1 and the
+transactional local SQLite event store are implemented. No daemon, session
+importer, or background capture ships yet.
 
 ## Principles
 
@@ -28,6 +27,7 @@ yet.
 
 ```text
 crates/autophagy-events/   AEP Rust types, parsing, and validation
+crates/autophagy-store/    SQLite migrations, idempotency, FTS, and deletion
 docs/architecture/        Planned component and storage boundaries
 docs/blueprint/           Complete normalized product and implementation brief
 docs/decisions/           Architecture decision records
@@ -70,6 +70,17 @@ An AEP event looks like this:
   ]
 }
 ```
+
+## Storage guarantees
+
+- AEP validation runs before a transaction writes any rows.
+- Reimporting an identical event is a no-op.
+- Reusing an event ID with different content creates an auditable quarantine
+  record and never overwrites canonical evidence.
+- Raw JSON is not copied into FTS5; tool input and free text require an explicit
+  redaction-approved search projection.
+- Session deletion cascades through events, conflicts, and search rows, then
+  removes only artifacts that no remaining event references.
 
 ## Security and privacy
 

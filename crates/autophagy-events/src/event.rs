@@ -14,6 +14,16 @@ pub enum SpecVersion {
     V0_1,
 }
 
+impl SpecVersion {
+    /// Return the stable wire-format value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V0_1 => "aep/0.1",
+        }
+    }
+}
+
 /// Normalized kind of agent activity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EventKind {
@@ -62,6 +72,27 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Return the stable wire-format value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStarted => "session.started",
+            Self::SessionEnded => "session.ended",
+            Self::PromptSubmitted => "prompt.submitted",
+            Self::DecisionRecorded => "decision.recorded",
+            Self::ToolCalled => "tool.called",
+            Self::ToolCompleted => "tool.completed",
+            Self::ToolFailed => "tool.failed",
+            Self::FileRead => "file.read",
+            Self::FileChanged => "file.changed",
+            Self::TestFailed => "test.failed",
+            Self::TestPassed => "test.passed",
+            Self::UserCorrectedAgent => "user.corrected_agent",
+            Self::UserRejectedAction => "user.rejected_action",
+            Self::ContextCompacted => "context.compacted",
+        }
+    }
+
     const fn requires_tool(self) -> bool {
         matches!(
             self,
@@ -111,6 +142,21 @@ pub enum ArtifactKind {
     /// An artifact not represented by another v0.1 kind.
     #[serde(rename = "other")]
     Other,
+}
+
+impl ArtifactKind {
+    /// Return the stable wire-format value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::GitCommit => "git.commit",
+            Self::GitDiff => "git.diff",
+            Self::Test => "test",
+            Self::CommandOutput => "command.output",
+            Self::Other => "other",
+        }
+    }
 }
 
 /// A file, commit, test, or other durable object referenced by an event.
