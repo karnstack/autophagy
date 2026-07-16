@@ -59,11 +59,13 @@ SQLite tools.
 
 ## Release readiness
 
-Status: in progress.
+Status: complete.
 
-All five alpha slices above are complete, closing the alpha sequence. The first
-release is now being prepared: the root `CHANGELOG.md` consolidates the history
-of pull requests #1–#18, and `.github/workflows/release.yml` builds the CLI and
-macOS app bundle and drafts a GitHub release on a `v*` tag push. The workspace
-version remains `0.1.0-alpha.1` and nothing is published yet — a human performs
-the actual release.
+All five alpha slices above are complete, closing the alpha sequence. Release
+packaging continued in
+[`docs/roadmap/release-0.1.0-pull-requests.md`](release-0.1.0-pull-requests.md):
+pull requests #19–#27 add a second installation target, optional local-model
+synthesis, two more adapters, a macOS menu-bar experience, continuous
+watch/daemon ingestion, and the version-`0.1.0` packaging pass itself. The
+workspace version is `0.1.0`; a human still performs the actual tag and
+release.

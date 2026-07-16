@@ -8,8 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Initial development toward the first release. The workspace version is
-`0.1.0-alpha.1`; nothing has been published yet.
+## [0.1.0] - 2026-07-17
+
+The first release. The workspace version is `0.1.0`.
 
 ### Added
 
@@ -69,9 +70,47 @@ Initial development toward the first release. The workspace version is
   patterns, mutations, and lifecycle-audit views; privacy settings; and
   destructive-action confirmation (#18).
 
+#### 0.1.0 — installation targets, local model providers, more adapters, and continuous ingestion
+
+- Claude Code installation target: shadow-passed mutations can now be
+  materialized as repo-scoped Claude Code skills at
+  `.claude/skills/autophagy-<id>/SKILL.md`, sharing one
+  `InstallTarget`-parameterized planning, materialization, and rollback path
+  with the existing Codex target (`--target codex|claude-code`) (#21).
+- Local model synthesis providers: an Ollama provider and an OpenAI-compatible
+  provider (llama.cpp, LM Studio, vLLM) enrich mutation candidates against a
+  loopback-default local inference endpoint, with redirect-safety hardening,
+  explicit token accounting, and a mutation/0.2 provenance block recording
+  provider, model, and prompt/response token counts on every synthesized
+  candidate (#22).
+- Pi and OpenCode adapters: two more native session adapters, mirroring the
+  Codex adapter's discovery/ingestion separation, incremental cursoring, and
+  redaction-gated search projection, so `autophagy import --adapter pi` and
+  `--adapter opencode` join Claude Code and Codex (#23).
+- macOS menu-bar experience: an always-available menu-bar extra showing
+  connection state, quick counts, candidate counts by lifecycle state, and the
+  most recent candidates, plus an opt-in menu-bar-only (no Dock icon) runtime
+  preference and mutation-detail surfacing of v0.2 synthesis provenance and
+  install target (#24).
+- Watch mode and daemon lifecycle: a foreground `autophagy watch` loop and an
+  `autophagy daemon install|uninstall|status` lifecycle (launchd on macOS,
+  a systemd user unit on Linux) for continuous, ingest-only import under the
+  same redaction and privacy gates as one-shot import (#25, #26).
+
+### Fixed
+
+- Retrieval CLI and ranking edge cases: `autophagy search` with neither a
+  query nor `--signature` now fails fast as an argument error, and dual
+  signature-and-full-text matches outside a single source's top-N are no
+  longer misclassified or dropped (#19).
+- macOS app: read-only open of a cleanly checkpointed WAL database now
+  succeeds instead of appearing empty, and refresh re-opens the read-only
+  connection so newly written rows become visible (#24).
+
 ### Changed
 
 - Normalized the product blueprint into Markdown (#2).
 - Added repository agent guidance in `CLAUDE.md` (#15).
 
-[Unreleased]: https://github.com/karnstack/autophagy/commits/main
+[Unreleased]: https://github.com/karnstack/autophagy/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/karnstack/autophagy/releases/tag/v0.1.0
