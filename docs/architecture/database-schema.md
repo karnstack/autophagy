@@ -1,6 +1,6 @@
-# Milestone 1 database schema
+# Local database schema
 
-Status: implemented through PR 4 (2026-07-16)
+Status: implemented through Phase 2 candidate registry (2026-07-16)
 
 SQLite is the single-user source of truth. Foreign keys and WAL mode are enabled
 per connection. Timestamps are canonical RFC 3339 UTC strings so exports remain
@@ -144,6 +144,43 @@ CREATE TABLE source_cursors (
   PRIMARY KEY (adapter, instance_key, origin)
 ) STRICT;
 
+CREATE TABLE mutation_candidates (
+  mutation_id       TEXT PRIMARY KEY,
+  source_finding_id TEXT NOT NULL UNIQUE,
+  source_detector   TEXT NOT NULL,
+  equivalence_key   TEXT NOT NULL UNIQUE,
+  spec_version      TEXT NOT NULL,
+  semantic_version  TEXT NOT NULL,
+  state             TEXT NOT NULL,
+  package_json      TEXT NOT NULL,
+  content_hash      BLOB NOT NULL,
+  challenge_json    TEXT,
+  rejection_reason  TEXT,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE mutation_evidence (
+  mutation_id TEXT NOT NULL REFERENCES mutation_candidates(mutation_id)
+    ON DELETE CASCADE,
+  event_id    TEXT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+  role        TEXT NOT NULL,
+  ordinal     INTEGER NOT NULL,
+  PRIMARY KEY (mutation_id, role, ordinal),
+  UNIQUE (mutation_id, event_id)
+) STRICT;
+
+CREATE TABLE mutation_transitions (
+  transition_id INTEGER PRIMARY KEY,
+  mutation_id   TEXT NOT NULL REFERENCES mutation_candidates(mutation_id)
+    ON DELETE CASCADE,
+  from_state    TEXT,
+  to_state      TEXT NOT NULL,
+  reason        TEXT NOT NULL,
+  metadata_json TEXT NOT NULL,
+  occurred_at   TEXT NOT NULL
+) STRICT;
+
 CREATE VIRTUAL TABLE events_fts USING fts5(
   project_path,
   tool_name,
@@ -173,7 +210,12 @@ are never indexed blindly.
    its source provenance and observation count. The canonical event is never
    silently overwritten.
 5. Source-file fingerprints and cursors avoid rescanning unchanged inputs, but
-   correctness does not depend on that optimization.
+correctness does not depend on that optimization.
+
+Mutation registration applies the same immutable-content rule. Matching IDs and
+content hashes are no-ops; matching IDs with different package content fail.
+The unique source-finding and semantic equivalence keys prevent duplicate
+proposals from entering the registry.
 
 `source_cursors` stores the last complete byte and physical-line boundary plus
 adapter-defined state. The Claude Code adapter includes pending tool calls in
@@ -183,6 +225,9 @@ bounded prefix hash detects replacement or truncation and resets safely.
 ## Deletion
 
 Deleting a session cascades through events, conflict records, event-to-artifact
-links, and FTS projections. Unreferenced artifacts are removed in the same
-transaction. Connections enable SQLite `secure_delete`; `VACUUM` remains an
-explicit user operation because it has performance and disk-space implications.
+links, and FTS projections. If any cited support or counterexample is removed, a
+trigger deletes its mutation candidate; the candidate then cascades through its
+remaining evidence links and audit transitions. Unreferenced artifacts are
+removed in the same transaction. Connections enable SQLite `secure_delete`;
+`VACUUM` remains an explicit user operation because it has performance and
+disk-space implications.

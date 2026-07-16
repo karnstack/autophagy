@@ -4,7 +4,7 @@ mod generate;
 mod model;
 mod validate;
 
-pub use generate::{GenerationOutcome, generate_candidate, generate_candidates};
+pub use generate::{GenerationOutcome, equivalence_key, generate_candidate, generate_candidates};
 pub use model::{
     CandidateHypothesis, GeneratedBy, Intervention, InterventionKind, LifecycleState,
     MutationPackage, MutationSpecVersion, PermissionManifest, PromotionPolicy, Trigger,

@@ -62,6 +62,12 @@ pub enum StoreError {
         /// Rejected zero-based artifact position.
         ordinal: usize,
     },
+    /// A mutation evidence position cannot fit `SQLite`'s integer representation.
+    #[error("mutation evidence ordinal {ordinal} exceeds SQLite's integer range")]
+    MutationEvidenceOrdinalOutOfRange {
+        /// Rejected zero-based evidence position.
+        ordinal: usize,
+    },
     /// An incremental cursor cannot fit `SQLite`'s signed integer representation.
     #[error("cursor {field} value {value} exceeds SQLite's integer range")]
     CursorOutOfRange {
@@ -100,4 +106,29 @@ pub enum StoreError {
     /// Full-text search queries cannot be blank.
     #[error("search query must not be empty or whitespace")]
     EmptySearchQuery,
+    /// A mutation ID was not present in the registry.
+    #[error("mutation '{mutation_id}' was not found")]
+    MutationNotFound {
+        /// Missing mutation identity.
+        mutation_id: String,
+    },
+    /// Immutable mutation content changed under the same ID.
+    #[error("mutation '{mutation_id}' already exists with different package content")]
+    MutationContentConflict {
+        /// Conflicting mutation identity.
+        mutation_id: String,
+    },
+    /// A lifecycle transition was not allowed from the current state.
+    #[error("mutation '{mutation_id}' cannot transition from '{from_state}' to '{to_state}'")]
+    MutationStateTransition {
+        /// Mutation identity.
+        mutation_id: String,
+        /// Current registry state.
+        from_state: String,
+        /// Requested state.
+        to_state: &'static str,
+    },
+    /// A required lifecycle reason was blank.
+    #[error("mutation lifecycle reason must not be blank")]
+    InvalidMutationReason,
 }

@@ -30,6 +30,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "incremental source cursors",
         sql: include_str!("../migrations/0002_source_cursors.sql"),
     },
+    Migration {
+        version: 3,
+        description: "immutable mutation candidate registry",
+        sql: include_str!("../migrations/0003_mutation_registry.sql"),
+    },
 ];
 
 pub(crate) fn apply(connection: &mut Connection) -> Result<(), StoreError> {
@@ -116,14 +121,14 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO schema_migrations(version, description, checksum, applied_at)
-                 VALUES (3, 'future', ?1, '2026-07-16T00:00:00Z')",
+                 VALUES (4, 'future', ?1, '2026-07-16T00:00:00Z')",
                 params![[7_u8; 32].as_slice()],
             )
             .expect("future migration");
 
         assert!(matches!(
             apply(&mut connection),
-            Err(StoreError::DatabaseTooNew { version: 3 })
+            Err(StoreError::DatabaseTooNew { version: 4 })
         ));
     }
 }

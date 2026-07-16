@@ -6,6 +6,9 @@ candidates. The normative JSON Schema is [`schema.json`](schema.json).
 V0.1 intentionally supports one intervention: `agent_instruction`. Generated
 candidates request no filesystem, command, environment, or network capability.
 They cannot be installed, executed, promoted, or marked active by this version.
+The package remains permanently in its generated `candidate` state; challenged
+or rejected review state belongs to the audited registry, outside this immutable
+wire object.
 
 Each package contains:
 

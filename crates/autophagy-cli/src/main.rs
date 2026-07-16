@@ -1,6 +1,7 @@
 //! Command-line entry point for importing and querying local agent activity.
 
 use std::{
+    collections::BTreeSet,
     fmt::Write as _,
     fs::{self, File},
     io::{self, BufRead, BufReader, Write},
@@ -16,11 +17,12 @@ use autophagy_adapter_codex::{
 };
 use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
 use autophagy_events::Event;
-use autophagy_mutations::{GenerationOutcome, generate_candidates};
+use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
 use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
 use autophagy_store::{
-    DeleteAllSummary, DeleteSummary, EventStore, PruneSummary, SearchHit, SessionSummary,
-    StoreError,
+    DeleteAllSummary, DeleteSummary, EventStore, MutationDetails, MutationRecord,
+    MutationRegisterOutcome, MutationRegistration, MutationTransitionOutcome, PruneSummary,
+    SearchHit, SessionSummary, StoreError,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
@@ -151,14 +153,10 @@ enum Commands {
         thresholds: ThresholdArgs,
     },
 
-    /// Propose review-only, zero-permission mutation candidates from findings.
+    /// Manage review-only, zero-permission mutation candidates.
     Mutations {
-        /// Limit candidate generation to one exact project path.
-        #[arg(long, value_name = "PATH")]
-        project: Option<String>,
-
-        #[command(flatten)]
-        thresholds: ThresholdArgs,
+        #[command(subcommand)]
+        action: MutationAction,
     },
 
     /// Export redacted canonical AEP events as JSONL to standard output.
@@ -231,6 +229,74 @@ enum DeleteTarget {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum MutationAction {
+    /// Detect findings and register deterministic review candidates.
+    Propose {
+        /// Limit candidate generation to one exact project path.
+        #[arg(long, value_name = "PATH")]
+        project: Option<String>,
+
+        #[command(flatten)]
+        thresholds: ThresholdArgs,
+
+        /// Generate packages without changing the registry.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List all registered candidates and their current state.
+    List,
+    /// Show one immutable package and its complete lifecycle audit.
+    Show {
+        /// Stable mutation identity.
+        mutation_id: String,
+    },
+    /// Record completion of every adversarial review check.
+    Challenge {
+        /// Stable mutation identity.
+        mutation_id: String,
+
+        /// Completed challenge check. Repeat until all required checks are present.
+        #[arg(long = "check", value_enum, value_name = "CHECK")]
+        checks: Vec<ChallengeCheck>,
+
+        /// Optional reviewer context retained in the audit record.
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+    },
+    /// Reject a candidate with an auditable reason.
+    Reject {
+        /// Stable mutation identity.
+        mutation_id: String,
+
+        /// Human-readable rejection reason.
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum ChallengeCheck {
+    CoincidenceConsidered,
+    SessionsComparable,
+    TriggerObservable,
+    LegitimateUsesBounded,
+    EquivalentSearched,
+    CounterexamplesReviewed,
+}
+
+impl ChallengeCheck {
+    const ALL: [Self; 6] = [
+        Self::CoincidenceConsidered,
+        Self::SessionsComparable,
+        Self::TriggerObservable,
+        Self::LegitimateUsesBounded,
+        Self::EquivalentSearched,
+        Self::CounterexamplesReviewed,
+    ];
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", content = "result", rename_all = "snake_case")]
 enum CommandReport {
@@ -239,7 +305,14 @@ enum CommandReport {
     Search(Vec<SearchHit>),
     Digest(DigestReport),
     Patterns(Vec<EvidencePacket>),
-    Mutations(Vec<GenerationOutcome>),
+    #[serde(rename = "mutations_propose")]
+    MutationProposal(MutationProposalReport),
+    #[serde(rename = "mutations_list")]
+    MutationList(Vec<MutationRecord>),
+    #[serde(rename = "mutations_show")]
+    MutationShow(MutationDetails),
+    #[serde(rename = "mutations_transition")]
+    MutationTransition(MutationTransitionOutcome),
     Export(Vec<Event>),
     Prune(PruneSummary),
     DeleteSession(DeleteSummary),
@@ -254,6 +327,21 @@ struct DigestReport {
     model_used: bool,
     network_used: bool,
     findings: Vec<EvidencePacket>,
+}
+
+#[derive(Debug, Serialize)]
+struct MutationProposalReport {
+    dry_run: bool,
+    generated: Vec<GenerationOutcome>,
+    registrations: Vec<MutationRegisterOutcome>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChallengeAssessment {
+    spec_version: &'static str,
+    checks: Vec<ChallengeCheck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -282,7 +370,10 @@ impl CommandReport {
             | Self::Search(_)
             | Self::Digest(_)
             | Self::Patterns(_)
-            | Self::Mutations(_)
+            | Self::MutationProposal(_)
+            | Self::MutationList(_)
+            | Self::MutationShow(_)
+            | Self::MutationTransition(_)
             | Self::Export(_)
             | Self::Prune(_)
             | Self::DeleteSession(_)
@@ -315,6 +406,8 @@ enum CliError {
     TimeFormat(#[from] time::error::Format),
     #[error("deleting all data requires --confirm delete-all")]
     DeleteAllConfirmation,
+    #[error("challenge is incomplete; missing checks: {0}")]
+    IncompleteChallenge(String),
 }
 
 fn main() -> ExitCode {
@@ -459,16 +552,7 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let events = store.list_events_for_detection(project.as_deref())?;
             Ok(CommandReport::Patterns(detect(&events, thresholds.into())))
         }
-        Commands::Mutations {
-            project,
-            thresholds,
-        } => {
-            let database = resolve_database_path(cli.database)?;
-            let store = open_store(&database)?;
-            let events = store.list_events_for_detection(project.as_deref())?;
-            let findings = detect(&events, thresholds.into());
-            Ok(CommandReport::Mutations(generate_candidates(&findings)))
-        }
+        Commands::Mutations { action } => execute_mutation_action(cli.database, action),
         Commands::Export { project } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
@@ -505,6 +589,96 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
                 }
             }
         }
+    }
+}
+
+fn execute_mutation_action(
+    database: Option<PathBuf>,
+    action: MutationAction,
+) -> Result<CommandReport, CliError> {
+    let database = resolve_database_path(database)?;
+    let mut store = open_store(&database)?;
+    match action {
+        MutationAction::Propose {
+            project,
+            thresholds,
+            dry_run,
+        } => {
+            let events = store.list_events_for_detection(project.as_deref())?;
+            let findings = detect(&events, thresholds.into());
+            let generated = generate_candidates(&findings);
+            let mut registrations = Vec::new();
+            if !dry_run {
+                for outcome in &generated {
+                    let GenerationOutcome::Candidate { package } = outcome else {
+                        continue;
+                    };
+                    let registration = MutationRegistration {
+                        mutation_id: package.mutation_id.clone(),
+                        source_finding_id: package.source_finding_id.clone(),
+                        source_detector: package.source_detector.as_str().to_owned(),
+                        equivalence_key: equivalence_key(package),
+                        spec_version: package.spec_version.as_str().to_owned(),
+                        semantic_version: package.version.clone(),
+                        package: serde_json::to_value(package)?,
+                        supporting_event_ids: package.hypothesis.supporting_event_ids.clone(),
+                        counterexample_event_ids: package
+                            .hypothesis
+                            .counterexample_event_ids
+                            .clone(),
+                    };
+                    registrations.push(store.register_mutation(&registration)?);
+                }
+            }
+            Ok(CommandReport::MutationProposal(MutationProposalReport {
+                dry_run,
+                generated,
+                registrations,
+            }))
+        }
+        MutationAction::List => Ok(CommandReport::MutationList(store.list_mutations()?)),
+        MutationAction::Show { mutation_id } => Ok(CommandReport::MutationShow(
+            store.get_mutation(&mutation_id)?,
+        )),
+        MutationAction::Challenge {
+            mutation_id,
+            checks,
+            note,
+        } => {
+            let completed = checks.into_iter().collect::<BTreeSet<_>>();
+            let missing = ChallengeCheck::ALL
+                .into_iter()
+                .filter(|check| !completed.contains(check))
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                let missing = missing
+                    .iter()
+                    .map(|check| {
+                        check
+                            .to_possible_value()
+                            .expect("value enum")
+                            .get_name()
+                            .to_owned()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(CliError::IncompleteChallenge(missing));
+            }
+            let assessment = ChallengeAssessment {
+                spec_version: "challenge/0.1",
+                checks: completed.into_iter().collect(),
+                note,
+            };
+            Ok(CommandReport::MutationTransition(
+                store.challenge_mutation(&mutation_id, &serde_json::to_value(assessment)?)?,
+            ))
+        }
+        MutationAction::Reject {
+            mutation_id,
+            reason,
+        } => Ok(CommandReport::MutationTransition(
+            store.reject_mutation(&mutation_id, &reason)?,
+        )),
     }
 }
 
@@ -549,6 +723,7 @@ fn derive_instance_key(input: &Path) -> Result<String, CliError> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_report(
     mut writer: impl Write,
     format: OutputFormat,
@@ -603,13 +778,56 @@ fn write_report(
                 write_findings(&mut writer, &report.findings)?;
             }
             CommandReport::Patterns(findings) => write_findings(&mut writer, findings)?,
-            CommandReport::Mutations(outcomes) => write_mutations(&mut writer, outcomes)?,
+            CommandReport::MutationProposal(report) => {
+                write_mutation_proposal(&mut writer, report)?;
+            }
+            CommandReport::MutationList(mutations) => {
+                if mutations.is_empty() {
+                    writeln!(writer, "no registered mutation candidates")?;
+                }
+                for mutation in mutations {
+                    writeln!(
+                        writer,
+                        "{}\t{}\t{}",
+                        mutation.mutation_id,
+                        mutation.state,
+                        mutation.package["title"].as_str().unwrap_or("untitled")
+                    )?;
+                }
+            }
+            CommandReport::MutationShow(details) => {
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}",
+                    details.mutation.mutation_id,
+                    details.mutation.state,
+                    details.mutation.package["title"]
+                        .as_str()
+                        .unwrap_or("untitled")
+                )?;
+                for transition in &details.transitions {
+                    writeln!(
+                        writer,
+                        "{}\t{} -> {}\t{}",
+                        transition.occurred_at,
+                        transition.from_state.as_deref().unwrap_or("none"),
+                        transition.to_state,
+                        transition.reason
+                    )?;
+                }
+            }
+            CommandReport::MutationTransition(outcome) => writeln!(
+                writer,
+                "{}\t{} -> {}\tchanged={}",
+                outcome.mutation_id, outcome.from_state, outcome.to_state, outcome.changed
+            )?,
             CommandReport::Prune(summary) => writeln!(
                 writer,
-                "{} sessions · {} events · {} artifacts{}",
+                "{} sessions · {} events · {} artifacts · {} mutations{}",
                 summary.sessions_deleted,
                 summary.events_deleted,
                 summary.artifacts_deleted,
+                summary.mutations_deleted,
                 if summary.dry_run {
                     " · dry run"
                 } else {
@@ -618,18 +836,22 @@ fn write_report(
             )?,
             CommandReport::DeleteSession(summary) => writeln!(
                 writer,
-                "session_deleted={} · {} events · {} artifacts",
-                summary.session_deleted, summary.events_deleted, summary.artifacts_deleted
+                "session_deleted={} · {} events · {} artifacts · {} mutations",
+                summary.session_deleted,
+                summary.events_deleted,
+                summary.artifacts_deleted,
+                summary.mutations_deleted
             )?,
             CommandReport::DeleteAll(summary) => writeln!(
                 writer,
-                "{} sources · {} sessions · {} events · {} artifacts · {} conflicts · {} cursors deleted",
+                "{} sources · {} sessions · {} events · {} artifacts · {} conflicts · {} cursors · {} mutations deleted",
                 summary.sources_deleted,
                 summary.sessions_deleted,
                 summary.events_deleted,
                 summary.artifacts_deleted,
                 summary.conflicts_deleted,
-                summary.cursors_deleted
+                summary.cursors_deleted,
+                summary.mutations_deleted
             )?,
             CommandReport::Export(_) => unreachable!("export handled before format selection"),
         },
@@ -655,11 +877,14 @@ fn write_findings(writer: &mut impl Write, findings: &[EvidencePacket]) -> io::R
     Ok(())
 }
 
-fn write_mutations(writer: &mut impl Write, outcomes: &[GenerationOutcome]) -> io::Result<()> {
-    if outcomes.is_empty() {
+fn write_mutation_proposal(
+    writer: &mut impl Write,
+    report: &MutationProposalReport,
+) -> io::Result<()> {
+    if report.generated.is_empty() {
         writeln!(writer, "no mutation candidates above evidence threshold")?;
     }
-    for outcome in outcomes {
+    for outcome in &report.generated {
         match outcome {
             GenerationOutcome::Candidate { package } => writeln!(
                 writer,
@@ -672,6 +897,11 @@ fn write_mutations(writer: &mut impl Write, outcomes: &[GenerationOutcome]) -> i
                 writeln!(writer, "{finding_id}\tinsufficient evidence\t{reason}")?;
             }
         }
+    }
+    if report.dry_run {
+        writeln!(writer, "dry run · registry unchanged")?;
+    } else if !report.registrations.is_empty() {
+        writeln!(writer, "{} registry outcomes", report.registrations.len())?;
     }
     Ok(())
 }

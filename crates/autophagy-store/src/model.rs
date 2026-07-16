@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::Value;
 
 /// Stable provenance for one adapter installation or history directory.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -136,6 +137,8 @@ pub struct DeleteSummary {
     pub events_deleted: i64,
     /// Number of artifacts that became unreferenced and were removed.
     pub artifacts_deleted: i64,
+    /// Mutation candidates removed because cited evidence was deleted.
+    pub mutations_deleted: i64,
 }
 
 /// Effect of deleting all locally persisted Autophagy data.
@@ -153,6 +156,8 @@ pub struct DeleteAllSummary {
     pub conflicts_deleted: i64,
     /// Removed incremental source cursors.
     pub cursors_deleted: i64,
+    /// Removed mutation candidates.
+    pub mutations_deleted: i64,
 }
 
 /// Effect or dry-run preview of a retention prune.
@@ -164,6 +169,124 @@ pub struct PruneSummary {
     pub events_deleted: i64,
     /// Artifacts left unreferenced by selected sessions.
     pub artifacts_deleted: i64,
+    /// Mutation candidates removed because cited evidence was pruned.
+    pub mutations_deleted: i64,
     /// Whether the transaction was intentionally rolled back.
     pub dry_run: bool,
+}
+
+/// Owned input for immutable candidate registration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MutationRegistration {
+    /// Stable mutation identity.
+    pub mutation_id: String,
+    /// Source Evidence Packet finding.
+    pub source_finding_id: String,
+    /// Detector family.
+    pub source_detector: String,
+    /// Stable semantic equivalence hash.
+    pub equivalence_key: String,
+    /// Package wire version.
+    pub spec_version: String,
+    /// Package semantic version.
+    pub semantic_version: String,
+    /// Complete immutable package JSON.
+    pub package: Value,
+    /// Supporting event IDs in package order.
+    pub supporting_event_ids: Vec<String>,
+    /// Counterexample event IDs in package order.
+    pub counterexample_event_ids: Vec<String>,
+}
+
+/// Result of registering one generated package.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MutationRegisterOutcome {
+    /// A new immutable candidate was stored.
+    Inserted {
+        /// Stored mutation identity.
+        mutation_id: String,
+    },
+    /// The same ID and package content already existed.
+    Duplicate {
+        /// Existing identical mutation identity.
+        mutation_id: String,
+    },
+    /// An equivalent trigger/intervention already exists under another ID.
+    EquivalentExisting {
+        /// Proposed mutation identity.
+        mutation_id: String,
+        /// Existing equivalent mutation identity.
+        existing_mutation_id: String,
+    },
+}
+
+/// One immutable package plus mutable audited registry state.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MutationRecord {
+    /// Stable mutation identity.
+    pub mutation_id: String,
+    /// Source finding identity.
+    pub source_finding_id: String,
+    /// Source detector family.
+    pub source_detector: String,
+    /// Semantic duplicate-detection key.
+    pub equivalence_key: String,
+    /// Mutation package wire version.
+    pub spec_version: String,
+    /// Package semantic version.
+    pub semantic_version: String,
+    /// Current registry lifecycle state.
+    pub state: String,
+    /// Immutable candidate package.
+    pub package: Value,
+    /// Completed challenge checklist, when challenged.
+    pub challenge: Option<Value>,
+    /// User-supplied rejection reason, when rejected.
+    pub rejection_reason: Option<String>,
+    /// Canonical creation timestamp.
+    pub created_at: String,
+    /// Canonical last-transition timestamp.
+    pub updated_at: String,
+}
+
+/// One append-only lifecycle audit entry.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MutationTransition {
+    /// Monotonic audit row identity.
+    pub transition_id: i64,
+    /// Mutation whose state changed.
+    pub mutation_id: String,
+    /// Previous state; absent for initial generation.
+    pub from_state: Option<String>,
+    /// New lifecycle state.
+    pub to_state: String,
+    /// Human-readable transition reason.
+    pub reason: String,
+    /// Structured checklist or transition context.
+    pub metadata: Value,
+    /// Canonical transition timestamp.
+    pub occurred_at: String,
+}
+
+/// Candidate and its complete transition history.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MutationDetails {
+    /// Current registry record.
+    pub mutation: MutationRecord,
+    /// Complete append-only audit history.
+    pub transitions: Vec<MutationTransition>,
+}
+
+/// Idempotent lifecycle transition result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MutationTransitionOutcome {
+    /// Mutation identity.
+    pub mutation_id: String,
+    /// State before the request.
+    pub from_state: String,
+    /// State after the request.
+    pub to_state: String,
+    /// Whether a new transition was committed.
+    pub changed: bool,
 }

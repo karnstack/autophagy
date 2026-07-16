@@ -11,12 +11,24 @@ pub enum MutationSpecVersion {
     V0_1,
 }
 
+impl MutationSpecVersion {
+    /// Stable wire representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V0_1 => "mutation/0.1",
+        }
+    }
+}
+
 /// Auditable lifecycle state external to installation state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleState {
     /// Proposed but not challenged or evaluated.
     Candidate,
+    /// Challenge checklist passed; replay is the next allowed gate.
+    Challenged,
     /// A user rejected the candidate before activation.
     Rejected,
 }
@@ -27,6 +39,7 @@ impl LifecycleState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Candidate => "candidate",
+            Self::Challenged => "challenged",
             Self::Rejected => "rejected",
         }
     }
