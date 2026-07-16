@@ -31,5 +31,8 @@ jobs:
           version: 2026.6.1
           cache: true
 
+      - name: Warm Rust toolchain
+        run: mise exec -- rustc --version
+
       - name: Run quality gate
         run: mise run check
