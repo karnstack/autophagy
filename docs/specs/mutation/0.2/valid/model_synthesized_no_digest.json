@@ -1,0 +1,47 @@
+{
+  "spec_version": "mutation/0.2",
+  "mutation_id": "mut_model_correction_rule",
+  "version": "0.1.0",
+  "state": "candidate",
+  "generated_by": "model_synthesis_v1",
+  "source_finding_id": "fnd_correction_use_ripgrep",
+  "source_detector": "repeated_user_correction",
+  "title": "Prefer ripgrep before falling back to grep",
+  "hypothesis": {
+    "statement": "The user repeatedly corrects a plain `grep` search to `rg`, so applying the rule first prevents the correction.",
+    "expected_result": "Matching sessions use `rg` before searching and no longer require the same user correction.",
+    "supporting_event_ids": ["evt_grep_1", "evt_grep_2"],
+    "counterexample_event_ids": [],
+    "failure_cases": [
+      "The user can intentionally want plain grep for a portable script."
+    ]
+  },
+  "triggers": [
+    { "type": "agent_decision", "selector": "correction/v1|prefer rg over grep" }
+  ],
+  "exclusions": [
+    "Do not intervene when the user explicitly overrides this rule for the current task."
+  ],
+  "intervention": {
+    "type": "agent_instruction",
+    "instruction": "Before searching the tree, apply this explicit user-authored rule: prefer rg over grep."
+  },
+  "permissions": {
+    "filesystem_read": [],
+    "filesystem_write": [],
+    "commands": [],
+    "environment": [],
+    "network": false
+  },
+  "promotion": {
+    "minimum_replays": 5,
+    "minimum_success_rate_bps": 8000,
+    "maximum_false_positive_rate_bps": 1000
+  },
+  "provenance": {
+    "provider": "openai-compatible",
+    "model_name": "local-qwen3-8b",
+    "model_revision": "q4_k_m",
+    "manifest_spec_version": "synthesis-manifest/0.2"
+  }
+}

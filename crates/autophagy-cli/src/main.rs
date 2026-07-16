@@ -38,8 +38,9 @@ use autophagy_store::{
     ShadowRegisterOutcome, ShadowRegistration, StoreError,
 };
 use autophagy_synthesis::{
-    DeterministicReferenceProvider, ManifestError, ModelManifest, SynthesisOutcome,
-    SynthesisProvider, synthesize_candidates,
+    DeterministicReferenceProvider, EndpointLocality, ManifestError, ModelFormat, ModelManifest,
+    OllamaProvider, OpenAiCompatibleProvider, SynthesisOutcome, SynthesisProvider, TokenUsage,
+    classify_endpoint, synthesize_candidates,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
@@ -300,13 +301,18 @@ enum MutationAction {
     },
     /// Synthesize candidates through a provider-neutral, contract-bound boundary.
     Synthesize {
-        /// Synthesis provider to consult.
+        /// Synthesis provider to consult. Must match the manifest `format`.
         #[arg(long, value_enum, default_value_t = SynthesisProviderChoice::Deterministic)]
         provider: SynthesisProviderChoice,
 
-        /// Local model manifest (synthesis-manifest/0.1) JSON file.
+        /// Local model manifest (synthesis-manifest/0.1 or 0.2) JSON file.
         #[arg(long, value_name = "PATH")]
         manifest: PathBuf,
+
+        /// Allow an HTTP provider endpoint whose host is not loopback. Evidence
+        /// then leaves this machine; a warning is emitted. Off by default.
+        #[arg(long)]
+        allow_remote_endpoint: bool,
 
         /// Limit synthesis to one exact project path.
         #[arg(long, value_name = "PATH")]
@@ -435,6 +441,29 @@ impl From<InstallTargetChoice> for InstallTarget {
 enum SynthesisProviderChoice {
     /// Built-in pure, model-free, offline reference provider.
     Deterministic,
+    /// Local Ollama server (`/api/chat` with JSON Schema structured output).
+    Ollama,
+    /// Local OpenAI-compatible server (`/v1/chat/completions` with `json_schema`).
+    OpenaiCompatible,
+}
+
+impl SynthesisProviderChoice {
+    /// The manifest format this provider choice requires.
+    const fn required_format(self) -> ModelFormat {
+        match self {
+            Self::Deterministic => ModelFormat::Deterministic,
+            Self::Ollama => ModelFormat::Ollama,
+            Self::OpenaiCompatible => ModelFormat::OpenAiCompatible,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deterministic => "deterministic",
+            Self::Ollama => "ollama",
+            Self::OpenaiCompatible => "openai-compatible",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, ValueEnum)]
@@ -511,13 +540,21 @@ struct MutationProposalReport {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct MutationSynthesisReport {
     dry_run: bool,
     provider: String,
     model: String,
     model_used: bool,
     network_used: bool,
+    remote_endpoint_allowed: bool,
     manifest_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_completion_tokens: Option<u64>,
     synthesized: Vec<SynthesisOutcome>,
     registrations: Vec<MutationRegisterOutcome>,
 }
@@ -647,6 +684,18 @@ enum CliError {
     Install(#[from] InstallError),
     #[error(transparent)]
     Manifest(#[from] ManifestError),
+    #[error(
+        "provider '{provider}' requires a manifest with format '{expected}', but the manifest declares '{actual}'"
+    )]
+    ProviderFormatMismatch {
+        provider: &'static str,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    #[error(
+        "synthesis endpoint host '{host}' is not loopback; pass --allow-remote-endpoint to send evidence off this machine"
+    )]
+    RemoteEndpointRefused { host: String },
     #[error("replay scenario cites event '{0}', which is not in the local evidence store")]
     MissingReplayEvidence(String),
     #[error("shadow observation cites event '{0}', which is not in the local evidence store")]
@@ -908,19 +957,53 @@ fn execute_mutation_action(
         MutationAction::Synthesize {
             provider,
             manifest,
+            allow_remote_endpoint,
             project,
             thresholds,
             dry_run,
         } => {
             let manifest_path = manifest.display().to_string();
             let model_manifest = ModelManifest::from_path(&manifest)?;
+            // The provider choice must match what the manifest declares.
+            if model_manifest.format != provider.required_format() {
+                return Err(CliError::ProviderFormatMismatch {
+                    provider: provider.as_str(),
+                    expected: provider.required_format().as_str(),
+                    actual: model_manifest.format.as_str(),
+                });
+            }
             let synthesis_provider: Box<dyn SynthesisProvider> = match provider {
                 SynthesisProviderChoice::Deterministic => Box::new(DeterministicReferenceProvider),
+                SynthesisProviderChoice::Ollama => Box::new(OllamaProvider::from_manifest(
+                    &model_manifest,
+                    allow_remote_endpoint,
+                )),
+                SynthesisProviderChoice::OpenaiCompatible => Box::new(
+                    OpenAiCompatibleProvider::from_manifest(&model_manifest, allow_remote_endpoint),
+                ),
             };
+            // Enforce the loopback default up front for HTTP providers: refuse a
+            // non-loopback endpoint unless the operator opted in, and warn
+            // clearly when they did.
+            let mut warnings = Vec::new();
+            if synthesis_provider.uses_network() {
+                if let Ok(EndpointLocality::Remote { host }) =
+                    classify_endpoint(&model_manifest.path)
+                {
+                    if allow_remote_endpoint {
+                        warnings.push(format!(
+                            "evidence will be sent to NON-LOOPBACK endpoint host '{host}' because --allow-remote-endpoint is set; the structured request (baseline text, constraints, and cited event IDs) leaves this machine"
+                        ));
+                    } else {
+                        return Err(CliError::RemoteEndpointRefused { host });
+                    }
+                }
+            }
             let events = store.list_events_for_detection(project.as_deref())?;
             let findings = detect(&events, thresholds.into());
             let synthesized =
                 synthesize_candidates(&findings, &model_manifest, synthesis_provider.as_ref());
+            let (total_prompt_tokens, total_completion_tokens) = aggregate_usage(&synthesized);
             let mut registrations = Vec::new();
             if !dry_run {
                 for outcome in &synthesized {
@@ -950,7 +1033,11 @@ fn execute_mutation_action(
                 model: model_manifest.name.clone(),
                 model_used: synthesis_provider.uses_model(),
                 network_used: synthesis_provider.uses_network(),
+                remote_endpoint_allowed: allow_remote_endpoint,
                 manifest_path,
+                warnings,
+                total_prompt_tokens,
+                total_completion_tokens,
                 synthesized,
                 registrations,
             }))
@@ -1539,15 +1626,56 @@ fn write_mutation_proposal(
     Ok(())
 }
 
+fn aggregate_usage(outcomes: &[SynthesisOutcome]) -> (Option<u64>, Option<u64>) {
+    let mut prompt: Option<u64> = None;
+    let mut completion: Option<u64> = None;
+    let add = |total: &mut Option<u64>, value: Option<u64>| {
+        if let Some(value) = value {
+            *total = Some(total.unwrap_or(0) + value);
+        }
+    };
+    for outcome in outcomes {
+        let usage = match outcome {
+            SynthesisOutcome::Candidate { usage, .. }
+            | SynthesisOutcome::ProviderDeclined { usage, .. }
+            | SynthesisOutcome::Rejected { usage, .. } => *usage,
+            SynthesisOutcome::InsufficientEvidence { .. }
+            | SynthesisOutcome::ProviderError { .. } => TokenUsage::unavailable(),
+        };
+        add(&mut prompt, usage.prompt_tokens);
+        add(&mut completion, usage.completion_tokens);
+    }
+    (prompt, completion)
+}
+
+fn format_tokens(tokens: Option<u64>) -> String {
+    tokens.map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
+}
+
 fn write_mutation_synthesis(
     writer: &mut impl Write,
     report: &MutationSynthesisReport,
 ) -> io::Result<()> {
+    for warning in &report.warnings {
+        writeln!(writer, "warning: {warning}")?;
+    }
     writeln!(
         writer,
-        "provider={} · model={} · model_used={} · network_used={}",
-        report.provider, report.model, report.model_used, report.network_used
+        "provider={} · model={} · model_used={} · network_used={} · remote_endpoint_allowed={}",
+        report.provider,
+        report.model,
+        report.model_used,
+        report.network_used,
+        report.remote_endpoint_allowed
     )?;
+    if report.model_used {
+        writeln!(
+            writer,
+            "tokens · prompt={} · completion={}",
+            format_tokens(report.total_prompt_tokens),
+            format_tokens(report.total_completion_tokens)
+        )?;
+    }
     if report.synthesized.is_empty() {
         writeln!(writer, "no mutation candidates above evidence threshold")?;
     }
@@ -1567,6 +1695,7 @@ fn write_mutation_synthesis(
                 finding_id,
                 provider,
                 reason,
+                ..
             } => {
                 writeln!(
                     writer,
@@ -1577,6 +1706,7 @@ fn write_mutation_synthesis(
                 finding_id,
                 provider,
                 diagnostics,
+                ..
             } => {
                 writeln!(
                     writer,
@@ -1590,6 +1720,13 @@ fn write_mutation_synthesis(
                         diagnostic.path, diagnostic.code, diagnostic.message
                     )?;
                 }
+            }
+            SynthesisOutcome::ProviderError {
+                finding_id,
+                provider,
+                message,
+            } => {
+                writeln!(writer, "{finding_id}\tprovider {provider} error\t{message}")?;
             }
         }
     }

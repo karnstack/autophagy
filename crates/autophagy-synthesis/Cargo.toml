@@ -14,6 +14,10 @@ autophagy-patterns = { path = "../autophagy-patterns" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Small blocking HTTP client for local model endpoints. Default features are
+# disabled to keep the dependency lean; `rustls` is enabled only so hosted
+# (opt-in, non-loopback) OpenAI-compatible endpoints can be reached over https.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 autophagy-core = { path = "../autophagy-core" }

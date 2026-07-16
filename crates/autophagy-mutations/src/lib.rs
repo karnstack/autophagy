@@ -7,7 +7,7 @@ mod validate;
 pub use generate::{GenerationOutcome, equivalence_key, generate_candidate, generate_candidates};
 pub use model::{
     CandidateHypothesis, GeneratedBy, Intervention, InterventionKind, LifecycleState,
-    MutationPackage, MutationSpecVersion, PermissionManifest, PromotionPolicy, Trigger,
+    MutationPackage, MutationSpecVersion, PermissionManifest, PromotionPolicy, Provenance, Trigger,
     TriggerKind,
 };
 pub use validate::{MutationValidationError, MutationValidationErrors};

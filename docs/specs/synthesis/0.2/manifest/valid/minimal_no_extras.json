@@ -1,0 +1,9 @@
+{
+  "spec_version": "synthesis-manifest/0.2",
+  "name": "local-llama",
+  "format": "openai_compatible",
+  "path": "http://localhost:8080",
+  "revision": "v1",
+  "capabilities": ["mutation_synthesis"],
+  "resource_hints": { "min_memory_mb": 4096 }
+}

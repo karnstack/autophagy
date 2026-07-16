@@ -252,6 +252,9 @@ fn base_package(
             minimum_success_rate_bps: 8_000,
             maximum_false_positive_rate_bps: 1_000,
         },
+        // Deterministic template output is `mutation/0.1`: no model, no
+        // provenance. A model-backed provider stamps provenance downstream.
+        provenance: None,
     }
 }
 

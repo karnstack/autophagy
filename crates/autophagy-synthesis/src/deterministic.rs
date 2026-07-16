@@ -6,7 +6,10 @@
 //! validation, and contract re-validation — is exercisable offline today. It is
 //! also the fixture provider for the boundary's tests.
 
-use crate::provider::{SynthesisProposal, SynthesisProvider, SynthesisRequest, SynthesisResponse};
+use crate::provider::{
+    ProviderError, ProviderResponse, SynthesisProposal, SynthesisProvider, SynthesisRequest,
+    SynthesisResponse,
+};
 
 /// A pure, model-free, I/O-free provider that proposes the deterministic
 /// template baseline unchanged.
@@ -19,9 +22,9 @@ impl SynthesisProvider for DeterministicReferenceProvider {
         "deterministic"
     }
 
-    fn propose(&self, request: &SynthesisRequest) -> SynthesisProposal {
+    fn propose(&self, request: &SynthesisRequest) -> Result<ProviderResponse, ProviderError> {
         let baseline = &request.baseline;
-        SynthesisProposal::Proposed {
+        Ok(ProviderResponse::offline(SynthesisProposal::Proposed {
             response: Box::new(SynthesisResponse {
                 title: baseline.title.clone(),
                 statement: baseline.statement.clone(),
@@ -34,6 +37,6 @@ impl SynthesisProvider for DeterministicReferenceProvider {
                 trigger_selectors: request.constraints.allowed_trigger_selectors.clone(),
                 permissions: request.constraints.permission_ceiling.clone(),
             }),
-        }
+        }))
     }
 }

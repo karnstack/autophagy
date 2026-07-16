@@ -1,0 +1,10 @@
+{
+  "spec_version": "synthesis-manifest/0.2",
+  "name": "local-qwen3-8b",
+  "format": "openai_compatible",
+  "path": "http://127.0.0.1:8080",
+  "revision": "q4_k_m",
+  "capabilities": ["mutation_synthesis"],
+  "resource_hints": { "min_memory_mb": 8192 },
+  "api_key_env": ""
+}

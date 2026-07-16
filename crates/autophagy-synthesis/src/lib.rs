@@ -28,17 +28,22 @@
 
 mod deterministic;
 mod manifest;
+mod prompt;
 mod provider;
+mod remote;
 mod synthesize;
 mod validate;
 
 pub use deterministic::DeterministicReferenceProvider;
 pub use manifest::{
-    Capability, ManifestError, ManifestSpecVersion, ModelFormat, ModelManifest, ResourceHints,
+    Capability, ManifestError, ManifestSpecVersion, ManifestTimeouts, ModelFormat, ModelManifest,
+    ResourceHints,
 };
+pub use prompt::{MAX_COMPLETION_TOKENS, SYSTEM_PROMPT, response_json_schema, user_prompt};
 pub use provider::{
-    SynthesisBaseline, SynthesisConstraints, SynthesisProposal, SynthesisProvider,
-    SynthesisRequest, SynthesisResponse,
+    ProviderError, ProviderResponse, SynthesisBaseline, SynthesisConstraints, SynthesisProposal,
+    SynthesisProvider, SynthesisRequest, SynthesisResponse, TokenUsage,
 };
+pub use remote::{EndpointLocality, OllamaProvider, OpenAiCompatibleProvider, classify_endpoint};
 pub use synthesize::{SynthesisOutcome, synthesize_candidate, synthesize_candidates};
 pub use validate::{SynthesisDiagnostic, SynthesisRejection};

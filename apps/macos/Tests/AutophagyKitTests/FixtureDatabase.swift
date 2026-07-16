@@ -23,13 +23,14 @@ enum FixtureDatabase {
     /// source, several sessions/events, and one challenged + one rejected
     /// mutation candidate (with evidence links and transitions).
     static func populated() -> String {
-        make(schemaVersion: 7) { db in
+        make(schemaVersion: 8) { db in
             createSchema(db)
             exec(db, """
             INSERT INTO schema_migrations(version, description, checksum, applied_at) VALUES
               (1,'initial',zeroblob(32),'2026-07-16T00:00:00Z'),
               (6,'retrieval',zeroblob(32),'2026-07-16T00:00:00Z'),
-              (7,'claude_code_install',zeroblob(32),'2026-07-16T00:00:00Z');
+              (7,'claude_code_install',zeroblob(32),'2026-07-16T00:00:00Z'),
+              (8,'mutation_provenance',zeroblob(32),'2026-07-16T00:00:00Z');
             """)
             exec(db, """
             INSERT INTO sources(source_id, adapter, instance_key, display_name,

@@ -102,8 +102,108 @@ pub enum SynthesisProposal {
         response: Box<SynthesisResponse>,
     },
     /// The provider honestly declined to propose.
+    ///
+    /// Declining is an expected event, not a failure: a model that returns
+    /// unparseable output, or judges the evidence too weak, declines here rather
+    /// than fabricating a candidate.
     Declined {
         /// Inspectable reason for declining.
+        reason: String,
+    },
+}
+
+/// Token accounting a provider reports for one request.
+///
+/// Both counts are optional: when a runtime does not report usage the boundary
+/// records it as unavailable rather than estimating it. The deterministic
+/// reference provider consults no model, so it always reports both as `None`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    /// Tokens the model consumed for the prompt, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    /// Tokens the model produced in the response, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
+}
+
+impl TokenUsage {
+    /// Usage that no model produced or reported.
+    #[must_use]
+    pub const fn unavailable() -> Self {
+        Self {
+            prompt_tokens: None,
+            completion_tokens: None,
+        }
+    }
+
+    /// Whether either count is present.
+    #[must_use]
+    pub const fn is_reported(&self) -> bool {
+        self.prompt_tokens.is_some() || self.completion_tokens.is_some()
+    }
+}
+
+/// A provider's answer to one request: a proposal plus its token accounting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderResponse {
+    /// The structured proposal or honest refusal.
+    pub proposal: SynthesisProposal,
+    /// Token usage the runtime reported, if any.
+    pub usage: TokenUsage,
+}
+
+impl ProviderResponse {
+    /// A model-free proposal with no token accounting.
+    #[must_use]
+    pub fn offline(proposal: SynthesisProposal) -> Self {
+        Self {
+            proposal,
+            usage: TokenUsage::unavailable(),
+        }
+    }
+}
+
+/// A provider-transport or configuration failure, distinct from an honest
+/// decline. These never carry secrets, prompts, or raw payloads.
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    /// The configured endpoint resolves to a non-loopback host and remote
+    /// endpoints were not explicitly allowed. Evidence never leaves the machine
+    /// by default.
+    #[error(
+        "synthesis endpoint '{endpoint}' resolves to non-loopback host '{host}'; \
+         refusing to send evidence off this machine without an explicit \
+         --allow-remote-endpoint opt-in"
+    )]
+    NonLoopbackEndpoint {
+        /// The configured endpoint.
+        endpoint: String,
+        /// The extracted non-loopback host.
+        host: String,
+    },
+    /// The configured endpoint is not a usable `http`/`https` URL.
+    #[error("synthesis endpoint '{endpoint}' is not a valid http(s) URL: {reason}")]
+    InvalidEndpoint {
+        /// The configured endpoint.
+        endpoint: String,
+        /// Why it could not be parsed.
+        reason: String,
+    },
+    /// The manifest named an API-key environment variable that is not set. The
+    /// error names the variable but never its value.
+    #[error("environment variable '{env_var}' named by the manifest 'api_key_env' is not set")]
+    MissingApiKey {
+        /// The environment variable name the manifest declared.
+        env_var: String,
+    },
+    /// The request to the endpoint failed (connection, timeout, or bad status).
+    /// The reason is derived from the transport and never echoes request headers.
+    #[error("synthesis request to '{endpoint}' failed: {reason}")]
+    Transport {
+        /// The endpoint that was contacted.
+        endpoint: String,
+        /// A transport-derived, secret-free description of the failure.
         reason: String,
     },
 }
@@ -134,6 +234,15 @@ pub trait SynthesisProvider {
         false
     }
 
-    /// Produce a structured proposal or an honest refusal.
-    fn propose(&self, request: &SynthesisRequest) -> SynthesisProposal;
+    /// Produce a structured proposal (or honest decline) with token accounting,
+    /// or a transport/configuration [`ProviderError`].
+    ///
+    /// A decline — including a model returning unparseable output — is an
+    /// expected [`Ok`] result, not an error. Only genuine transport or
+    /// configuration failures return [`Err`].
+    ///
+    /// # Errors
+    /// Returns [`ProviderError`] when the endpoint is misconfigured, a required
+    /// API key is missing, a remote endpoint is refused, or the request fails.
+    fn propose(&self, request: &SynthesisRequest) -> Result<ProviderResponse, ProviderError>;
 }

@@ -55,6 +55,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "claude code repo-skill installation target",
         sql: include_str!("../migrations/0007_claude_code_install_target.sql"),
     },
+    Migration {
+        version: 8,
+        description: "accept mutation/0.2 provenance packages",
+        sql: include_str!("../migrations/0008_mutation_provenance.sql"),
+    },
 ];
 
 pub(crate) fn apply(connection: &mut Connection) -> Result<(), StoreError> {
@@ -250,6 +255,93 @@ mod tests {
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .expect("schema version"),
             MIGRATIONS.last().expect("migration").version
+        );
+    }
+
+    #[test]
+    fn provenance_migration_accepts_v0_2_and_preserves_v0_1() {
+        let mut connection = Connection::open_in_memory().expect("database");
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .expect("foreign keys");
+        connection
+            .execute_batch(BOOTSTRAP_SQL)
+            .expect("migration table");
+        // Apply everything through migration 6 (before the install-target and
+        // provenance migrations); apply() then runs migrations 7 and 8.
+        for migration in &MIGRATIONS[..6] {
+            connection.execute_batch(migration.sql).expect("old DDL");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version, description, checksum, applied_at)
+                     VALUES (?1, ?2, ?3, '2026-07-16T00:00:00Z')",
+                    params![
+                        migration.version,
+                        migration.description,
+                        util::sha256(migration.sql.as_bytes()).as_slice(),
+                    ],
+                )
+                .expect("old migration record");
+        }
+        connection
+            .execute(
+                "INSERT INTO mutation_candidates(
+                    mutation_id, source_finding_id, source_detector, equivalence_key,
+                    spec_version, semantic_version, state, package_json, content_hash,
+                    created_at, updated_at
+                 ) VALUES (
+                    'mut_legacy', 'fnd_legacy', 'test', 'eqv_legacy',
+                    'mutation/0.1', '0.1.0', 'candidate', '{}', zeroblob(32),
+                    '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z'
+                 )",
+                [],
+            )
+            .expect("legacy v0.1 candidate");
+
+        // Migration 8 must preserve the v0.1 row and relax the CHECK.
+        apply(&mut connection).expect("provenance upgrade");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT spec_version FROM mutation_candidates WHERE mutation_id = 'mut_legacy'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("legacy spec version"),
+            "mutation/0.1"
+        );
+        // A v0.2 row is now accepted where it would have failed the old CHECK.
+        connection
+            .execute(
+                "INSERT INTO mutation_candidates(
+                    mutation_id, source_finding_id, source_detector, equivalence_key,
+                    spec_version, semantic_version, state, package_json, content_hash,
+                    created_at, updated_at
+                 ) VALUES (
+                    'mut_model', 'fnd_model', 'test', 'eqv_model',
+                    'mutation/0.2', '0.1.0', 'candidate', '{}', zeroblob(32),
+                    '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z'
+                 )",
+                [],
+            )
+            .expect("v0.2 candidate accepted");
+        // An unknown spec version is still rejected.
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO mutation_candidates(
+                        mutation_id, source_finding_id, source_detector, equivalence_key,
+                        spec_version, semantic_version, state, package_json, content_hash,
+                        created_at, updated_at
+                     ) VALUES (
+                        'mut_bad', 'fnd_bad', 'test', 'eqv_bad',
+                        'mutation/9.9', '0.1.0', 'candidate', '{}', zeroblob(32),
+                        '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z'
+                     )",
+                    [],
+                )
+                .is_err(),
+            "unknown spec version must still fail the CHECK"
         );
     }
 }
