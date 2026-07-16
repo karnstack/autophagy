@@ -71,7 +71,7 @@ The daemon writes standard output and error to the app-support data directory:
 
 - macOS: `~/Library/Application Support/sh.autophagy.Autophagy/watch.log` and
   `watch.err.log`.
-- Linux: `~/.local/share/autophagy/Autophagy/watch.log` and `watch.err.log`.
+- Linux: `~/.local/share/autophagy/watch.log` and `watch.err.log`.
 
 `daemon status` shows the last log line when it can read one cheaply.
 

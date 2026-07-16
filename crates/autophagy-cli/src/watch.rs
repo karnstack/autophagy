@@ -17,6 +17,12 @@ use autophagy_adapter_claude_code::{
     ClaudeImportOptions, default_projects_root, import_claude_code,
 };
 use autophagy_adapter_codex::{CodexImportOptions, default_sessions_root, import_codex};
+use autophagy_adapter_opencode::{
+    OpenCodeImportOptions, default_storage_root, import_opencode,
+};
+use autophagy_adapter_pi::{
+    PiImportOptions, default_sessions_root as default_pi_sessions_root, import_pi,
+};
 use autophagy_core::{
     AdapterOutcome, CycleOutcome, CycleReport, SourceError, WatchConfig, WatchSource, WatchSummary,
     run_watch,
@@ -43,11 +49,16 @@ pub enum NativeAdapter {
     ClaudeCode,
     /// Codex rollout transcripts under the sessions root.
     Codex,
+    /// Pi coding-agent sessions under the sessions root.
+    Pi,
+    /// `OpenCode` session storage under the storage root.
+    OpenCode,
 }
 
 impl NativeAdapter {
-    /// Every native adapter, used as the default watch set.
-    pub const ALL: &'static [Self] = &[Self::ClaudeCode, Self::Codex];
+    /// Every native adapter, used as the default watch set. Mirrors the native
+    /// adapters `import` supports, so watch and daemon defaults stay in step.
+    pub const ALL: &'static [Self] = &[Self::ClaudeCode, Self::Codex, Self::Pi, Self::OpenCode];
 
     /// Stable adapter identifier.
     #[must_use]
@@ -55,6 +66,8 @@ impl NativeAdapter {
         match self {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Pi => "pi",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -79,6 +92,24 @@ impl NativeAdapter {
             Self::Codex => {
                 let root = default_sessions_root()?;
                 Ok(Box::new(CodexWatchSource::new(
+                    root,
+                    include_content,
+                    projects,
+                    exclude_paths,
+                )?))
+            }
+            Self::Pi => {
+                let root = default_pi_sessions_root()?;
+                Ok(Box::new(PiWatchSource::new(
+                    root,
+                    include_content,
+                    projects,
+                    exclude_paths,
+                )?))
+            }
+            Self::OpenCode => {
+                let root = default_storage_root()?;
+                Ok(Box::new(OpenCodeWatchSource::new(
                     root,
                     include_content,
                     projects,
@@ -173,6 +204,100 @@ impl WatchSource for CodexWatchSource {
         let summary = import_codex(Some(store), options)?;
         Ok(CycleOutcome {
             adapter: NativeAdapter::Codex.as_str().to_owned(),
+            inserted: summary.inserted,
+            duplicates: summary.duplicates,
+            skipped: summary.skipped,
+            conflicts: summary.conflicts,
+            rejected: summary.rejected,
+            diagnostics: count(summary.diagnostics.len()),
+        })
+    }
+}
+
+struct PiWatchSource {
+    options: Option<PiImportOptions>,
+}
+
+impl PiWatchSource {
+    fn new(
+        root: PathBuf,
+        include_content: bool,
+        projects: &[String],
+        exclude_paths: &[String],
+    ) -> Result<Self, CliError> {
+        if !root.exists() {
+            return Ok(Self { options: None });
+        }
+        let instance_key = derive_instance_key(&root)?;
+        let mut options = PiImportOptions::new(root, instance_key);
+        options.include_content = include_content;
+        options.projects = projects.to_vec();
+        options.exclude_paths = exclude_paths.to_vec();
+        Ok(Self {
+            options: Some(options),
+        })
+    }
+}
+
+impl WatchSource for PiWatchSource {
+    fn adapter(&self) -> &str {
+        NativeAdapter::Pi.as_str()
+    }
+
+    fn import_cycle(&mut self, store: &mut EventStore) -> Result<CycleOutcome, SourceError> {
+        let Some(options) = &self.options else {
+            return Ok(CycleOutcome::new(NativeAdapter::Pi.as_str()));
+        };
+        let summary = import_pi(Some(store), options)?;
+        Ok(CycleOutcome {
+            adapter: NativeAdapter::Pi.as_str().to_owned(),
+            inserted: summary.inserted,
+            duplicates: summary.duplicates,
+            skipped: summary.skipped,
+            conflicts: summary.conflicts,
+            rejected: summary.rejected,
+            diagnostics: count(summary.diagnostics.len()),
+        })
+    }
+}
+
+struct OpenCodeWatchSource {
+    options: Option<OpenCodeImportOptions>,
+}
+
+impl OpenCodeWatchSource {
+    fn new(
+        root: PathBuf,
+        include_content: bool,
+        projects: &[String],
+        exclude_paths: &[String],
+    ) -> Result<Self, CliError> {
+        if !root.exists() {
+            return Ok(Self { options: None });
+        }
+        let instance_key = derive_instance_key(&root)?;
+        let mut options = OpenCodeImportOptions::new(root, instance_key);
+        options.include_content = include_content;
+        options.projects = projects.to_vec();
+        options.exclude_paths = exclude_paths.to_vec();
+        Ok(Self {
+            options: Some(options),
+        })
+    }
+}
+
+impl WatchSource for OpenCodeWatchSource {
+    fn adapter(&self) -> &str {
+        NativeAdapter::OpenCode.as_str()
+    }
+
+    fn import_cycle(&mut self, store: &mut EventStore) -> Result<CycleOutcome, SourceError> {
+        let Some(options) = &self.options else {
+            return Ok(CycleOutcome::new(NativeAdapter::OpenCode.as_str()));
+        };
+        let summary = import_opencode(Some(store), options)?;
+        Ok(CycleOutcome {
+            adapter: NativeAdapter::OpenCode.as_str().to_owned(),
             inserted: summary.inserted,
             duplicates: summary.duplicates,
             skipped: summary.skipped,

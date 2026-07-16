@@ -387,10 +387,12 @@ fn install_with(env: &DaemonEnv, supervisor: &dyn Supervisor) -> Result<DaemonRe
 
 fn uninstall_with(env: &DaemonEnv, supervisor: &dyn Supervisor) -> Result<DaemonReport, CliError> {
     let plan = plan_supervisor(&env.config());
-    // Best-effort unload before removing the file.
-    if supervisor.is_loaded(&plan).unwrap_or(false) {
-        supervisor.unload(&plan)?;
-    }
+    // Always attempt unload before removing the file. We deliberately do not
+    // gate this on `is_loaded`: a probe error is conflated with "not loaded",
+    // and skipping unload there would remove the unit file while the job is
+    // still loaded, orphaning it. Unload of an already-unloaded job is a no-op,
+    // so its failure is safe to ignore.
+    let _ = supervisor.unload(&plan);
     let removed = remove_supervisor(&plan.unit_path)?;
     Ok(DaemonReport {
         action: "uninstall",
@@ -566,6 +568,17 @@ mod tests {
         let unit_path = PathBuf::from(installed.unit_path.clone().expect("path"));
         assert!(unit_path.exists());
         assert!(installed.program_arguments.contains(&"watch".to_owned()));
+        // The daemon watches every native adapter `import` supports by default.
+        for adapter in ["claude-code", "codex", "pi", "opencode"] {
+            assert!(
+                installed
+                    .program_arguments
+                    .iter()
+                    .any(|argument| argument == adapter),
+                "expected --adapter {adapter} in {:?}",
+                installed.program_arguments
+            );
+        }
 
         let status = status_with(&env, &supervisor).expect("status");
         assert!(status.unit_present);

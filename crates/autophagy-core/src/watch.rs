@@ -137,7 +137,8 @@ pub struct WatchSummary {
     pub cycles: u64,
     /// Total events inserted across all cycles.
     pub inserted: u64,
-    /// Total per-adapter failures observed (including suppressed repeats).
+    /// Newly-reported per-adapter failures (excludes suppressed repeats of an
+    /// identical error).
     pub failures: u64,
 }
 
@@ -164,7 +165,11 @@ pub fn run_watch(
         for outcome in &report.outcomes {
             match outcome {
                 AdapterOutcome::Imported(cycle) => summary.inserted += cycle.inserted,
-                AdapterOutcome::Failed(_) => summary.failures += 1,
+                // Only count newly-reported failures. Suppressed repeats of an
+                // identical error must not grow this counter without bound on a
+                // long-running daemon.
+                AdapterOutcome::Failed(failure) if !failure.suppressed => summary.failures += 1,
+                AdapterOutcome::Failed(_) => {}
             }
         }
         summary.cycles += 1;
