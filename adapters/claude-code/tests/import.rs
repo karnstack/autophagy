@@ -8,6 +8,7 @@ use std::{
 use autophagy_adapter_claude_code::{
     ClaudeImportOptions, DiscoveryOptions, SessionKind, discover, import_claude_code,
 };
+use autophagy_adapter_test_support::{ImportMetrics, verify_incremental_idempotency};
 use autophagy_store::EventStore;
 
 fn fixture_root() -> PathBuf {
@@ -48,11 +49,20 @@ fn import_is_structural_incremental_and_defers_partial_tails() {
     assert_eq!(first.inserted, 8);
     assert_eq!(first.unsupported, 1);
     assert_eq!(first.rejected, 0);
-    assert_eq!(store.stats().expect("stats").events, 8);
+    let stored_after_first = store.stats().expect("stats").events;
+    assert_eq!(stored_after_first, 8);
 
     let second = import_claude_code(Some(&mut store), &options).expect("second import");
     assert_eq!(second.records_seen, 0);
     assert_eq!(second.inserted, 0);
+    let stored_after_second = store.stats().expect("stats").events;
+    verify_incremental_idempotency(
+        metrics(&first),
+        metrics(&second),
+        stored_after_first,
+        stored_after_second,
+    )
+    .expect("shared adapter conformance");
 
     let transcript = directory
         .path()
@@ -130,5 +140,22 @@ fn copy_tree(source: &Path, destination: &Path) {
         } else {
             fs::copy(entry.path(), target).expect("copy fixture");
         }
+    }
+}
+
+fn metrics(summary: &autophagy_adapter_claude_code::ClaudeImportSummary) -> ImportMetrics {
+    ImportMetrics {
+        discovered_files: summary
+            .discovery
+            .files
+            .len()
+            .try_into()
+            .expect("file count"),
+        records_seen: summary.records_seen,
+        events_emitted: summary.events_emitted,
+        inserted: summary.inserted,
+        duplicates: summary.duplicates,
+        conflicts: summary.conflicts,
+        rejected: summary.rejected,
     }
 }

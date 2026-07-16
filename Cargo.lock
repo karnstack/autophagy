@@ -91,6 +91,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "autophagy-adapter-claude-code"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "autophagy-adapter-test-support",
  "autophagy-events",
  "autophagy-store",
  "directories",
@@ -103,10 +104,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "autophagy-adapter-codex"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "autophagy-adapter-test-support",
+ "autophagy-events",
+ "autophagy-store",
+ "directories",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "autophagy-adapter-test-support"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "autophagy-cli"
 version = "0.1.0-alpha.1"
 dependencies = [
  "autophagy-adapter-claude-code",
+ "autophagy-adapter-codex",
  "autophagy-core",
  "autophagy-store",
  "clap",

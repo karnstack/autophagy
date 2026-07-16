@@ -121,6 +121,60 @@ fn claude_code_history_imports_and_reimports_incrementally() {
     assert_eq!(repeated["result"]["inserted"], 0);
 }
 
+#[test]
+fn codex_rollouts_import_and_reimport_incrementally() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../adapters/codex/tests/fixtures/sessions");
+
+    let imported = run_json(
+        &database,
+        [
+            "import",
+            fixture.to_str().expect("UTF-8 path"),
+            "--adapter",
+            "codex",
+        ],
+    );
+    assert_eq!(imported["result"]["inserted"], 8);
+    assert_eq!(imported["result"]["rejected"], 0);
+
+    let repeated = run_json(
+        &database,
+        [
+            "import",
+            fixture.to_str().expect("UTF-8 path"),
+            "--adapter",
+            "codex",
+        ],
+    );
+    assert_eq!(repeated["result"]["records_seen"], 0);
+    assert_eq!(repeated["result"]["inserted"], 0);
+
+    let claude_fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../adapters/claude-code/tests/fixtures/projects");
+    let claude = run_json(
+        &database,
+        [
+            "import",
+            claude_fixture.to_str().expect("UTF-8 path"),
+            "--adapter",
+            "claude-code",
+        ],
+    );
+    assert_eq!(claude["result"]["inserted"], 8);
+    let sessions = run_json(&database, ["sessions"]);
+    let sessions = sessions["result"].as_array().expect("sessions");
+    assert_eq!(sessions.len(), 2);
+    assert!(sessions.iter().any(|session| session["adapter"] == "codex"));
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session["adapter"] == "claude-code")
+    );
+}
+
 fn run_json<const N: usize>(database: &Path, args: [&str; N]) -> Value {
     let output = command(database)
         .args(["--output", "json"])

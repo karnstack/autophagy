@@ -13,8 +13,8 @@ change because of what happened?”
 
 Autophagy is in foundation development. Agent Event Protocol (AEP) v0.1, the
 transactional local SQLite event store, generic JSONL CLI vertical slice, and
-incremental Claude Code history adapter are implemented. No daemon or
-background capture ships yet.
+incremental Claude Code and Codex history adapters are implemented. No daemon
+or background capture ships yet.
 
 ## Principles
 
@@ -28,6 +28,8 @@ background capture ships yet.
 
 ```text
 adapters/claude-code/      Native transcript discovery and AEP normalization
+adapters/codex/            Schema-tolerant Codex rollout normalization
+crates/autophagy-adapter-test-support/  Shared native-adapter conformance checks
 crates/autophagy-cli/      User-facing import, sessions, and search commands
 crates/autophagy-core/     Reusable streaming import application services
 crates/autophagy-events/   AEP Rust types, parsing, and validation
@@ -75,6 +77,16 @@ mise exec -- cargo run -p autophagy-cli -- --output json \
 
 See the [Claude Code adapter guide](docs/guides/claude-code.md) for incremental
 cursoring, subagents, content policy, and the normalization capability matrix.
+
+Preview Codex rollout discovery without changing the database:
+
+```sh
+mise exec -- cargo run -p autophagy-cli -- --output json \
+  import --adapter codex --dry-run
+```
+
+The [Codex adapter guide](docs/guides/codex.md) documents its intentionally
+narrow compatibility matrix and the upstream transcript-stability boundary.
 
 ## Try the contract
 
