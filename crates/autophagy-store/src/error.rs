@@ -38,6 +38,18 @@ pub enum StoreError {
         /// Conflicting session identifier.
         session_id: String,
     },
+    /// A sequence position was already occupied by a different event.
+    #[error(
+        "session '{session_id}' sequence {sequence} already belongs to event '{existing_event_id}'"
+    )]
+    SessionSequenceConflict {
+        /// Conflicting session identifier.
+        session_id: String,
+        /// Conflicting sequence position.
+        sequence: i64,
+        /// Canonical event already stored at this position.
+        existing_event_id: String,
+    },
     /// An unsigned sequence cannot fit `SQLite`'s signed integer representation.
     #[error("event sequence {sequence} exceeds SQLite's integer range")]
     SequenceOutOfRange {

@@ -112,6 +112,7 @@ impl EventStore {
 
         let source_id = upsert_source(&transaction, source, &occurred_at)?;
         ensure_session(&transaction, source_id, event, &occurred_at)?;
+        ensure_sequence_available(&transaction, event, sequence)?;
 
         let tool_name = event.tool.as_ref().map(|tool| tool.name.as_str());
         let exit_code = event.tool.as_ref().and_then(|tool| tool.exit_code);
@@ -222,6 +223,47 @@ impl EventStore {
                 },
             )
             .optional()?)
+    }
+
+    /// List the most recently active sessions with their source provenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn list_sessions(&self, limit: u32) -> Result<Vec<SessionSummary>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT
+                sessions.session_id,
+                sources.adapter,
+                sources.instance_key,
+                sessions.project_path,
+                sessions.started_at,
+                sessions.ended_at,
+                sessions.first_event_at,
+                sessions.last_event_at,
+                sessions.event_count
+             FROM sessions
+             JOIN sources USING (source_id)
+             ORDER BY sessions.last_event_at DESC, sessions.session_id
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([i64::from(limit)], |row| {
+            Ok(SessionSummary {
+                session_id: row.get(0)?,
+                adapter: row.get(1)?,
+                instance_key: row.get(2)?,
+                project_path: row.get(3)?,
+                started_at: row.get(4)?,
+                ended_at: row.get(5)?,
+                first_event_at: row.get(6)?,
+                last_event_at: row.get(7)?,
+                event_count: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Search the explicit redaction-approved FTS5 projection.
@@ -491,6 +533,31 @@ fn ensure_session(
             occurred_at,
         ],
     )?;
+    Ok(())
+}
+
+fn ensure_sequence_available(
+    transaction: &Transaction<'_>,
+    event: &Event,
+    sequence: Option<i64>,
+) -> Result<(), StoreError> {
+    let Some(sequence) = sequence else {
+        return Ok(());
+    };
+    if let Some(existing_event_id) = transaction
+        .query_row(
+            "SELECT event_id FROM events WHERE session_id = ?1 AND sequence = ?2",
+            params![event.session_id.as_str(), sequence],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        return Err(StoreError::SessionSequenceConflict {
+            session_id: event.session_id.to_string(),
+            sequence,
+            existing_event_id,
+        });
+    }
     Ok(())
 }
 

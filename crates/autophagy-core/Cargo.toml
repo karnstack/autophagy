@@ -1,6 +1,6 @@
 [package]
-name = "autophagy-store"
-description = "Transactional local SQLite event store for Autophagy"
+name = "autophagy-core"
+description = "Application services and adapter orchestration for Autophagy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,12 +10,10 @@ publish = false
 
 [dependencies]
 autophagy-events = { path = "../autophagy-events" }
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+autophagy-store = { path = "../autophagy-store" }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
-time.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27"

@@ -11,9 +11,10 @@ change because of what happened?”
 
 ## Status
 
-Autophagy is in foundation development. Agent Event Protocol (AEP) v0.1 and the
-transactional local SQLite event store are implemented. No daemon, session
-importer, or background capture ships yet.
+Autophagy is in foundation development. Agent Event Protocol (AEP) v0.1, the
+transactional local SQLite event store, and a generic JSONL CLI vertical slice
+are implemented. No daemon, native-agent adapter, or background capture ships
+yet.
 
 ## Principles
 
@@ -26,6 +27,8 @@ importer, or background capture ships yet.
 ## Repository map
 
 ```text
+crates/autophagy-cli/      User-facing import, sessions, and search commands
+crates/autophagy-core/     Reusable streaming import application services
 crates/autophagy-events/   AEP Rust types, parsing, and validation
 crates/autophagy-store/    SQLite migrations, idempotency, FTS, and deletion
 docs/architecture/        Planned component and storage boundaries
@@ -39,6 +42,28 @@ The intended repository structure is documented in
 [`docs/architecture/repository-structure.md`](docs/architecture/repository-structure.md).
 The complete product blueprint is available in
 [`docs/blueprint/`](docs/blueprint/README.md).
+
+## Try the CLI
+
+Import the anonymized demo corpus into an explicit local database:
+
+```sh
+mise exec -- cargo run -p autophagy-cli -- \
+  --database /tmp/autophagy-demo.db \
+  import evals/fixtures/generic-jsonl/demo.jsonl \
+  --instance-key demo \
+  --index-metadata summary
+
+mise exec -- cargo run -p autophagy-cli -- \
+  --database /tmp/autophagy-demo.db sessions
+
+mise exec -- cargo run -p autophagy-cli -- \
+  --database /tmp/autophagy-demo.db search stale
+```
+
+See the [generic JSONL guide](docs/guides/generic-jsonl.md) for dry-run,
+project selection, standard input, JSON output, privacy controls, and exit-code
+semantics.
 
 ## Try the contract
 

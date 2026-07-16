@@ -18,8 +18,8 @@ description = "Run the complete Rust test suite"
 run = "cargo test --workspace --all-features"
 
 [tasks.docs]
-description = "Parse the normalized blueprint as GitHub-flavored Markdown"
-run = "pandoc docs/blueprint/*.md --from=gfm --to=html --fail-if-warnings --output=/dev/null"
+description = "Parse documentation as GitHub-flavored Markdown"
+run = "find docs -type f -name '*.md' -print0 | xargs -0 -n 1 pandoc --from=gfm --to=html --fail-if-warnings --output=/dev/null"
 
 [tasks.ci]
 description = "Validate GitHub Actions workflows"
