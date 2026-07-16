@@ -37,3 +37,9 @@ Repeated user corrections require an explicit string metadata key named
 guessing correction semantics from private prompt text. A `decision.recorded`
 event with the same signature and an explicit `followed`, `accepted`, or
 `complied` outcome is a counterexample.
+
+Repeated successful recoveries group a failed target operation, the last
+different successful operation before recovery, and the target's subsequent
+success. The composite sequence counts once in `score.occurrences` while all
+three exact event IDs remain in `evidence`. A direct fail-to-success retry is a
+counterexample sequence.

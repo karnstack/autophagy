@@ -35,6 +35,7 @@ boundaries.
 | Private free text entering search | FTS accepts only explicit redaction-approved projections |
 | Adapter rescan leaks previously excluded data | Privacy policy and exclusions are cursor-scoped |
 | Fabricated behavioral finding | Thresholded deterministic detectors with exact evidence IDs |
+| Recovery correlation presented as causality | Composite lineage, direct-retry counterexamples, and conditional zero-permission instructions |
 | Counterevidence hidden from review | Evidence Packet carries explicit opposite outcomes |
 | Accidental full deletion | Exact `--confirm delete-all` phrase required |
 | Unverifiable retention effect | Prune dry-run executes and rolls back the real transaction |

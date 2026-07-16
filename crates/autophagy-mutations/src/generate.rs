@@ -40,6 +40,7 @@ pub fn generate_candidate(finding: &EvidencePacket) -> GenerationOutcome {
     let generated = match finding.detector {
         DetectorKind::RepeatedCommandFailure => failure_candidate(finding),
         DetectorKind::RepeatedUserCorrection => correction_candidate(finding),
+        DetectorKind::RepeatedSuccessfulRecovery => recovery_candidate(finding),
     };
     let Some(package) = generated else {
         return insufficient(
@@ -152,6 +153,54 @@ fn correction_candidate(finding: &EvidencePacket) -> Option<MutationPackage> {
                 .to_owned(),
         ],
     ))
+}
+
+fn recovery_candidate(finding: &EvidencePacket) -> Option<MutationPackage> {
+    let signature = finding.signature.strip_prefix("recovery/v1|")?;
+    let (target, recovery) = signature.split_once("|via|")?;
+    let (target_operation, exit_code) = target.rsplit_once("|exit:")?;
+    let (_target_tool, target_command) = target_operation.split_once('|')?;
+    let (_recovery_tool, recovery_command) = recovery.split_once('|')?;
+    if target_command.trim().is_empty()
+        || recovery_command.trim().is_empty()
+        || exit_code.parse::<i64>().is_err()
+    {
+        return None;
+    }
+    let mut package = base_package(
+        finding,
+        TriggerKind::ToolCall,
+        format!(
+            "Before running `{target_command}`, check whether the precondition restored by `{recovery_command}` is stale or missing. When it is, run `{recovery_command}` first; otherwise leave the workflow unchanged."
+        ),
+        format!(
+            "The recurring exit-code-{exit_code} failure of `{target_command}` is prevented when the precondition established by `{recovery_command}` is satisfied first."
+        ),
+        format!(
+            "Matching `{target_command}` attempts succeed without an initial failure after the relevant `{recovery_command}` precondition is applied."
+        ),
+        vec![
+            format!(
+                "`{recovery_command}` can correlate with recovery without causing it."
+            ),
+            format!(
+                "`{recovery_command}` can have side effects or be invalid for some project states."
+            ),
+            "The target failure can be transient and recover on direct retry.".to_owned(),
+        ],
+        vec![
+            "Do not run the recovery step when the target inputs or project state differ from the observed motif."
+                .to_owned(),
+            "Do not run the recovery step without first confirming it is safe in the current repository."
+                .to_owned(),
+        ],
+    );
+    package.title = finding.title.replacen(
+        "Repeated successful recovery",
+        "Reuse successful recovery",
+        1,
+    );
+    Some(package)
 }
 
 #[allow(clippy::too_many_arguments)]

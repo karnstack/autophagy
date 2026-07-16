@@ -6,6 +6,7 @@
 mod correction;
 mod evidence;
 mod failure;
+mod recovery;
 mod score;
 mod signature;
 
@@ -41,6 +42,7 @@ impl Default for DetectorConfig {
 pub fn detect(events: &[Event], config: DetectorConfig) -> Vec<EvidencePacket> {
     let mut findings = failure::detect(events, config);
     findings.extend(correction::detect(events, config));
+    findings.extend(recovery::detect(events, config));
     findings.sort_by(|left, right| left.finding_id.cmp(&right.finding_id));
     findings
 }

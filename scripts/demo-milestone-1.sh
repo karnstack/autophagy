@@ -15,6 +15,13 @@ cargo run --quiet -p autophagy-cli -- \
   --instance-key milestone-1-demo
 
 echo
+echo "Importing repeated recovery sequences"
+cargo run --quiet -p autophagy-cli -- \
+  --database "$database" \
+  import evals/fixtures/findings/recovery-motif.jsonl \
+  --instance-key milestone-1-recovery-demo
+
+echo
 echo "Deterministic patterns"
 cargo run --quiet -p autophagy-cli -- --database "$database" patterns
 

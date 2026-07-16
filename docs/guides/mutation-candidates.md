@@ -88,6 +88,9 @@ filesystem permission; its installer receives one separately reviewed write to
 Repeated command failures produce an advisory preflight/retry instruction tied
 to the exact normalized tool signature and exit code. Repeated explicit user
 corrections produce an instruction tied to the explicit correction signature.
+Repeated successful recovery motifs produce a conditional preflight instruction
+that names the observed recovery step but requires checking its precondition and
+safety instead of blindly executing it.
 
 Both templates preserve supporting and counterexample event IDs, state a
 falsifiable expected result, list likely failure cases, add exclusions, and set
