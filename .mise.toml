@@ -1,6 +1,7 @@
 min_version = "2026.6.1"
 
 [tools]
+actionlint = "1.7.12"
 pandoc = "3.10"
 rust = "1.97.0"
 
@@ -20,6 +21,10 @@ run = "cargo test --workspace --all-features"
 description = "Parse the normalized blueprint as GitHub-flavored Markdown"
 run = "pandoc docs/blueprint/*.md --from=gfm --to=html --fail-if-warnings --output=/dev/null"
 
+[tasks.ci]
+description = "Validate GitHub Actions workflows"
+run = "actionlint"
+
 [tasks.check]
 description = "Run the pull-request quality gate"
-depends = ["docs", "fmt", "lint", "test"]
+depends = ["ci", "docs", "fmt", "lint", "test"]
