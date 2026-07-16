@@ -18,6 +18,8 @@ autophagy/
 │   ├── autophagy-digest/      evidence packets and incremental digestion
 │   ├── autophagy-mutations/   mutation packages and lifecycle
 │   ├── autophagy-replay/      replay scenarios and evaluation
+│   ├── autophagy-shadow/      observation-only precision measurement
+│   ├── autophagy-install/     reversible agent materializers
 │   ├── autophagy-redaction/   secrets and path-policy enforcement
 │   ├── autophagy-mcp/         versioned MCP surface
 │   ├── autophagy-daemon/      scheduling and local IPC
@@ -51,8 +53,11 @@ Milestone 1 through PR 7. `autophagy-mutations` begins Phase 2 with the
 review-only Mutation Package v0.1 contract, while `autophagy-store` owns the
 immutable candidate registry, evidence links, lifecycle audit, and replay
 reports. `autophagy-replay` adds versioned annotated decision points and
-deterministic non-executable evaluation. A crate or package is added when its PR
-contains an executable vertical slice; empty placeholder crates are avoided.
+deterministic non-executable evaluation. `autophagy-shadow` measures would-be
+trigger precision without intervention, and `autophagy-install` owns the single
+repo-scoped Codex skill materializer and rollback boundary. A crate or package
+is added when its PR contains an executable vertical slice; empty placeholder
+crates are avoided.
 
 ## Dependency direction
 

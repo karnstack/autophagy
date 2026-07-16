@@ -5,11 +5,12 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use time::OffsetDateTime;
 
 use crate::{
-    DeleteAllSummary, DeleteSummary, InsertOutcome, MutationDetails, MutationRecord,
-    MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationTransition,
-    MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome, ReplayRegistration, SearchHit,
-    SearchProjection, SessionSummary, SourceCursor, SourceIdentity, StoreError, StoreStats,
-    migration, util,
+    DeleteAllSummary, DeleteSummary, InsertOutcome, InstallationRegistration,
+    InstallationTransitionOutcome, MutationDetails, MutationInstallationRecord, MutationRecord,
+    MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
+    MutationTransition, MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome,
+    ReplayRegistration, SearchHit, SearchProjection, SessionSummary, ShadowRegisterOutcome,
+    ShadowRegistration, SourceCursor, SourceIdentity, StoreError, StoreStats, migration, util,
 };
 
 /// Transactional owner of one local Autophagy `SQLite` database.
@@ -571,6 +572,7 @@ impl EventStore {
     ///
     /// # Errors
     /// Returns [`StoreError`] when the candidate is missing or data is invalid.
+    #[allow(clippy::too_many_lines)]
     pub fn get_mutation(&self, mutation_id: &str) -> Result<MutationDetails, StoreError> {
         let raw = self
             .connection
@@ -656,10 +658,49 @@ impl EventStore {
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
+        let mut statement = self.connection.prepare(
+            "SELECT shadow_id, mutation_id, observation_set_hash, report_json, passed, created_at
+             FROM mutation_shadows WHERE mutation_id = ?1 ORDER BY created_at, shadow_id",
+        )?;
+        let rows = statement.query_map([mutation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        let shadows = rows
+            .map(|row| {
+                let (shadow_id, mutation_id, observation_set_hash, report, passed, created_at) =
+                    row?;
+                Ok(MutationShadowRecord {
+                    shadow_id,
+                    mutation_id,
+                    observation_set_hash,
+                    report: serde_json::from_str(&report)?,
+                    passed,
+                    created_at,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let mut statement = self.connection.prepare(
+            "SELECT installation_id, mutation_id, target, repository_root, relative_path,
+                    content_hash, permission_review_json, state, installed_at, uninstalled_at
+             FROM mutation_installations WHERE mutation_id = ?1 ORDER BY installed_at",
+        )?;
+        let rows = statement.query_map([mutation_id], raw_installation_record)?;
+        let installations = rows
+            .map(|row| installation_record(row?))
+            .collect::<Result<Vec<_>, StoreError>>()?;
         Ok(MutationDetails {
             mutation,
             transitions,
             replays,
+            shadows,
+            installations,
         })
     }
 
@@ -779,6 +820,287 @@ impl EventStore {
         })
     }
 
+    /// Persist one observation-only shadow report and advance only on pass.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for inconsistent metadata, content conflicts,
+    /// invalid lifecycle state, missing evidence, or database failures.
+    #[allow(clippy::too_many_lines)]
+    pub fn register_shadow(
+        &mut self,
+        registration: &ShadowRegistration,
+    ) -> Result<ShadowRegisterOutcome, StoreError> {
+        if !shadow_report_matches_registration(registration) {
+            return Err(StoreError::InvalidShadowRegistration);
+        }
+        let report_json = serde_json::to_string(&registration.report)?;
+        let content_hash = util::sha256(report_json.as_bytes());
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing_hash) = transaction
+            .query_row(
+                "SELECT content_hash FROM mutation_shadows WHERE shadow_id = ?1",
+                [&registration.shadow_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+        {
+            if existing_hash.as_slice() != content_hash {
+                return Err(StoreError::ShadowContentConflict {
+                    shadow_id: registration.shadow_id.clone(),
+                });
+            }
+            let mutation_state = transaction.query_row(
+                "SELECT state FROM mutation_candidates WHERE mutation_id = ?1",
+                [&registration.mutation_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            return Ok(ShadowRegisterOutcome::Duplicate {
+                shadow_id: registration.shadow_id.clone(),
+                mutation_state,
+            });
+        }
+        let from_state = transaction
+            .query_row(
+                "SELECT state FROM mutation_candidates WHERE mutation_id = ?1",
+                [&registration.mutation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::MutationNotFound {
+                mutation_id: registration.mutation_id.clone(),
+            })?;
+        if from_state != "replay_passed" {
+            return Err(StoreError::MutationStateTransition {
+                mutation_id: registration.mutation_id.clone(),
+                from_state,
+                to_state: "shadow_passed",
+            });
+        }
+        let now = util::now_timestamp()?;
+        transaction.execute(
+            "INSERT INTO mutation_shadows(
+                shadow_id, mutation_id, observation_set_hash, report_json,
+                content_hash, passed, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                registration.shadow_id,
+                registration.mutation_id,
+                registration.observation_set_hash,
+                report_json,
+                content_hash.as_slice(),
+                registration.passed,
+                now,
+            ],
+        )?;
+        for (ordinal, event_id) in registration.source_event_ids.iter().enumerate() {
+            let stored_ordinal = i64::try_from(ordinal)
+                .map_err(|_| StoreError::ShadowEvidenceOrdinalOutOfRange { ordinal })?;
+            transaction.execute(
+                "INSERT INTO mutation_shadow_evidence(shadow_id, event_id, ordinal)
+                 VALUES (?1, ?2, ?3)",
+                params![registration.shadow_id, event_id, stored_ordinal],
+            )?;
+        }
+        let mutation_state = if registration.passed {
+            transaction.execute(
+                "UPDATE mutation_candidates SET state = 'shadow_passed', updated_at = ?2
+                 WHERE mutation_id = ?1",
+                params![registration.mutation_id, now],
+            )?;
+            let metadata = serde_json::to_string(&serde_json::json!({
+                "shadow_id": registration.shadow_id,
+                "observation_set_hash": registration.observation_set_hash,
+            }))?;
+            transaction.execute(
+                "INSERT INTO mutation_transitions(
+                    mutation_id, from_state, to_state, reason, metadata_json, occurred_at
+                 ) VALUES (?1, 'replay_passed', 'shadow_passed',
+                           'observation-only shadow thresholds passed', ?2, ?3)",
+                params![registration.mutation_id, metadata, now],
+            )?;
+            "shadow_passed"
+        } else {
+            "replay_passed"
+        };
+        transaction.commit()?;
+        Ok(ShadowRegisterOutcome::Inserted {
+            shadow_id: registration.shadow_id.clone(),
+            advanced: registration.passed,
+            mutation_state: mutation_state.to_owned(),
+        })
+    }
+
+    /// Record a completed Codex repo-skill materialization and activate the mutation.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for invalid registration, lifecycle, or database state.
+    pub fn register_installation(
+        &mut self,
+        registration: &InstallationRegistration,
+    ) -> Result<InstallationTransitionOutcome, StoreError> {
+        if !valid_installation_registration(registration) {
+            return Err(StoreError::InvalidInstallationRegistration);
+        }
+        let permission_review = serde_json::to_string(&registration.permission_review)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let from_state = transaction
+            .query_row(
+                "SELECT state FROM mutation_candidates WHERE mutation_id = ?1",
+                [&registration.mutation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::MutationNotFound {
+                mutation_id: registration.mutation_id.clone(),
+            })?;
+        if from_state != "shadow_passed" {
+            return Err(StoreError::MutationStateTransition {
+                mutation_id: registration.mutation_id.clone(),
+                from_state,
+                to_state: "active",
+            });
+        }
+        let now = util::now_timestamp()?;
+        transaction.execute(
+            "INSERT INTO mutation_installations(
+                installation_id, mutation_id, target, repository_root, relative_path,
+                content_hash, permission_review_json, state, installed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'installed', ?8)",
+            params![
+                registration.installation_id,
+                registration.mutation_id,
+                registration.target,
+                registration.repository_root,
+                registration.relative_path,
+                registration.content_hash,
+                permission_review,
+                now,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE mutation_candidates SET state = 'active', updated_at = ?2
+             WHERE mutation_id = ?1",
+            params![registration.mutation_id, now],
+        )?;
+        let metadata = serde_json::to_string(&serde_json::json!({
+            "installation_id": registration.installation_id,
+            "target": registration.target,
+            "relative_path": registration.relative_path,
+            "permission_review": registration.permission_review,
+        }))?;
+        transaction.execute(
+            "INSERT INTO mutation_transitions(
+                mutation_id, from_state, to_state, reason, metadata_json, occurred_at
+             ) VALUES (?1, 'shadow_passed', 'active',
+                       'user approved Codex repo-skill installation', ?2, ?3)",
+            params![registration.mutation_id, metadata, now],
+        )?;
+        transaction.commit()?;
+        Ok(InstallationTransitionOutcome {
+            installation_id: registration.installation_id.clone(),
+            mutation_state: "active".to_owned(),
+            installation_state: "installed".to_owned(),
+        })
+    }
+
+    /// Return the installation audit for one mutation.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when missing or invalid.
+    pub fn get_installation(
+        &self,
+        mutation_id: &str,
+    ) -> Result<MutationInstallationRecord, StoreError> {
+        let raw = self
+            .connection
+            .query_row(
+                "SELECT installation_id, mutation_id, target, repository_root, relative_path,
+                        content_hash, permission_review_json, state, installed_at, uninstalled_at
+                 FROM mutation_installations WHERE mutation_id = ?1",
+                [mutation_id],
+                raw_installation_record,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InstallationNotFound {
+                mutation_id: mutation_id.to_owned(),
+            })?;
+        installation_record(raw)
+    }
+
+    /// Mark a verified filesystem rollback complete and retire the mutation.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for missing audit, invalid state, or database failure.
+    pub fn record_uninstall(
+        &mut self,
+        mutation_id: &str,
+    ) -> Result<InstallationTransitionOutcome, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (installation_id, installation_state) = transaction
+            .query_row(
+                "SELECT installation_id, state FROM mutation_installations WHERE mutation_id = ?1",
+                [mutation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InstallationNotFound {
+                mutation_id: mutation_id.to_owned(),
+            })?;
+        if installation_state != "installed" {
+            return Err(StoreError::InstallationState {
+                installation_id,
+                state: installation_state,
+            });
+        }
+        let mutation_state = transaction.query_row(
+            "SELECT state FROM mutation_candidates WHERE mutation_id = ?1",
+            [mutation_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        if mutation_state != "active" {
+            return Err(StoreError::MutationStateTransition {
+                mutation_id: mutation_id.to_owned(),
+                from_state: mutation_state,
+                to_state: "retired",
+            });
+        }
+        let now = util::now_timestamp()?;
+        transaction.execute(
+            "UPDATE mutation_installations
+             SET state = 'uninstalled', uninstalled_at = ?2 WHERE installation_id = ?1",
+            params![installation_id, now],
+        )?;
+        transaction.execute(
+            "UPDATE mutation_candidates SET state = 'retired', updated_at = ?2
+             WHERE mutation_id = ?1",
+            params![mutation_id, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO mutation_transitions(
+                mutation_id, from_state, to_state, reason, metadata_json, occurred_at
+             ) VALUES (?1, 'active', 'retired', 'Codex repo skill uninstalled', ?2, ?3)",
+            params![
+                mutation_id,
+                serde_json::to_string(&serde_json::json!({
+                    "installation_id": installation_id,
+                }))?,
+                now
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(InstallationTransitionOutcome {
+            installation_id,
+            mutation_state: "retired".to_owned(),
+            installation_state: "uninstalled".to_owned(),
+        })
+    }
+
     /// Mark a candidate challenged after the caller validates every checklist item.
     ///
     /// # Errors
@@ -845,7 +1167,10 @@ impl EventStore {
         let allowed = matches!(
             (from_state.as_str(), to_state),
             ("candidate", "challenged")
-                | ("candidate" | "challenged" | "replay_passed", "rejected")
+                | (
+                    "candidate" | "challenged" | "replay_passed" | "shadow_passed",
+                    "rejected"
+                )
         );
         if !allowed {
             return Err(StoreError::MutationStateTransition {
@@ -906,6 +1231,9 @@ impl EventStore {
         if !session_exists {
             return Ok(DeleteSummary::default());
         }
+        if let Some(installation_id) = active_installation_for_session(&transaction, session_id)? {
+            return Err(StoreError::ActiveInstallationBlocksEvidenceDeletion { installation_id });
+        }
 
         let events_deleted = transaction.query_row(
             "SELECT count(*) FROM events WHERE session_id = ?1",
@@ -948,6 +1276,18 @@ impl EventStore {
     ///
     /// Returns [`StoreError`] when the deletion transaction fails.
     pub fn delete_all(&mut self) -> Result<DeleteAllSummary, StoreError> {
+        if let Some(installation_id) = self
+            .connection
+            .query_row(
+                "SELECT installation_id FROM mutation_installations
+                 WHERE state = 'installed' ORDER BY installation_id LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Err(StoreError::ActiveInstallationBlocksEvidenceDeletion { installation_id });
+        }
         let before = self.stats()?;
         let cursors_deleted =
             self.connection
@@ -997,6 +1337,11 @@ impl EventStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(installation_id) =
+            active_installation_for_prune(&transaction, &cutoff, project)?
+        {
+            return Err(StoreError::ActiveInstallationBlocksEvidenceDeletion { installation_id });
+        }
         let sessions_deleted = transaction.query_row(
             "SELECT count(*) FROM sessions
              WHERE last_event_at < ?1 AND (?2 IS NULL OR project_path = ?2)",
@@ -1081,6 +1426,53 @@ struct RawMutationRecord {
     updated_at: String,
 }
 
+struct RawInstallationRecord {
+    installation_id: String,
+    mutation_id: String,
+    target: String,
+    repository_root: String,
+    relative_path: String,
+    content_hash: String,
+    permission_review_json: String,
+    state: String,
+    installed_at: String,
+    uninstalled_at: Option<String>,
+}
+
+fn raw_installation_record(
+    row: &rusqlite::Row<'_>,
+) -> Result<RawInstallationRecord, rusqlite::Error> {
+    Ok(RawInstallationRecord {
+        installation_id: row.get(0)?,
+        mutation_id: row.get(1)?,
+        target: row.get(2)?,
+        repository_root: row.get(3)?,
+        relative_path: row.get(4)?,
+        content_hash: row.get(5)?,
+        permission_review_json: row.get(6)?,
+        state: row.get(7)?,
+        installed_at: row.get(8)?,
+        uninstalled_at: row.get(9)?,
+    })
+}
+
+fn installation_record(
+    raw: RawInstallationRecord,
+) -> Result<MutationInstallationRecord, StoreError> {
+    Ok(MutationInstallationRecord {
+        installation_id: raw.installation_id,
+        mutation_id: raw.mutation_id,
+        target: raw.target,
+        repository_root: raw.repository_root,
+        relative_path: raw.relative_path,
+        content_hash: raw.content_hash,
+        permission_review: serde_json::from_str(&raw.permission_review_json)?,
+        state: raw.state,
+        installed_at: raw.installed_at,
+        uninstalled_at: raw.uninstalled_at,
+    })
+}
+
 fn raw_mutation_record(row: &rusqlite::Row<'_>) -> Result<RawMutationRecord, rusqlite::Error> {
     Ok(RawMutationRecord {
         mutation_id: row.get(0)?,
@@ -1142,6 +1534,65 @@ fn count_mutations(transaction: &Transaction<'_>) -> Result<i64, rusqlite::Error
     })
 }
 
+fn active_installation_for_session(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    transaction
+        .query_row(
+            "SELECT installation_id FROM mutation_installations
+             WHERE state = 'installed' AND mutation_id IN (
+               SELECT me.mutation_id FROM mutation_evidence me
+               JOIN events e ON e.event_id = me.event_id WHERE e.session_id = ?1
+               UNION
+               SELECT mr.mutation_id FROM mutation_replay_evidence mre
+               JOIN mutation_replays mr ON mr.replay_id = mre.replay_id
+               JOIN events e ON e.event_id = mre.event_id WHERE e.session_id = ?1
+               UNION
+               SELECT ms.mutation_id FROM mutation_shadow_evidence mse
+               JOIN mutation_shadows ms ON ms.shadow_id = mse.shadow_id
+               JOIN events e ON e.event_id = mse.event_id WHERE e.session_id = ?1
+             )
+             ORDER BY installation_id LIMIT 1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+}
+
+fn active_installation_for_prune(
+    transaction: &Transaction<'_>,
+    cutoff: &str,
+    project: Option<&str>,
+) -> Result<Option<String>, rusqlite::Error> {
+    transaction
+        .query_row(
+            "SELECT installation_id FROM mutation_installations
+             WHERE state = 'installed' AND mutation_id IN (
+               SELECT me.mutation_id FROM mutation_evidence me
+               JOIN events e ON e.event_id = me.event_id
+               JOIN sessions s ON s.session_id = e.session_id
+               WHERE s.last_event_at < ?1 AND (?2 IS NULL OR s.project_path = ?2)
+               UNION
+               SELECT mr.mutation_id FROM mutation_replay_evidence mre
+               JOIN mutation_replays mr ON mr.replay_id = mre.replay_id
+               JOIN events e ON e.event_id = mre.event_id
+               JOIN sessions s ON s.session_id = e.session_id
+               WHERE s.last_event_at < ?1 AND (?2 IS NULL OR s.project_path = ?2)
+               UNION
+               SELECT ms.mutation_id FROM mutation_shadow_evidence mse
+               JOIN mutation_shadows ms ON ms.shadow_id = mse.shadow_id
+               JOIN events e ON e.event_id = mse.event_id
+               JOIN sessions s ON s.session_id = e.session_id
+               WHERE s.last_event_at < ?1 AND (?2 IS NULL OR s.project_path = ?2)
+             )
+             ORDER BY installation_id LIMIT 1",
+            params![cutoff, project],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+}
+
 fn replay_report_matches_registration(registration: &ReplayRegistration) -> bool {
     if registration
         .report
@@ -1198,6 +1649,83 @@ fn replay_report_matches_registration(registration: &ReplayRegistration) -> bool
         && report_event_ids.len() == report_event_values.len()
         && report_event_ids.len() == registration.source_event_ids.len()
         && report_event_ids == registered_event_ids
+}
+
+fn shadow_report_matches_registration(registration: &ShadowRegistration) -> bool {
+    if registration
+        .report
+        .get("shadow_id")
+        .and_then(serde_json::Value::as_str)
+        != Some(&registration.shadow_id)
+        || registration
+            .report
+            .get("mutation_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(&registration.mutation_id)
+        || registration
+            .report
+            .get("observation_set_hash")
+            .and_then(serde_json::Value::as_str)
+            != Some(&registration.observation_set_hash)
+        || registration
+            .report
+            .get("passed")
+            .and_then(serde_json::Value::as_bool)
+            != Some(registration.passed)
+    {
+        return false;
+    }
+    let Some(results) = registration
+        .report
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    let mut report_event_values = Vec::new();
+    for result in results {
+        let Some(event_ids) = result
+            .get("source_event_ids")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        for event_id in event_ids {
+            let Some(event_id) = event_id.as_str() else {
+                return false;
+            };
+            report_event_values.push(event_id);
+        }
+    }
+    let report_event_ids = report_event_values.iter().copied().collect::<BTreeSet<_>>();
+    let registered_event_ids = registration
+        .source_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    !report_event_ids.is_empty()
+        && report_event_ids.len() == report_event_values.len()
+        && report_event_ids.len() == registration.source_event_ids.len()
+        && report_event_ids == registered_event_ids
+}
+
+fn valid_installation_registration(registration: &InstallationRegistration) -> bool {
+    registration.installation_id.starts_with("ins_")
+        && registration.mutation_id.starts_with("mut_")
+        && registration.target == "codex_repo_skill"
+        && !registration.repository_root.trim().is_empty()
+        && registration.relative_path.starts_with(".agents/skills/")
+        && registration.relative_path.ends_with("/SKILL.md")
+        && registration.content_hash.len() == 64
+        && registration
+            .content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        && registration
+            .permission_review
+            .get("confirmed")
+            .and_then(serde_json::Value::as_str)
+            == Some("repo-skill-write")
 }
 
 fn validate_source(source: &SourceIdentity) -> Result<(), StoreError> {

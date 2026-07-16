@@ -38,6 +38,8 @@ Exit: candidates advance only after deterministic evaluation thresholds pass.
 
 ## PR 4 — Shadow and reversible installation
 
+Status: complete.
+
 - observation-only triggers and precision measurement
 - one agent skill/context-injection materializer
 - explicit permission review, install audit, and uninstall rollback

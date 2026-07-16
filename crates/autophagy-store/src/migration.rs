@@ -40,6 +40,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "deterministic mutation replay evaluation",
         sql: include_str!("../migrations/0004_replay_evaluation.sql"),
     },
+    Migration {
+        version: 5,
+        description: "shadow evaluation and reversible installation",
+        sql: include_str!("../migrations/0005_shadow_install.sql"),
+    },
 ];
 
 pub(crate) fn apply(connection: &mut Connection) -> Result<(), StoreError> {
@@ -126,19 +131,19 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO schema_migrations(version, description, checksum, applied_at)
-                 VALUES (5, 'future', ?1, '2026-07-16T00:00:00Z')",
+                 VALUES (6, 'future', ?1, '2026-07-16T00:00:00Z')",
                 params![[7_u8; 32].as_slice()],
             )
             .expect("future migration");
 
         assert!(matches!(
             apply(&mut connection),
-            Err(StoreError::DatabaseTooNew { version: 5 })
+            Err(StoreError::DatabaseTooNew { version: 6 })
         ));
     }
 
     #[test]
-    fn replay_migration_preserves_existing_candidate_and_audit() {
+    fn shadow_migration_preserves_existing_replay_candidate_and_audit() {
         let mut connection = Connection::open_in_memory().expect("database");
         connection
             .pragma_update(None, "foreign_keys", true)
@@ -146,7 +151,7 @@ mod tests {
         connection
             .execute_batch(BOOTSTRAP_SQL)
             .expect("migration table");
-        for migration in &MIGRATIONS[..3] {
+        for migration in &MIGRATIONS[..4] {
             connection.execute_batch(migration.sql).expect("old DDL");
             connection
                 .execute(
@@ -168,7 +173,7 @@ mod tests {
                     created_at, updated_at
                  ) VALUES (
                     'mut_upgrade', 'fnd_upgrade', 'test', 'eqv_upgrade',
-                    'mutation/0.1', '0.1.0', 'challenged', '{}', zeroblob(32),
+                    'mutation/0.1', '0.1.0', 'replay_passed', '{}', zeroblob(32),
                     '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z'
                  )",
                 [],
@@ -179,12 +184,24 @@ mod tests {
                 "INSERT INTO mutation_transitions(
                     mutation_id, from_state, to_state, reason, metadata_json, occurred_at
                  ) VALUES (
-                    'mut_upgrade', 'candidate', 'challenged', 'reviewed', '{}',
+                    'mut_upgrade', 'challenged', 'replay_passed', 'replayed', '{}',
                     '2026-07-16T00:00:00Z'
                  )",
                 [],
             )
             .expect("old audit");
+        connection
+            .execute(
+                "INSERT INTO mutation_replays(
+                    replay_id, mutation_id, scenario_set_hash, report_json,
+                    content_hash, passed, created_at
+                 ) VALUES (
+                    'rpl_upgrade', 'mut_upgrade', 'rsh_upgrade', '{}',
+                    zeroblob(32), 1, '2026-07-16T00:00:00Z'
+                 )",
+                [],
+            )
+            .expect("old replay");
 
         apply(&mut connection).expect("upgrade");
         assert_eq!(
@@ -195,7 +212,7 @@ mod tests {
                     |row| row.get::<_, String>(0),
                 )
                 .expect("candidate state"),
-            "challenged"
+            "replay_passed"
         );
         assert_eq!(
             connection
@@ -209,9 +226,19 @@ mod tests {
         );
         assert_eq!(
             connection
+                .query_row(
+                    "SELECT count(*) FROM mutation_replays WHERE mutation_id = 'mut_upgrade'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("replay count"),
+            1
+        );
+        assert_eq!(
+            connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .expect("schema version"),
-            4
+            5
         );
     }
 }

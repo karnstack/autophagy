@@ -12,9 +12,11 @@ mod util;
 
 pub use error::StoreError;
 pub use model::{
-    DeleteAllSummary, DeleteSummary, InsertOutcome, MutationDetails, MutationRecord,
-    MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationTransition,
-    MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome, ReplayRegistration, SearchHit,
-    SearchProjection, SessionSummary, SourceCursor, SourceIdentity, StoreStats,
+    DeleteAllSummary, DeleteSummary, InsertOutcome, InstallationRegistration,
+    InstallationTransitionOutcome, MutationDetails, MutationInstallationRecord, MutationRecord,
+    MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
+    MutationTransition, MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome,
+    ReplayRegistration, SearchHit, SearchProjection, SessionSummary, ShadowRegisterOutcome,
+    ShadowRegistration, SourceCursor, SourceIdentity, StoreStats,
 };
 pub use store::EventStore;

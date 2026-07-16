@@ -2,8 +2,11 @@
 set -eu
 
 database="${TMPDIR:-/tmp}/autophagy-milestone-1-$$.db"
+install_repository="${TMPDIR:-/tmp}/autophagy-install-target-$$"
 failure_mutation="mut_d6b7a340eb2fb6f18bee4a20932b9c954adb4975f3ea8136bf0bd264b3ec431c"
-trap 'rm -f "$database" "$database-shm" "$database-wal"' EXIT HUP INT TERM
+trap 'rm -f "$database" "$database-shm" "$database-wal"; rm -rf "$install_repository"' EXIT HUP INT TERM
+mkdir -p "$install_repository"
+mkdir -p "$install_repository/.git"
 
 echo "Importing anonymized AEP evidence into $database"
 cargo run --quiet -p autophagy-cli -- \
@@ -43,6 +46,24 @@ echo "Deterministic non-executable replay"
 cargo run --quiet -p autophagy-cli -- --database "$database" \
   mutations replay "$failure_mutation" \
   --scenarios evals/fixtures/replay/command-preflight-pass.json
+
+echo
+echo "Observation-only shadow evaluation"
+cargo run --quiet -p autophagy-cli -- --database "$database" \
+  mutations shadow "$failure_mutation" \
+  --observations evals/fixtures/shadow/command-preflight-pass.json
+
+echo
+echo "Explicit repo-scoped Codex skill install"
+cargo run --quiet -p autophagy-cli -- --database "$database" \
+  mutations install "$failure_mutation" \
+  --repository "$install_repository" \
+  --confirm-permissions repo-skill-write
+
+echo
+echo "Hash-verified uninstall"
+cargo run --quiet -p autophagy-cli -- --database "$database" \
+  mutations uninstall "$failure_mutation"
 
 echo
 echo "Retention preview"

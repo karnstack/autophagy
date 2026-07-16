@@ -136,9 +136,11 @@ dependencies = [
  "autophagy-adapter-codex",
  "autophagy-core",
  "autophagy-events",
+ "autophagy-install",
  "autophagy-mutations",
  "autophagy-patterns",
  "autophagy-replay",
+ "autophagy-shadow",
  "autophagy-store",
  "clap",
  "directories",
@@ -172,6 +174,19 @@ dependencies = [
  "serde_json",
  "thiserror",
  "time",
+]
+
+[[package]]
+name = "autophagy-install"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "autophagy-core",
+ "autophagy-mutations",
+ "autophagy-patterns",
+ "autophagy-store",
+ "sha2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -216,6 +231,21 @@ dependencies = [
 
 [[package]]
 name = "autophagy-replay"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "autophagy-core",
+ "autophagy-mutations",
+ "autophagy-patterns",
+ "autophagy-store",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "autophagy-shadow"
 version = "0.1.0-alpha.1"
 dependencies = [
  "autophagy-core",

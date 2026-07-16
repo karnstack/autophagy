@@ -14,11 +14,11 @@ change because of what happened?”
 The local-only Milestone 1 engine is implemented: AEP v0.1, transactional
 SQLite storage, generic JSONL plus Claude Code and Codex adapters, deterministic
 evidence-linked findings, ingestion redaction, retention, export, and deletion.
-Phase 2 now generates and retains review-only, zero-permission mutation
-candidates in an audited local registry. Users can inspect, challenge, reject,
-and evaluate them against deterministic annotated replay suites. No daemon,
-executable replay, installation, autonomous execution, or background capture
-ships yet.
+Phase 2 is implemented end to end for one deliberately narrow target. Users can
+inspect, challenge, replay, shadow-test, explicitly install, and reversibly
+uninstall a zero-permission instruction as a repo-scoped Codex skill. No daemon,
+executable replay, autonomous installation, global skill writes, or background
+capture ships yet.
 
 ## Principles
 
@@ -37,10 +37,12 @@ crates/autophagy-adapter-test-support/  Shared native-adapter conformance checks
 crates/autophagy-cli/      User-facing import, sessions, and search commands
 crates/autophagy-core/     Reusable streaming import application services
 crates/autophagy-events/   AEP Rust types, parsing, and validation
+crates/autophagy-install/  Explicit reversible Codex skill materialization
 crates/autophagy-mutations/ Versioned review-only mutation candidates
 crates/autophagy-patterns/ Model-free recurrence detectors and evidence packets
 crates/autophagy-redaction/ Secret rules and project/artifact path policy
 crates/autophagy-replay/    Non-executable deterministic replay evaluation
+crates/autophagy-shadow/    Observation-only trigger precision measurement
 crates/autophagy-store/    SQLite migrations, idempotency, FTS, and deletion
 docs/architecture/        Planned component and storage boundaries
 docs/blueprint/           Complete normalized product and implementation brief
@@ -50,6 +52,7 @@ docs/specs/aep/0.1/       Versioned AEP JSON Schema and examples
 docs/specs/evidence/0.1/  Versioned deterministic finding contract
 docs/specs/mutation/0.1/  Versioned mutation package contract
 docs/specs/replay/0.1/    Versioned replay scenario and result contracts
+docs/specs/shadow/0.1/    Versioned shadow observation and result contracts
 ```
 
 The intended repository structure is documented in
@@ -111,9 +114,9 @@ mise run demo
 
 The demo imports anonymized evidence, emits two deterministic patterns with
 exact evidence IDs, produces a digest that confirms no model or network was
-used, registers two zero-permission mutation candidates, challenges one, runs a
-five-scenario non-executable replay, and previews retention deletion. Its
-temporary database is removed on exit.
+used, registers two zero-permission mutation candidates, challenges one, runs
+replay and shadow evaluation, installs a repo-scoped Codex skill, uninstalls it,
+and previews retention deletion. Its temporary data is removed on exit.
 
 Useful privacy and lifecycle commands:
 
@@ -141,6 +144,9 @@ See the [mutation candidate guide](docs/guides/mutation-candidates.md) for the
 contract, challenge checklist, evidence retention, and unavailable activation
 actions. The [replay guide](docs/guides/replay.md) documents annotated scenarios,
 classification, thresholds, and the non-execution boundary.
+The [shadow and installation guide](docs/guides/shadow-and-installation.md)
+documents precision measurement, explicit permission review, the Codex target,
+and rollback guarantees.
 
 ## Try the contract
 

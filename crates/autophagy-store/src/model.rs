@@ -278,6 +278,10 @@ pub struct MutationDetails {
     pub transitions: Vec<MutationTransition>,
     /// Immutable deterministic replay reports in creation order.
     pub replays: Vec<MutationReplayRecord>,
+    /// Immutable observation-only shadow reports.
+    pub shadows: Vec<MutationShadowRecord>,
+    /// Installation and rollback audit records.
+    pub installations: Vec<MutationInstallationRecord>,
 }
 
 /// Idempotent lifecycle transition result.
@@ -347,4 +351,115 @@ pub enum ReplayRegisterOutcome {
         /// Current mutation registry state.
         mutation_state: String,
     },
+}
+
+/// Owned observation-only shadow report ready for persistence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadowRegistration {
+    /// Stable content-derived shadow identity.
+    pub shadow_id: String,
+    /// Observed mutation identity.
+    pub mutation_id: String,
+    /// Stable observation-suite hash.
+    pub observation_set_hash: String,
+    /// Complete versioned shadow report.
+    pub report: Value,
+    /// Whether every observation and precision gate passed.
+    pub passed: bool,
+    /// Exact source events cited across independent observations.
+    pub source_event_ids: Vec<String>,
+}
+
+/// One persisted immutable shadow report.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MutationShadowRecord {
+    /// Stable shadow report identity.
+    pub shadow_id: String,
+    /// Observed mutation identity.
+    pub mutation_id: String,
+    /// Stable observation-suite hash.
+    pub observation_set_hash: String,
+    /// Complete versioned shadow report.
+    pub report: Value,
+    /// Whether every gate passed.
+    pub passed: bool,
+    /// Canonical persistence timestamp.
+    pub created_at: String,
+}
+
+/// Idempotent shadow persistence and lifecycle result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ShadowRegisterOutcome {
+    /// A new shadow report was stored.
+    Inserted {
+        /// Stable shadow report identity.
+        shadow_id: String,
+        /// Whether this report advanced the lifecycle.
+        advanced: bool,
+        /// Registry state after persistence.
+        mutation_state: String,
+    },
+    /// The identical report was already stored.
+    Duplicate {
+        /// Stable shadow report identity.
+        shadow_id: String,
+        /// Current mutation registry state.
+        mutation_state: String,
+    },
+}
+
+/// Audited input for a completed filesystem materialization.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InstallationRegistration {
+    /// Stable installation identity.
+    pub installation_id: String,
+    /// Installed mutation identity.
+    pub mutation_id: String,
+    /// Canonical target identifier.
+    pub target: String,
+    /// Canonical repository root.
+    pub repository_root: String,
+    /// Installed path relative to the repository root.
+    pub relative_path: String,
+    /// SHA-256 of installed bytes.
+    pub content_hash: String,
+    /// Explicit permission review retained in the audit.
+    pub permission_review: Value,
+}
+
+/// One installation and optional rollback audit.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MutationInstallationRecord {
+    /// Stable installation identity.
+    pub installation_id: String,
+    /// Installed mutation identity.
+    pub mutation_id: String,
+    /// Materializer target.
+    pub target: String,
+    /// Canonical repository root.
+    pub repository_root: String,
+    /// Installed relative path.
+    pub relative_path: String,
+    /// SHA-256 of installed bytes.
+    pub content_hash: String,
+    /// Explicit permission review.
+    pub permission_review: Value,
+    /// Current installation state.
+    pub state: String,
+    /// Canonical install timestamp.
+    pub installed_at: String,
+    /// Canonical uninstall timestamp, when rolled back.
+    pub uninstalled_at: Option<String>,
+}
+
+/// Installation lifecycle result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct InstallationTransitionOutcome {
+    /// Stable installation identity.
+    pub installation_id: String,
+    /// Mutation registry state after the operation.
+    pub mutation_state: String,
+    /// Installation state after the operation.
+    pub installation_state: String,
 }

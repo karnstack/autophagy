@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/shadow/0.1/result.schema.json",
+  "title": "Autophagy Shadow Result v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version",
+    "shadow_id",
+    "mutation_id",
+    "mutation_version",
+    "observation_set_hash",
+    "results",
+    "summary",
+    "policy",
+    "threshold_failures",
+    "passed",
+    "mutation_applied",
+    "model_used"
+  ],
+  "properties": {
+    "spec_version": { "const": "shadow-result/0.1" },
+    "shadow_id": { "type": "string", "pattern": "^shr_[a-f0-9]{64}$" },
+    "mutation_id": { "type": "string", "pattern": "^mut_[A-Za-z0-9._:-]+$" },
+    "mutation_version": { "type": "string", "minLength": 1 },
+    "observation_set_hash": { "type": "string", "pattern": "^shh_[a-f0-9]{64}$" },
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "observation_id",
+          "source_event_ids",
+          "observed_trigger_selectors",
+          "would_trigger",
+          "intervention_would_help",
+          "disposition"
+        ],
+        "properties": {
+          "observation_id": { "type": "string", "pattern": "^shd_[A-Za-z0-9._:-]+$" },
+          "source_event_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]+$" }
+          },
+          "observed_trigger_selectors": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "would_trigger": { "type": "boolean" },
+          "intervention_would_help": { "type": "boolean" },
+          "disposition": {
+            "enum": ["true_positive", "true_negative", "false_positive", "false_negative"]
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observations",
+        "true_positives",
+        "true_negatives",
+        "false_positives",
+        "false_negatives",
+        "precision_bps",
+        "false_positive_rate_bps",
+        "recall_bps"
+      ],
+      "properties": {
+        "observations": { "type": "integer", "minimum": 1 },
+        "true_positives": { "type": "integer", "minimum": 0 },
+        "true_negatives": { "type": "integer", "minimum": 0 },
+        "false_positives": { "type": "integer", "minimum": 0 },
+        "false_negatives": { "type": "integer", "minimum": 0 },
+        "precision_bps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "false_positive_rate_bps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "recall_bps": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_observations", "maximum_false_positive_rate_bps"],
+      "properties": {
+        "minimum_observations": { "type": "integer", "minimum": 1 },
+        "maximum_false_positive_rate_bps": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      }
+    },
+    "threshold_failures": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "insufficient_observations",
+          "missing_positive_coverage",
+          "missing_negative_coverage",
+          "missing_trigger_coverage",
+          "false_positive_rate_above_maximum"
+        ]
+      }
+    },
+    "passed": { "type": "boolean" },
+    "mutation_applied": { "const": false },
+    "model_used": { "const": false }
+  }
+}

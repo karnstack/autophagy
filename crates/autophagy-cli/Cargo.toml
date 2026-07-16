@@ -17,9 +17,11 @@ autophagy-adapter-claude-code = { path = "../../adapters/claude-code" }
 autophagy-adapter-codex = { path = "../../adapters/codex" }
 autophagy-core = { path = "../autophagy-core" }
 autophagy-events = { path = "../autophagy-events" }
+autophagy-install = { path = "../autophagy-install" }
 autophagy-mutations = { path = "../autophagy-mutations" }
 autophagy-patterns = { path = "../autophagy-patterns" }
 autophagy-replay = { path = "../autophagy-replay" }
+autophagy-shadow = { path = "../autophagy-shadow" }
 autophagy-store = { path = "../autophagy-store" }
 clap.workspace = true
 directories.workspace = true

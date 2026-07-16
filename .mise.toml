@@ -30,5 +30,5 @@ description = "Run the pull-request quality gate"
 depends = ["ci", "docs", "fmt", "lint", "test"]
 
 [tasks.demo]
-description = "Run the offline import-to-mutation-candidate demonstration"
+description = "Run the offline import-to-reversible-Codex-skill demonstration"
 run = "scripts/demo-milestone-1.sh"

@@ -1,6 +1,6 @@
 # Local database schema
 
-Status: implemented through Phase 2 candidate registry (2026-07-16)
+Status: implemented through Phase 2 reversible installation (2026-07-16)
 
 SQLite is the single-user source of truth. Foreign keys and WAL mode are enabled
 per connection. Timestamps are canonical RFC 3339 UTC strings so exports remain
@@ -201,6 +201,40 @@ CREATE TABLE mutation_replay_evidence (
   UNIQUE (replay_id, event_id)
 ) STRICT;
 
+CREATE TABLE mutation_shadows (
+  shadow_id            TEXT PRIMARY KEY,
+  mutation_id          TEXT NOT NULL REFERENCES mutation_candidates(mutation_id)
+    ON DELETE CASCADE,
+  observation_set_hash TEXT NOT NULL,
+  report_json          TEXT NOT NULL,
+  content_hash         BLOB NOT NULL,
+  passed               INTEGER NOT NULL,
+  created_at           TEXT NOT NULL,
+  UNIQUE (mutation_id, observation_set_hash)
+) STRICT;
+
+CREATE TABLE mutation_shadow_evidence (
+  shadow_id TEXT NOT NULL REFERENCES mutation_shadows(shadow_id) ON DELETE CASCADE,
+  event_id  TEXT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+  ordinal   INTEGER NOT NULL,
+  PRIMARY KEY (shadow_id, ordinal),
+  UNIQUE (shadow_id, event_id)
+) STRICT;
+
+CREATE TABLE mutation_installations (
+  installation_id        TEXT PRIMARY KEY,
+  mutation_id            TEXT NOT NULL UNIQUE REFERENCES mutation_candidates(mutation_id)
+    ON DELETE CASCADE,
+  target                 TEXT NOT NULL,
+  repository_root        TEXT NOT NULL,
+  relative_path          TEXT NOT NULL,
+  content_hash           TEXT NOT NULL,
+  permission_review_json TEXT NOT NULL,
+  state                  TEXT NOT NULL,
+  installed_at           TEXT NOT NULL,
+  uninstalled_at         TEXT
+) STRICT;
+
 CREATE VIRTUAL TABLE events_fts USING fts5(
   project_path,
   tool_name,
@@ -242,6 +276,12 @@ failed report remains attached to a challenged candidate. Only a passing report
 updates registry state to `replay_passed` and appends the corresponding
 lifecycle transition in the same transaction.
 
+Shadow reports follow the same immutable, evidence-linked design. Passing
+advances only `replay_passed -> shadow_passed`. Installation records retain the
+canonical target, exact relative path, installed content hash, permission
+review, and uninstall timestamp; install and uninstall lifecycle transitions
+commit with their audit updates.
+
 `source_cursors` stores the last complete byte and physical-line boundary plus
 adapter-defined state. The Claude Code adapter includes pending tool calls in
 that state so a result appended in a later run can still link to its call. A
@@ -260,3 +300,8 @@ disk-space implications.
 Replay scenario event IDs are also foreign-key links. Removing any event cited
 by a replay removes the candidate, its reports, and its lifecycle audit, so a
 `replay_passed` state can never survive its local evaluation evidence.
+
+Shadow observation IDs use the same foreign-key rule. If a mutation is active,
+evidence deletion, pruning, and delete-all return an error until its audited
+filesystem installation is uninstalled. This prevents database deletion from
+leaving an untracked skill active on disk.

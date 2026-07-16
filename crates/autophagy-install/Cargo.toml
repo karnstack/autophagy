@@ -1,0 +1,23 @@
+[package]
+name = "autophagy-install"
+description = "Explicit reversible mutation materializers for Autophagy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+autophagy-mutations = { path = "../autophagy-mutations" }
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+autophagy-core = { path = "../autophagy-core" }
+autophagy-patterns = { path = "../autophagy-patterns" }
+autophagy-store = { path = "../autophagy-store" }
+tempfile = "3.27"
+
+[lints]
+workspace = true
