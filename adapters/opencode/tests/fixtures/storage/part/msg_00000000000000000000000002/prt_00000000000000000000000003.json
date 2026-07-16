@@ -1,0 +1,1 @@
+{"id":"prt_00000000000000000000000003","sessionID":"ses_demo00000000000000000001","messageID":"msg_00000000000000000000000002","type":"tool","callID":"call_edit_1","tool":"edit","state":{"status":"error","input":{"filePath":"src/main.rs"},"error":"file not found","metadata":{},"time":{"start":1784192404000,"end":1784192404200}}}

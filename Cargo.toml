@@ -3,6 +3,8 @@ resolver = "3"
 members = [
   "adapters/claude-code",
   "adapters/codex",
+  "adapters/opencode",
+  "adapters/pi",
   "crates/autophagy-adapter-test-support",
   "crates/autophagy-cli",
   "crates/autophagy-core",

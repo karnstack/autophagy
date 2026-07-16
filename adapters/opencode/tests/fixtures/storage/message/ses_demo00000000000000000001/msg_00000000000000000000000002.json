@@ -1,0 +1,1 @@
+{"id":"msg_00000000000000000000000002","sessionID":"ses_demo00000000000000000001","role":"assistant","time":{"created":1784192402000,"completed":1784192406000},"modelID":"example-model","providerID":"exampleprovider","mode":"build","path":{"cwd":"/work/demo","root":"/work/demo"},"system":[],"cost":0,"tokens":{"input":10,"output":20,"reasoning":0,"cache":{"read":0,"write":0}}}

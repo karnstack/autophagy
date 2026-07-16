@@ -1,0 +1,1 @@
+{"id":"prt_00000000000000000000000002","sessionID":"ses_demo00000000000000000001","messageID":"msg_00000000000000000000000002","type":"tool","callID":"call_read_1","tool":"read","state":{"status":"completed","input":{"filePath":"src/lib.rs"},"output":"file contents omitted","title":"read src/lib.rs","metadata":{},"time":{"start":1784192403000,"end":1784192403500}}}

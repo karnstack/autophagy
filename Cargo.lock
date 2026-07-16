@@ -122,6 +122,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "autophagy-adapter-opencode"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "autophagy-adapter-test-support",
+ "autophagy-events",
+ "autophagy-redaction",
+ "autophagy-store",
+ "directories",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "autophagy-adapter-pi"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "autophagy-adapter-test-support",
+ "autophagy-events",
+ "autophagy-redaction",
+ "autophagy-store",
+ "directories",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
+]
+
+[[package]]
 name = "autophagy-adapter-test-support"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -134,6 +168,8 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "autophagy-adapter-claude-code",
  "autophagy-adapter-codex",
+ "autophagy-adapter-opencode",
+ "autophagy-adapter-pi",
  "autophagy-core",
  "autophagy-events",
  "autophagy-install",
