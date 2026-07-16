@@ -93,6 +93,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "autophagy-adapter-test-support",
  "autophagy-events",
+ "autophagy-redaction",
  "autophagy-store",
  "directories",
  "serde",
@@ -109,6 +110,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "autophagy-adapter-test-support",
  "autophagy-events",
+ "autophagy-redaction",
  "autophagy-store",
  "directories",
  "serde",
@@ -133,13 +135,17 @@ dependencies = [
  "autophagy-adapter-claude-code",
  "autophagy-adapter-codex",
  "autophagy-core",
+ "autophagy-events",
+ "autophagy-patterns",
  "autophagy-store",
  "clap",
  "directories",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
+ "time",
 ]
 
 [[package]]
@@ -147,6 +153,7 @@ name = "autophagy-core"
 version = "0.1.0-alpha.1"
 dependencies = [
  "autophagy-events",
+ "autophagy-redaction",
  "autophagy-store",
  "serde",
  "serde_json",
@@ -176,6 +183,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "time",
+]
+
+[[package]]
+name = "autophagy-redaction"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "autophagy-events",
+ "globset",
+ "regex",
+ "serde_json",
+ "thiserror",
  "time",
 ]
 
@@ -228,6 +247,16 @@ name = "borrow-or-share"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
+
+[[package]]
+name = "bstr"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f7dc094d718f2e1c1559ad110e27eeaae14a5465d3d56dd6dbd793079fbd530"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
 
 [[package]]
 name = "bumpalo"
@@ -499,6 +528,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "globset"
+version = "0.4.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e47d37d2ae4464254884b60ab7071be2b876a9c35b696bd018ddcc76847309cd"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -736,6 +778,12 @@ checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 dependencies = [
  "scopeguard",
 ]
+
+[[package]]
+name = "log"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "memchr"

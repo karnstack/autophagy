@@ -42,6 +42,11 @@ Tool inputs remain structural AEP evidence but enter FTS only with
 is locally approved for search. Change the content policy only with a fresh
 database because it changes canonical event bodies.
 
+Default credential rules redact recognized secrets before persistence. Add
+repeatable `--exclude-path GLOB` values for project or artifact exclusions.
+Project filters, exclusion globs, and the privacy-policy version are part of the
+cursor scope, so changing policy safely rescans instead of losing skipped data.
+
 ## Incremental and cross-adapter guarantees
 
 The cursor advances only past newline-terminated records and retains unmatched

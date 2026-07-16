@@ -16,12 +16,16 @@ path = "src/main.rs"
 autophagy-adapter-claude-code = { path = "../../adapters/claude-code" }
 autophagy-adapter-codex = { path = "../../adapters/codex" }
 autophagy-core = { path = "../autophagy-core" }
+autophagy-events = { path = "../autophagy-events" }
+autophagy-patterns = { path = "../autophagy-patterns" }
 autophagy-store = { path = "../autophagy-store" }
 clap.workspace = true
 directories.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27"

@@ -137,3 +137,33 @@ pub struct DeleteSummary {
     /// Number of artifacts that became unreferenced and were removed.
     pub artifacts_deleted: i64,
 }
+
+/// Effect of deleting all locally persisted Autophagy data.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct DeleteAllSummary {
+    /// Removed source identities.
+    pub sources_deleted: i64,
+    /// Removed sessions.
+    pub sessions_deleted: i64,
+    /// Removed canonical events.
+    pub events_deleted: i64,
+    /// Removed artifacts.
+    pub artifacts_deleted: i64,
+    /// Removed conflict records.
+    pub conflicts_deleted: i64,
+    /// Removed incremental source cursors.
+    pub cursors_deleted: i64,
+}
+
+/// Effect or dry-run preview of a retention prune.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct PruneSummary {
+    /// Sessions older than the cutoff.
+    pub sessions_deleted: i64,
+    /// Events belonging to selected sessions.
+    pub events_deleted: i64,
+    /// Artifacts left unreferenced by selected sessions.
+    pub artifacts_deleted: i64,
+    /// Whether the transaction was intentionally rolled back.
+    pub dry_run: bool,
+}

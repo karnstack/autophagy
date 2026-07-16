@@ -2,10 +2,11 @@ use std::{path::Path, time::Duration};
 
 use autophagy_events::{Event, EventKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use time::OffsetDateTime;
 
 use crate::{
-    DeleteSummary, InsertOutcome, SearchHit, SearchProjection, SessionSummary, SourceCursor,
-    SourceIdentity, StoreError, StoreStats, migration, util,
+    DeleteAllSummary, DeleteSummary, InsertOutcome, PruneSummary, SearchHit, SearchProjection,
+    SessionSummary, SourceCursor, SourceIdentity, StoreError, StoreStats, migration, util,
 };
 
 /// Transactional owner of one local Autophagy `SQLite` database.
@@ -502,6 +503,104 @@ impl EventStore {
             events_deleted,
             artifacts_deleted: artifacts_before - artifacts_after,
         })
+    }
+
+    /// Delete every local event, source, cursor, conflict, and artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the deletion transaction fails.
+    pub fn delete_all(&mut self) -> Result<DeleteAllSummary, StoreError> {
+        let before = self.stats()?;
+        let cursors_deleted =
+            self.connection
+                .query_row("SELECT count(*) FROM source_cursors", [], |row| row.get(0))?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute("DELETE FROM imports", [])?;
+        transaction.execute("DELETE FROM source_cursors", [])?;
+        transaction.execute("DELETE FROM sessions", [])?;
+        transaction.execute("DELETE FROM artifacts", [])?;
+        transaction.execute("DELETE FROM sources", [])?;
+        transaction.commit()?;
+        Ok(DeleteAllSummary {
+            sources_deleted: before.sources,
+            sessions_deleted: before.sessions,
+            events_deleted: before.events,
+            artifacts_deleted: before.artifacts,
+            conflicts_deleted: before.conflicts,
+            cursors_deleted,
+        })
+    }
+
+    /// Delete sessions whose last event is strictly older than a cutoff.
+    ///
+    /// Dry runs execute the same transaction and roll it back, so reported
+    /// artifact counts match a real prune. An exact project limits selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when timestamp formatting or the retention
+    /// transaction fails.
+    pub fn prune_before(
+        &mut self,
+        cutoff: OffsetDateTime,
+        project: Option<&str>,
+        dry_run: bool,
+    ) -> Result<PruneSummary, StoreError> {
+        let cutoff = util::canonical_timestamp(cutoff)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sessions_deleted = transaction.query_row(
+            "SELECT count(*) FROM sessions
+             WHERE last_event_at < ?1 AND (?2 IS NULL OR project_path = ?2)",
+            params![cutoff, project],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let events_deleted = transaction.query_row(
+            "SELECT count(*) FROM events
+             WHERE session_id IN (
+               SELECT session_id FROM sessions
+               WHERE last_event_at < ?1 AND (?2 IS NULL OR project_path = ?2)
+             )",
+            params![cutoff, project],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let artifacts_before =
+            transaction.query_row("SELECT count(*) FROM artifacts", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        transaction.execute(
+            "DELETE FROM sessions
+             WHERE last_event_at < ?1 AND (?2 IS NULL OR project_path = ?2)",
+            params![cutoff, project],
+        )?;
+        transaction.execute(
+            "DELETE FROM artifacts
+             WHERE NOT EXISTS (
+               SELECT 1 FROM event_artifacts
+               WHERE event_artifacts.artifact_id = artifacts.artifact_id
+             )",
+            [],
+        )?;
+        let artifacts_after =
+            transaction.query_row("SELECT count(*) FROM artifacts", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        let summary = PruneSummary {
+            sessions_deleted,
+            events_deleted,
+            artifacts_deleted: artifacts_before - artifacts_after,
+            dry_run,
+        };
+        if dry_run {
+            transaction.rollback()?;
+        } else {
+            transaction.commit()?;
+        }
+        Ok(summary)
     }
 
     fn from_connection(mut connection: Connection) -> Result<Self, StoreError> {

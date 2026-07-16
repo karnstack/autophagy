@@ -1,6 +1,7 @@
 use std::io::BufRead;
 
 use autophagy_events::{Event, EventParseError};
+use autophagy_redaction::{PrivacyError, PrivacyPolicy};
 use autophagy_store::{EventStore, InsertOutcome, SearchProjection, SourceIdentity, StoreError};
 use serde::Serialize;
 
@@ -13,6 +14,8 @@ pub struct ImportOptions {
     pub display_name: Option<String>,
     /// Exact project paths to include. An empty list includes every project.
     pub projects: Vec<String>,
+    /// Glob patterns that exclude matching project or artifact paths.
+    pub exclude_paths: Vec<String>,
     /// Whether already-redacted tool input may enter FTS5.
     pub index_tool_input: bool,
     /// Explicit metadata keys whose already-redacted values may enter FTS5.
@@ -31,6 +34,7 @@ impl ImportOptions {
             instance_key: instance_key.into(),
             display_name: None,
             projects: Vec::new(),
+            exclude_paths: Vec::new(),
             index_tool_input: false,
             index_metadata: Vec::new(),
             dry_run: false,
@@ -91,6 +95,10 @@ pub struct ImportSummary {
     pub conflicts: u64,
     /// Valid events excluded by project selection.
     pub skipped: u64,
+    /// Selected events excluded by path privacy policy.
+    pub privacy_skipped: u64,
+    /// String fields changed by default secret redaction.
+    pub redacted_fields: u64,
     /// Invalid or store-rejected records.
     pub rejected: u64,
     /// Retained line-addressed diagnostics.
@@ -118,6 +126,9 @@ pub enum ImportError {
     /// A database or migration operation failed.
     #[error("event store failed: {0}")]
     Store(#[from] StoreError),
+    /// Privacy policy could not be compiled.
+    #[error(transparent)]
+    Privacy(#[from] PrivacyError),
     /// Non-dry imports require a writable store.
     #[error("a writable event store is required unless dry_run is enabled")]
     MissingStore,
@@ -142,6 +153,7 @@ pub fn import_jsonl<R: BufRead>(
     options: &ImportOptions,
 ) -> Result<ImportSummary, ImportError> {
     validate_options(options)?;
+    let privacy = PrivacyPolicy::new(&options.exclude_paths)?;
     if !options.dry_run && store.is_none() {
         return Err(ImportError::MissingStore);
     }
@@ -181,6 +193,12 @@ pub fn import_jsonl<R: BufRead>(
             summary.skipped += 1;
             continue;
         }
+        let outcome = privacy.apply(&event);
+        let Some(event) = outcome.event else {
+            summary.privacy_skipped += 1;
+            continue;
+        };
+        summary.redacted_fields += outcome.redacted_fields;
         summary.validated += 1;
         if options.dry_run {
             continue;

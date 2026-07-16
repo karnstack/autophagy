@@ -41,6 +41,11 @@ that local content is approved for search. Changing `--include-content` after a
 history has already been imported changes canonical event content; use a fresh
 database when intentionally changing that evidence policy.
 
+Default credential rules redact recognized secrets before persistence. Add
+repeatable `--exclude-path GLOB` values for project or artifact exclusions.
+Project filters, exclusion globs, and the privacy-policy version are part of the
+cursor scope, so changing policy safely rescans instead of losing skipped data.
+
 ## Incremental behavior
 
 Only newline-terminated records advance a cursor. An actively written partial

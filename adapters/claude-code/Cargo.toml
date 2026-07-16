@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 autophagy-events = { path = "../../crates/autophagy-events" }
+autophagy-redaction = { path = "../../crates/autophagy-redaction" }
 autophagy-store = { path = "../../crates/autophagy-store" }
 directories.workspace = true
 serde.workspace = true
