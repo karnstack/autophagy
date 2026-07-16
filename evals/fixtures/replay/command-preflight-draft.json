@@ -1,0 +1,41 @@
+{
+  "spec_version": "replay-suite/0.1",
+  "mutation_id": "mut_d6b7a340eb2fb6f18bee4a20932b9c954adb4975f3ea8136bf0bd264b3ec431c",
+  "scenarios": [
+    {
+      "spec_version": "replay-scenario/0.1",
+      "scenario_id": "rps_0ac300c6bb4fa5dc4fec94d19870e98f521e11e3b1e5b9e384b645ff0b1ad822",
+      "source_event_ids": ["evt_failure_3"],
+      "observed_trigger_selectors": ["failure/v1|shell|mise run check|exit:1"],
+      "expected_action": "intervene",
+      "counterfactual_outcome": "unknown",
+      "note": "Review draft from 1 exact evidence event(s) and 0 nearby event(s) in session ses_failure_3. Context: tool.failed. Set counterfactual_outcome to expected_result or contradiction before evaluation."
+    },
+    {
+      "spec_version": "replay-scenario/0.1",
+      "scenario_id": "rps_1fdacab5d36a425d2aad793b72ee1a3ac915ed6830bf3c472cb7e403ca44e2ef",
+      "source_event_ids": ["evt_success_1"],
+      "observed_trigger_selectors": ["event/v1|type:tool.completed|tool:exec|exit:0"],
+      "expected_action": "no_op",
+      "note": "Review draft from 1 exact counterexample event(s) and 0 nearby event(s) in session ses_success_1. Context: tool.completed. Confirm this remains a no-op case before evaluation."
+    },
+    {
+      "spec_version": "replay-scenario/0.1",
+      "scenario_id": "rps_4f3f45d4f56951fbc777f967d3aee40ed2025e6ffce310f3ae18f9a8e6c573d0",
+      "source_event_ids": ["evt_failure_1"],
+      "observed_trigger_selectors": ["failure/v1|shell|mise run check|exit:1"],
+      "expected_action": "intervene",
+      "counterfactual_outcome": "unknown",
+      "note": "Review draft from 1 exact evidence event(s) and 0 nearby event(s) in session ses_failure_1. Context: tool.failed. Set counterfactual_outcome to expected_result or contradiction before evaluation."
+    },
+    {
+      "spec_version": "replay-scenario/0.1",
+      "scenario_id": "rps_6937dd64cf27b57b419af8590276d64ff2c413d954e3713d77e59bbe7af01df0",
+      "source_event_ids": ["evt_failure_2"],
+      "observed_trigger_selectors": ["failure/v1|shell|mise run check|exit:1"],
+      "expected_action": "intervene",
+      "counterfactual_outcome": "unknown",
+      "note": "Review draft from 1 exact evidence event(s) and 0 nearby event(s) in session ses_failure_2. Context: tool.failed. Set counterfactual_outcome to expected_result or contradiction before evaluation."
+    }
+  ]
+}

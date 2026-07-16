@@ -17,6 +17,17 @@ pub fn evaluate(
     suite: &ReplaySuite,
 ) -> Result<ReplayReport, ReplayEvaluationError> {
     suite.validate()?;
+    let unreviewed_scenario_ids = suite
+        .scenarios
+        .iter()
+        .filter(|scenario| scenario.counterfactual_outcome == Some(CounterfactualOutcome::Unknown))
+        .map(|scenario| scenario.scenario_id.clone())
+        .collect::<Vec<_>>();
+    if !unreviewed_scenario_ids.is_empty() {
+        return Err(ReplayEvaluationError::UnreviewedScenarios {
+            scenario_ids: unreviewed_scenario_ids.join(", "),
+        });
+    }
     if suite.mutation_id != package.mutation_id {
         return Err(ReplayEvaluationError::MutationMismatch {
             package_mutation_id: package.mutation_id.clone(),
@@ -160,6 +171,12 @@ pub enum ReplayEvaluationError {
     /// The suite violated its versioned contract.
     #[error("invalid replay suite: {0}")]
     InvalidSuite(#[from] crate::ReplayValidationErrors),
+    /// Extracted intervention cases still require a human counterfactual label.
+    #[error("replay suite has unreviewed counterfactual outcomes: {scenario_ids}")]
+    UnreviewedScenarios {
+        /// Stable scenario IDs that must be annotated before evaluation.
+        scenario_ids: String,
+    },
     /// A versioned suite could not be canonicalized for hashing.
     #[error("could not serialize replay suite: {0}")]
     Serialization(#[from] serde_json::Error),

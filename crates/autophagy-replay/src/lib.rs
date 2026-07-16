@@ -6,10 +6,12 @@
 //! and false interventions.
 
 mod evaluate;
+mod extract;
 mod model;
 mod validate;
 
 pub use evaluate::{ReplayEvaluationError, evaluate};
+pub use extract::{ReplayDraftError, extract_review_draft};
 pub use model::{
     CounterfactualOutcome, DecisionPoint, ExpectedAction, ReplayDisposition, ReplayPolicy,
     ReplayReport, ReplayResultSpecVersion, ReplayScenarioResult, ReplayScenarioSpecVersion,

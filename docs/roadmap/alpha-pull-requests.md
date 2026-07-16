@@ -16,6 +16,8 @@ reusable recovery without claiming correlation proves causality.
 
 ## PR 2 — Replay decision-point extraction
 
+Status: complete.
+
 - derive review drafts from exact mutation evidence and nearby session context
 - preserve unknown counterfactual labels instead of inventing outcomes
 - export a deterministic annotation workflow into Replay Suite v0.1

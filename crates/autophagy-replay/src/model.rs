@@ -40,6 +40,8 @@ pub enum ExpectedAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CounterfactualOutcome {
+    /// Extraction could not establish the counterfactual; human review is required.
+    Unknown,
     /// The package's stated expected result was observed in the fixture.
     ExpectedResult,
     /// The fixture contradicts the package's expected result.

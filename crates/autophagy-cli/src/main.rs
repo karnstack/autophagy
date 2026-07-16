@@ -22,7 +22,10 @@ use autophagy_install::{
 };
 use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
 use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
-use autophagy_replay::{ReplayEvaluationError, ReplayReport, ReplaySuite, evaluate};
+use autophagy_replay::{
+    CounterfactualOutcome, ExpectedAction, ReplayDraftError, ReplayEvaluationError, ReplayReport,
+    ReplaySuite, evaluate, extract_review_draft,
+};
 use autophagy_shadow::{
     ShadowEvaluationError, ShadowReport, ShadowSuite, evaluate as evaluate_shadow,
 };
@@ -291,6 +294,23 @@ enum MutationAction {
         #[arg(long, value_name = "PATH")]
         scenarios: PathBuf,
     },
+    /// Export an evidence-linked Replay Suite draft for human annotation.
+    ReplayDraft {
+        /// Stable mutation identity.
+        mutation_id: String,
+
+        /// Destination for the Replay Suite v0.1 JSON draft.
+        #[arg(long, value_name = "PATH")]
+        suite: PathBuf,
+
+        /// Nearby events retained on either side of each exact evidence event.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(0..=20), value_name = "COUNT")]
+        context_events: u8,
+
+        /// Replace an existing destination file.
+        #[arg(long)]
+        force: bool,
+    },
     /// Measure would-be trigger precision without applying the mutation.
     Shadow {
         /// Stable mutation identity.
@@ -364,6 +384,8 @@ enum CommandReport {
     MutationTransition(MutationTransitionOutcome),
     #[serde(rename = "mutations_replay")]
     MutationReplay(MutationReplayReport),
+    #[serde(rename = "mutations_replay_draft")]
+    MutationReplayDraft(MutationReplayDraftReport),
     #[serde(rename = "mutations_shadow")]
     MutationShadow(MutationShadowReport),
     #[serde(rename = "mutations_install")]
@@ -405,6 +427,17 @@ struct ChallengeAssessment {
 struct MutationReplayReport {
     evaluation: ReplayReport,
     registration: ReplayRegisterOutcome,
+}
+
+#[derive(Debug, Serialize)]
+struct MutationReplayDraftReport {
+    path: String,
+    context_events: u8,
+    scenarios: usize,
+    intervention_scenarios: usize,
+    no_op_scenarios: usize,
+    unreviewed_scenarios: usize,
+    draft: ReplaySuite,
 }
 
 #[derive(Debug, Serialize)]
@@ -459,6 +492,7 @@ impl CommandReport {
             | Self::MutationList(_)
             | Self::MutationShow(_)
             | Self::MutationTransition(_)
+            | Self::MutationReplayDraft(_)
             | Self::MutationInstall(_)
             | Self::MutationUninstall(_)
             | Self::Export(_)
@@ -497,6 +531,8 @@ enum CliError {
     IncompleteChallenge(String),
     #[error(transparent)]
     Replay(#[from] ReplayEvaluationError),
+    #[error(transparent)]
+    ReplayDraft(#[from] ReplayDraftError),
     #[error(transparent)]
     Shadow(#[from] ShadowEvaluationError),
     #[error(transparent)]
@@ -816,6 +852,51 @@ fn execute_mutation_action(
                 evaluation,
                 registration,
             }))
+        }
+        MutationAction::ReplayDraft {
+            mutation_id,
+            suite,
+            context_events,
+            force,
+        } => {
+            let details = store.get_mutation(&mutation_id)?;
+            let package = serde_json::from_value(details.mutation.package)?;
+            let events = store.list_events_for_detection(None)?;
+            let draft = extract_review_draft(&package, &events, usize::from(context_events))?;
+            let intervention_scenarios = draft
+                .scenarios
+                .iter()
+                .filter(|scenario| scenario.expected_action == ExpectedAction::Intervene)
+                .count();
+            let no_op_scenarios = draft.scenarios.len() - intervention_scenarios;
+            let unreviewed_scenarios = draft
+                .scenarios
+                .iter()
+                .filter(|scenario| {
+                    scenario.counterfactual_outcome == Some(CounterfactualOutcome::Unknown)
+                })
+                .count();
+            let mut options = fs::OpenOptions::new();
+            options.write(true);
+            if force {
+                options.create(true).truncate(true);
+            } else {
+                options.create_new(true);
+            }
+            let mut destination = options.open(&suite)?;
+            serde_json::to_writer_pretty(&mut destination, &draft)?;
+            writeln!(destination)?;
+            Ok(CommandReport::MutationReplayDraft(
+                MutationReplayDraftReport {
+                    path: suite.to_string_lossy().into_owned(),
+                    context_events,
+                    scenarios: draft.scenarios.len(),
+                    intervention_scenarios,
+                    no_op_scenarios,
+                    unreviewed_scenarios,
+                    draft,
+                },
+            ))
         }
         MutationAction::Shadow {
             mutation_id,
@@ -1137,6 +1218,16 @@ fn write_report(
                 report.evaluation.summary.no_ops,
                 report.evaluation.summary.contradictions,
                 report.evaluation.summary.false_interventions
+            )?,
+            CommandReport::MutationReplayDraft(report) => writeln!(
+                writer,
+                "{}\t{} scenarios · {} intervention · {} no-op · {} unreviewed\t{}",
+                report.draft.mutation_id,
+                report.scenarios,
+                report.intervention_scenarios,
+                report.no_op_scenarios,
+                report.unreviewed_scenarios,
+                report.path
             )?,
             CommandReport::MutationShadow(report) => writeln!(
                 writer,

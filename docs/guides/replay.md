@@ -4,6 +4,25 @@ Replay v0.1 tests challenged instruction candidates against annotated
 historical decision points without executing the instruction or invoking a
 model.
 
+Start from an evidence-linked review draft instead of hand-authoring scenario
+structure:
+
+```sh
+autophagy mutations replay-draft mut_example \
+  --suite replay-review.json \
+  --context-events 1
+```
+
+The extractor groups the immutable package's supporting and counterexample
+event IDs by session, retains a bounded window of nearby structural events,
+copies exact positive trigger selectors, and derives stable scenario IDs. It
+does not infer causal outcomes. Every positive decision point is exported with
+`counterfactual_outcome: unknown`; change each one to `expected_result` or
+`contradiction` after reviewing the cited local events. Existing destinations
+are refused unless `--force` is supplied. When one session contains both
+support and counterevidence, the extractor emits separate decision points and
+omits nearby context that would duplicate event provenance between them.
+
 ```sh
 autophagy mutations replay mut_example \
   --scenarios evals/fixtures/replay/example.json
@@ -27,7 +46,9 @@ Each Replay Scenario v0.1 contains:
 
 Annotations are reviewable claims, not synthetic agent executions. Fixture
 authors remain responsible for comparable scenarios and honest counterfactual
-labels. The CLI refuses missing event IDs and the suite validator prevents one
+labels. `unknown` is valid only during review: the evaluator refuses to create
+a report until every intervention case has a reviewed outcome. The CLI refuses
+missing event IDs and the suite validator prevents one
 source event from being reused as multiple supposedly independent scenarios.
 Persisted reports retain the IDs and observed selectors for later inspection.
 Replay event IDs are foreign-key bound: deleting any cited event removes the
