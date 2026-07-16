@@ -30,7 +30,7 @@ fn migrations_persist_and_reopen_cleanly() {
 
     {
         let mut store = EventStore::open(&database).expect("store should open");
-        assert_eq!(store.schema_version().expect("schema version"), 6);
+        assert_eq!(store.schema_version().expect("schema version"), 7);
         assert!(matches!(
             store
                 .insert_event(&source, &event, &SearchProjection::default())
@@ -40,7 +40,7 @@ fn migrations_persist_and_reopen_cleanly() {
     }
 
     let reopened = EventStore::open(&database).expect("store should reopen");
-    assert_eq!(reopened.schema_version().expect("schema version"), 6);
+    assert_eq!(reopened.schema_version().expect("schema version"), 7);
     assert_eq!(
         reopened
             .get_event(event.event_id.as_str())
@@ -727,6 +727,106 @@ fn mutation_registry_is_idempotent_audited_and_evidence_bound() {
     ));
 }
 
+#[test]
+fn claude_code_installation_registers_audits_and_reverses() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    let source = source("instance-claude-code");
+    for (event_id, session_id, timestamp) in [
+        (
+            "evt_mutation-support-a",
+            "ses_mutation-support-a",
+            "2026-07-16T06:00:00Z",
+        ),
+        (
+            "evt_mutation-support-b",
+            "ses_mutation-support-b",
+            "2026-07-16T06:01:00Z",
+        ),
+        (
+            "evt_mutation-counter",
+            "ses_mutation-counter",
+            "2026-07-16T06:02:00Z",
+        ),
+        ("evt_replay-only", "ses_replay-only", "2026-07-16T06:03:00Z"),
+    ] {
+        store
+            .insert_event(
+                &source,
+                &session_event(
+                    event_id,
+                    session_id,
+                    EventKind::DecisionRecorded,
+                    timestamp,
+                    0,
+                ),
+                &SearchProjection::default(),
+            )
+            .expect("evidence event");
+    }
+    store
+        .register_mutation(&mutation_registration(
+            "mut_registry",
+            "fnd_registry",
+            "eqv_registry",
+        ))
+        .expect("register");
+    store
+        .challenge_mutation("mut_registry", &json!({"checks":["sessions_comparable"]}))
+        .expect("challenge");
+    store
+        .register_replay(&replay_registration("rpl_passing", "rsh_passing", true))
+        .expect("replay");
+    store
+        .register_shadow(&shadow_registration("shr_passing", "shh_passing", true))
+        .expect("shadow");
+
+    // Unknown targets are refused by validation before any state change.
+    let mut unknown = claude_code_installation_registration();
+    unknown.target = "vscode_repo_skill".to_owned();
+    assert!(matches!(
+        store.register_installation(&unknown),
+        Err(StoreError::InvalidInstallationRegistration)
+    ));
+
+    let installation = claude_code_installation_registration();
+    assert_eq!(
+        store
+            .register_installation(&installation)
+            .expect("claude code install"),
+        InstallationTransitionOutcome {
+            installation_id: "ins_claude".to_owned(),
+            mutation_state: "active".to_owned(),
+            installation_state: "installed".to_owned(),
+        }
+    );
+    let audit = store.get_installation("mut_registry").expect("audit");
+    assert_eq!(audit.target, "claude_code_repo_skill");
+    assert_eq!(
+        audit.relative_path,
+        ".claude/skills/autophagy-registry/SKILL.md"
+    );
+
+    assert_eq!(
+        store.record_uninstall("mut_registry").expect("uninstall"),
+        InstallationTransitionOutcome {
+            installation_id: "ins_claude".to_owned(),
+            mutation_state: "retired".to_owned(),
+            installation_state: "uninstalled".to_owned(),
+        }
+    );
+    let details = store.get_mutation("mut_registry").expect("retired details");
+    assert_eq!(details.mutation.state, "retired");
+    assert_eq!(details.installations[0].state, "uninstalled");
+    // The retirement transition reason is derived from the stored target, not
+    // hardcoded to Codex.
+    let retire = details
+        .transitions
+        .iter()
+        .find(|transition| transition.to_state == "retired")
+        .expect("retire transition");
+    assert_eq!(retire.reason, "Claude Code repo skill uninstalled");
+}
+
 fn source(instance_key: &str) -> SourceIdentity {
     SourceIdentity::new("codex", instance_key).with_display_name("Codex")
 }
@@ -801,6 +901,18 @@ fn installation_registration() -> InstallationRegistration {
         target: "codex_repo_skill".to_owned(),
         repository_root: "/workspace/project".to_owned(),
         relative_path: ".agents/skills/autophagy-registry/SKILL.md".to_owned(),
+        content_hash: "a".repeat(64),
+        permission_review: json!({"confirmed":"repo-skill-write"}),
+    }
+}
+
+fn claude_code_installation_registration() -> InstallationRegistration {
+    InstallationRegistration {
+        installation_id: "ins_claude".to_owned(),
+        mutation_id: "mut_registry".to_owned(),
+        target: "claude_code_repo_skill".to_owned(),
+        repository_root: "/workspace/project".to_owned(),
+        relative_path: ".claude/skills/autophagy-registry/SKILL.md".to_owned(),
         content_hash: "a".repeat(64),
         permission_review: json!({"confirmed":"repo-skill-write"}),
     }

@@ -531,7 +531,35 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
     );
     assert_eq!(preview_install["result"]["dry_run"], true);
     assert_eq!(preview_install["result"]["materialized"], false);
+    assert_eq!(preview_install["result"]["target"], "codex_repo_skill");
     assert!(!install_repository.join(".agents").exists());
+
+    // The `--target claude-code` selector plans a `.claude/skills` skill and
+    // reports the Claude Code target without writing anything on a dry run.
+    let claude_preview = run_json(
+        &database,
+        [
+            "mutations",
+            "install",
+            &failure_id,
+            "--repository",
+            install_repository.to_str().expect("UTF-8 path"),
+            "--target",
+            "claude-code",
+            "--confirm-permissions",
+            "repo-skill-write",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(claude_preview["result"]["target"], "claude_code_repo_skill");
+    assert!(
+        claude_preview["result"]["relative_path"]
+            .as_str()
+            .expect("relative path")
+            .starts_with(".claude/skills/")
+    );
+    assert_eq!(claude_preview["result"]["materialized"], false);
+    assert!(!install_repository.join(".claude").exists());
 
     let installed = run_json(
         &database,
@@ -750,6 +778,122 @@ fn import_redacts_secrets_excludes_paths_and_requires_delete_confirmation() {
     let deleted = run_json(&database, ["delete", "all", "--confirm", "delete-all"]);
     assert_eq!(deleted["result"]["events_deleted"], 1);
     assert_eq!(deleted["result"]["sessions_deleted"], 1);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn claude_code_install_and_uninstall_round_trip_through_cli() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+    run_json(&database, ["mutations", "propose"]);
+    let registry = run_json(&database, ["mutations", "list"]);
+    let failure_id = registry["result"]
+        .as_array()
+        .expect("registry")
+        .iter()
+        .find(|mutation| mutation["source_detector"] == "repeated_command_failure")
+        .expect("failure mutation")["mutation_id"]
+        .as_str()
+        .expect("mutation ID")
+        .to_owned();
+
+    run_json(
+        &database,
+        [
+            "mutations",
+            "challenge",
+            &failure_id,
+            "--check",
+            "coincidence-considered",
+            "--check",
+            "sessions-comparable",
+            "--check",
+            "trigger-observable",
+            "--check",
+            "legitimate-uses-bounded",
+            "--check",
+            "equivalent-searched",
+            "--check",
+            "counterexamples-reviewed",
+        ],
+    );
+    let passing_replay = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/replay/command-preflight-pass.json");
+    run_json(
+        &database,
+        [
+            "mutations",
+            "replay",
+            &failure_id,
+            "--scenarios",
+            passing_replay.to_str().expect("UTF-8 path"),
+        ],
+    );
+    let passing_shadow = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/shadow/command-preflight-pass.json");
+    run_json(
+        &database,
+        [
+            "mutations",
+            "shadow",
+            &failure_id,
+            "--observations",
+            passing_shadow.to_str().expect("UTF-8 path"),
+        ],
+    );
+
+    let repository = directory.path().join("claude-target");
+    fs::create_dir(&repository).expect("repository");
+    fs::create_dir(repository.join(".git")).expect("git marker");
+
+    // Real (non-dry-run) install materializes the Claude Code skill.
+    let installed = run_json(
+        &database,
+        [
+            "mutations",
+            "install",
+            &failure_id,
+            "--repository",
+            repository.to_str().expect("UTF-8 path"),
+            "--target",
+            "claude-code",
+            "--confirm-permissions",
+            "repo-skill-write",
+        ],
+    );
+    assert_eq!(installed["result"]["target"], "claude_code_repo_skill");
+    assert_eq!(installed["result"]["materialized"], true);
+    assert_eq!(
+        installed["result"]["transition"]["mutation_state"],
+        "active"
+    );
+    let installed_path = repository.join(
+        installed["result"]["relative_path"]
+            .as_str()
+            .expect("relative path"),
+    );
+    assert!(installed_path.is_file());
+    let body = fs::read_to_string(&installed_path).expect("installed skill");
+    assert!(body.contains("## Evidence"));
+    assert!(body.contains(&failure_id));
+
+    // Uninstall (no --target flag) reconstructs the materializer from the
+    // stored audit target and reverses cleanly.
+    let uninstalled = run_json(&database, ["mutations", "uninstall", &failure_id]);
+    assert_eq!(uninstalled["result"]["mutation_state"], "retired");
+    assert_eq!(uninstalled["result"]["installation_state"], "uninstalled");
+    assert!(!installed_path.exists());
+
+    // The retired installation audit retains the Claude Code target.
+    let shown = run_json(&database, ["mutations", "show", &failure_id]);
+    assert_eq!(
+        shown["result"]["installations"][0]["target"],
+        "claude_code_repo_skill"
+    );
+    assert_eq!(shown["result"]["installations"][0]["state"], "uninstalled");
 }
 
 fn run_json<const N: usize>(database: &Path, args: [&str; N]) -> Value {

@@ -18,7 +18,8 @@ use autophagy_adapter_codex::{
 use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
 use autophagy_events::Event;
 use autophagy_install::{
-    CodexSkillPlan, InstallError, InstalledArtifact, materialize, plan_codex_skill, unmaterialize,
+    InstallError, InstallTarget, InstalledArtifact, SkillPlan, materialize, plan_skill,
+    unmaterialize,
 };
 use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
 use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
@@ -382,7 +383,7 @@ enum MutationAction {
         #[arg(long, value_name = "PATH")]
         observations: PathBuf,
     },
-    /// Install one shadow-passed mutation as a repo-scoped Codex skill.
+    /// Install one shadow-passed mutation as a repo-scoped coding-agent skill.
     Install {
         /// Stable mutation identity.
         mutation_id: String,
@@ -390,6 +391,10 @@ enum MutationAction {
         /// Existing target repository root.
         #[arg(long, value_name = "PATH")]
         repository: PathBuf,
+
+        /// Coding agent to materialize the skill for.
+        #[arg(long, value_enum, default_value_t = InstallTargetChoice::Codex)]
+        target: InstallTargetChoice,
 
         /// Required phrase acknowledging the scoped filesystem write: `repo-skill-write`.
         #[arg(long, value_name = "PHRASE")]
@@ -399,11 +404,30 @@ enum MutationAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Remove an audited Codex skill and retire its mutation.
+    /// Remove an audited repo-scoped skill and retire its mutation.
     Uninstall {
         /// Stable mutation identity.
         mutation_id: String,
     },
+}
+
+/// Coding-agent installation target selectable on the command line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum InstallTargetChoice {
+    /// Codex repo-scoped skill under `.agents/skills`.
+    Codex,
+    /// Claude Code repo-scoped skill under `.claude/skills`.
+    ClaudeCode,
+}
+
+impl From<InstallTargetChoice> for InstallTarget {
+    fn from(choice: InstallTargetChoice) -> Self {
+        match choice {
+            InstallTargetChoice::Codex => Self::Codex,
+            InstallTargetChoice::ClaudeCode => Self::ClaudeCode,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
@@ -1090,6 +1114,7 @@ fn execute_mutation_action(
         MutationAction::Install {
             mutation_id,
             repository,
+            target,
             confirm_permissions,
             dry_run,
         } => {
@@ -1106,7 +1131,7 @@ fn execute_mutation_action(
                 .into());
             }
             let package = serde_json::from_value(details.mutation.package)?;
-            let plan = plan_codex_skill(&package, &repository)?;
+            let plan = plan_skill(&package, &repository, target.into())?;
             if dry_run {
                 return Ok(CommandReport::MutationInstall(install_report(
                     &plan, true, false, None,
@@ -1116,7 +1141,7 @@ fn execute_mutation_action(
             let registration = InstallationRegistration {
                 installation_id: plan.installation_id.clone(),
                 mutation_id: plan.mutation_id.clone(),
-                target: "codex_repo_skill".to_owned(),
+                target: plan.target.registry_id().to_owned(),
                 repository_root: plan.repository_root.to_string_lossy().into_owned(),
                 relative_path: portable_relative_path(&plan.relative_path),
                 content_hash: plan.content_hash.clone(),
@@ -1146,11 +1171,13 @@ fn execute_mutation_action(
             let audit = store.get_installation(&mutation_id)?;
             let details = store.get_mutation(&mutation_id)?;
             let package = serde_json::from_value(details.mutation.package)?;
-            let plan = plan_codex_skill(&package, Path::new(&audit.repository_root))?;
+            let target = InstallTarget::from_registry_id(&audit.target)
+                .ok_or(CliError::InstallationAuditMismatch)?;
+            let plan = plan_skill(&package, Path::new(&audit.repository_root), target)?;
             if plan.installation_id != audit.installation_id
                 || portable_relative_path(&plan.relative_path) != audit.relative_path
                 || plan.content_hash != audit.content_hash
-                || audit.target != "codex_repo_skill"
+                || plan.target.registry_id() != audit.target
             {
                 return Err(CliError::InstallationAuditMismatch);
             }
@@ -1176,14 +1203,14 @@ fn execute_mutation_action(
 }
 
 fn install_report(
-    plan: &CodexSkillPlan,
+    plan: &SkillPlan,
     dry_run: bool,
     materialized: bool,
     transition: Option<InstallationTransitionOutcome>,
 ) -> MutationInstallReport {
     MutationInstallReport {
         installation_id: plan.installation_id.clone(),
-        target: "codex_repo_skill",
+        target: plan.target.registry_id(),
         repository_root: plan.repository_root.to_string_lossy().into_owned(),
         relative_path: portable_relative_path(&plan.relative_path),
         content_hash: plan.content_hash.clone(),
@@ -1411,7 +1438,7 @@ fn write_report(
             )?,
             CommandReport::MutationInstall(report) => writeln!(
                 writer,
-                "{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}",
                 report.installation_id,
                 report.relative_path,
                 if report.dry_run {
@@ -1419,7 +1446,8 @@ fn write_report(
                 } else {
                     "installed"
                 },
-                report.content_hash
+                report.content_hash,
+                report.target
             )?,
             CommandReport::MutationUninstall(outcome) => writeln!(
                 writer,

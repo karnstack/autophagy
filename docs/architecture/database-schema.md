@@ -297,7 +297,11 @@ Shadow reports follow the same immutable, evidence-linked design. Passing
 advances only `replay_passed -> shadow_passed`. Installation records retain the
 canonical target, exact relative path, installed content hash, permission
 review, and uninstall timestamp; install and uninstall lifecycle transitions
-commit with their audit updates.
+commit with their audit updates. `target` is one of `codex_repo_skill`
+(`.agents/skills/<name>/SKILL.md`) or `claude_code_repo_skill`
+(`.claude/skills/<name>/SKILL.md`), and `relative_path` is constrained to match
+the recorded target. Uninstall derives the materializer from the stored target,
+so rollback always reconstructs the exact deterministic bytes it installed.
 
 `source_cursors` stores the last complete byte and physical-line boundary plus
 adapter-defined state. The Claude Code adapter includes pending tool calls in

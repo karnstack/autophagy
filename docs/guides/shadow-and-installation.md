@@ -1,4 +1,4 @@
-# Shadow and reversible Codex installation
+# Shadow and reversible installation
 
 Shadow is the final measurement gate before a user may install an instruction
 mutation. It observes where the immutable trigger would fire but never changes
@@ -21,22 +21,26 @@ always contain `mutation_applied: false` and `model_used: false`.
 
 The candidate itself remains zero-permission. Installation is a separate user
 operation requesting one scoped filesystem effect: create one `SKILL.md` under
-the selected repository's `.agents/skills` directory.
+the selected repository's skill directory for the chosen coding agent.
 
 ```sh
 autophagy mutations install mut_example \
   --repository /workspace/project \
+  --target claude-code \
   --confirm-permissions repo-skill-write \
   --dry-run
 ```
 
-The target must be an existing Git repository root. Dry-run reports the
-canonical repository, exact relative path, content hash,
-target, and required permission without writing or activating anything.
+The `--target` selector chooses the coding agent. It defaults to `codex`, so
+existing invocations keep their behavior; pass `--target claude-code` for a
+Claude Code skill. The target must be an existing Git repository root. Dry-run
+reports the canonical repository, exact relative path, content hash, target, and
+required permission without writing or activating anything.
 
 ## Codex repo skill target
 
-After removing `--dry-run`, the materializer creates:
+With `--target codex` (the default), after removing `--dry-run` the materializer
+creates:
 
 ```text
 <repository>/.agents/skills/autophagy-<stable-id>/SKILL.md
@@ -47,16 +51,48 @@ This follows Codex's documented repo-scoped skill location and required
 Autophagy does not write `$HOME/.agents/skills`, Codex config, hooks, commands,
 or network settings.
 
-Codex selects skills from their descriptions and task context. The installed
-skill repeats the reviewed selectors as instructions, but it is not a
-mechanically enforced pre-tool hook; shadow precision therefore remains
-evidence for user judgment rather than a guarantee of identical activation.
+## Claude Code repo skill target
+
+With `--target claude-code` the materializer creates:
+
+```text
+<repository>/.claude/skills/autophagy-<stable-id>/SKILL.md
+```
+
+This is Claude Code's repo-scoped skill location: a `SKILL.md` with `name` and
+`description` YAML frontmatter followed by Markdown instructions, which Claude
+Code loads automatically for sessions in that repository. Autophagy writes only
+that one file inside the selected repository. It does not write `~/.claude`,
+`settings.json`, hooks, slash commands, subagents, or any global configuration —
+the same repo-scoped stance as the Codex materializer.
+
+The Claude Code skill body carries the reviewed instruction, the exact versioned
+trigger selectors, the exclusions, and an evidence footer citing the exact
+supporting (and any counterexample) AEP event IDs alongside the mutation ID and
+version. Every identifier is reproduced deterministically from the reviewed,
+shadow-passed package; nothing is model-generated.
+
+The event-ID evidence footer appears only in the Claude Code body: the Codex
+body is kept byte-for-byte identical to earlier releases so its content hash —
+and therefore drift detection for Codex skills installed before this change —
+stays stable. This is only a difference in the on-disk body; the installation
+audit in SQLite retains the mutation link (and thus its exact evidence
+identifiers) for both targets.
+
+Both agents select skills from their descriptions and task context. The
+installed skill repeats the reviewed selectors as instructions, but it is not a
+mechanically enforced pre-tool hook; shadow precision therefore remains evidence
+for user judgment rather than a guarantee of identical activation.
+
+## Installation audit
 
 Installation requires registry state `shadow_passed` and the exact confirmation
 phrase `repo-skill-write`. The materializer refuses existing files and symlink
 escapes. After writing, SQLite records the canonical root, relative path,
-content SHA-256, target, and permission review while transitioning the mutation
-to `active`. If that audit fails, the new file is removed.
+content SHA-256, target (`codex_repo_skill` or `claude_code_repo_skill`), and
+permission review while transitioning the mutation to `active`. A mutation can
+have at most one active installation. If that audit fails, the new file is
+removed.
 
 ## Uninstall
 
@@ -64,7 +100,8 @@ to `active`. If that audit fails, the new file is removed.
 autophagy mutations uninstall mut_example
 ```
 
-Uninstall loads the audited target, verifies that its bytes still match the
+Uninstall loads the audited target, reconstructs the materializer from the
+stored target identifier, verifies that the file's bytes still match the
 installation hash, removes `SKILL.md`, and records `active -> retired`. If the
 file changed, rollback refuses to delete user edits. If the database update
 fails after removal, Autophagy recreates the exact deterministic skill.

@@ -1198,12 +1198,15 @@ impl EventStore {
             "relative_path": registration.relative_path,
             "permission_review": registration.permission_review,
         }))?;
+        let reason = match registration.target.as_str() {
+            "claude_code_repo_skill" => "user approved Claude Code repo-skill installation",
+            _ => "user approved Codex repo-skill installation",
+        };
         transaction.execute(
             "INSERT INTO mutation_transitions(
                 mutation_id, from_state, to_state, reason, metadata_json, occurred_at
-             ) VALUES (?1, 'shadow_passed', 'active',
-                       'user approved Codex repo-skill installation', ?2, ?3)",
-            params![registration.mutation_id, metadata, now],
+             ) VALUES (?1, 'shadow_passed', 'active', ?2, ?3, ?4)",
+            params![registration.mutation_id, reason, metadata, now],
         )?;
         transaction.commit()?;
         Ok(InstallationTransitionOutcome {
@@ -1248,11 +1251,18 @@ impl EventStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (installation_id, installation_state) = transaction
+        let (installation_id, installation_state, target) = transaction
             .query_row(
-                "SELECT installation_id, state FROM mutation_installations WHERE mutation_id = ?1",
+                "SELECT installation_id, state, target FROM mutation_installations
+                 WHERE mutation_id = ?1",
                 [mutation_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| StoreError::InstallationNotFound {
@@ -1287,14 +1297,20 @@ impl EventStore {
              WHERE mutation_id = ?1",
             params![mutation_id, now],
         )?;
+        let reason = match target.as_str() {
+            "claude_code_repo_skill" => "Claude Code repo skill uninstalled",
+            _ => "Codex repo skill uninstalled",
+        };
         transaction.execute(
             "INSERT INTO mutation_transitions(
                 mutation_id, from_state, to_state, reason, metadata_json, occurred_at
-             ) VALUES (?1, 'active', 'retired', 'Codex repo skill uninstalled', ?2, ?3)",
+             ) VALUES (?1, 'active', 'retired', ?2, ?3, ?4)",
             params![
                 mutation_id,
+                reason,
                 serde_json::to_string(&serde_json::json!({
                     "installation_id": installation_id,
+                    "target": target,
                 }))?,
                 now
             ],
@@ -1916,11 +1932,15 @@ fn shadow_report_matches_registration(registration: &ShadowRegistration) -> bool
 }
 
 fn valid_installation_registration(registration: &InstallationRegistration) -> bool {
+    let target_path_prefix = match registration.target.as_str() {
+        "codex_repo_skill" => ".agents/skills/",
+        "claude_code_repo_skill" => ".claude/skills/",
+        _ => return false,
+    };
     registration.installation_id.starts_with("ins_")
         && registration.mutation_id.starts_with("mut_")
-        && registration.target == "codex_repo_skill"
         && !registration.repository_root.trim().is_empty()
-        && registration.relative_path.starts_with(".agents/skills/")
+        && registration.relative_path.starts_with(target_path_prefix)
         && registration.relative_path.ends_with("/SKILL.md")
         && registration.content_hash.len() == 64
         && registration
