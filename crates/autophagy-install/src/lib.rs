@@ -1,8 +1,9 @@
 //! Explicit, reversible mutation installation targets.
 //!
-//! The initial materializer writes one repo-scoped Codex skill under
-//! `.agents/skills`. It never overwrites an existing file and uninstall refuses
-//! content drift.
+//! Materializers write one repo-scoped skill for a supported coding agent:
+//! Codex under `.agents/skills` or Claude Code under `.claude/skills`. Every
+//! target follows the same lifecycle discipline: it never overwrites an
+//! existing file and uninstall refuses content drift.
 
 use std::{
     fmt::Write as _,
@@ -14,14 +15,66 @@ use std::{
 use autophagy_mutations::MutationPackage;
 use sha2::{Digest, Sha256};
 
-/// Exact filesystem plan for one repo-scoped Codex skill.
+/// Supported repo-scoped skill installation targets.
+///
+/// Both variants share the same planning, materialization, and rollback logic;
+/// they differ only in the repository-relative skill directory, the persisted
+/// registry identifier, and the coding agent named in the rendered guidance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstallTarget {
+    /// Codex repo-scoped skill under `.agents/skills`.
+    Codex,
+    /// Claude Code repo-scoped skill under `.claude/skills`.
+    ClaudeCode,
+}
+
+impl InstallTarget {
+    /// Stable registry identifier persisted in the installation audit.
+    #[must_use]
+    pub fn registry_id(self) -> &'static str {
+        match self {
+            Self::Codex => "codex_repo_skill",
+            Self::ClaudeCode => "claude_code_repo_skill",
+        }
+    }
+
+    /// Recover a target from its persisted registry identifier.
+    #[must_use]
+    pub fn from_registry_id(registry_id: &str) -> Option<Self> {
+        match registry_id {
+            "codex_repo_skill" => Some(Self::Codex),
+            "claude_code_repo_skill" => Some(Self::ClaudeCode),
+            _ => None,
+        }
+    }
+
+    /// Repository-relative directory components holding installed skills.
+    fn skill_root(self) -> [&'static str; 2] {
+        match self {
+            Self::Codex => [".agents", "skills"],
+            Self::ClaudeCode => [".claude", "skills"],
+        }
+    }
+
+    /// Human-facing coding agent name used in rendered guidance.
+    fn agent_name(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::ClaudeCode => "Claude Code",
+        }
+    }
+}
+
+/// Exact filesystem plan for one repo-scoped skill.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CodexSkillPlan {
+pub struct SkillPlan {
     /// Stable installation identity for this mutation and repository.
     pub installation_id: String,
     /// Installed mutation identity.
     pub mutation_id: String,
-    /// Stable Codex skill name.
+    /// Coding agent this skill targets.
+    pub target: InstallTarget,
+    /// Stable skill name.
     pub skill_name: String,
     /// Canonical repository root.
     pub repository_root: PathBuf,
@@ -33,7 +86,10 @@ pub struct CodexSkillPlan {
     pub content_hash: String,
 }
 
-impl CodexSkillPlan {
+/// Backwards-compatible alias for the original Codex-only plan name.
+pub type CodexSkillPlan = SkillPlan;
+
+impl SkillPlan {
     /// Absolute installation path.
     #[must_use]
     pub fn absolute_path(&self) -> PathBuf {
@@ -54,15 +110,16 @@ pub struct InstalledArtifact {
     pub content_hash: String,
 }
 
-/// Build a deterministic repo-scoped Codex skill plan without writing files.
+/// Build a deterministic repo-scoped skill plan without writing files.
 ///
 /// # Errors
 /// Returns [`InstallError`] when the package is invalid or the target is not an
 /// existing directory.
-pub fn plan_codex_skill(
+pub fn plan_skill(
     package: &MutationPackage,
     repository_root: &Path,
-) -> Result<CodexSkillPlan, InstallError> {
+    target: InstallTarget,
+) -> Result<SkillPlan, InstallError> {
     package
         .validate()
         .map_err(|error| InstallError::InvalidPackage(error.to_string()))?;
@@ -80,11 +137,13 @@ pub fn plan_codex_skill(
         .take(12)
         .collect::<String>();
     let skill_name = format!("autophagy-{suffix}");
-    let relative_path = PathBuf::from(".agents")
-        .join("skills")
-        .join(&skill_name)
-        .join("SKILL.md");
-    let content = render_skill(package, &skill_name);
+    let mut relative_path = PathBuf::new();
+    for component in target.skill_root() {
+        relative_path.push(component);
+    }
+    relative_path.push(&skill_name);
+    relative_path.push("SKILL.md");
+    let content = render_skill(package, &skill_name, target);
     let content_hash = sha256_hex(content.as_bytes());
     let installation_id = format!(
         "ins_{}",
@@ -98,9 +157,10 @@ pub fn plan_codex_skill(
             .as_bytes()
         )
     );
-    Ok(CodexSkillPlan {
+    Ok(SkillPlan {
         installation_id,
         mutation_id: package.mutation_id.clone(),
+        target,
         skill_name,
         repository_root,
         relative_path,
@@ -109,13 +169,37 @@ pub fn plan_codex_skill(
     })
 }
 
+/// Build a deterministic repo-scoped Codex skill plan without writing files.
+///
+/// # Errors
+/// Returns [`InstallError`] when the package is invalid or the target is not an
+/// existing directory.
+pub fn plan_codex_skill(
+    package: &MutationPackage,
+    repository_root: &Path,
+) -> Result<SkillPlan, InstallError> {
+    plan_skill(package, repository_root, InstallTarget::Codex)
+}
+
+/// Build a deterministic repo-scoped Claude Code skill plan without writing files.
+///
+/// # Errors
+/// Returns [`InstallError`] when the package is invalid or the target is not an
+/// existing directory.
+pub fn plan_claude_code_skill(
+    package: &MutationPackage,
+    repository_root: &Path,
+) -> Result<SkillPlan, InstallError> {
+    plan_skill(package, repository_root, InstallTarget::ClaudeCode)
+}
+
 /// Create exactly one planned `SKILL.md` without overwriting existing content.
 ///
 /// # Errors
 /// Returns [`InstallError`] for an existing target or filesystem failure.
-pub fn materialize(plan: &CodexSkillPlan) -> Result<InstalledArtifact, InstallError> {
+pub fn materialize(plan: &SkillPlan) -> Result<InstalledArtifact, InstallError> {
     let root = fs::canonicalize(&plan.repository_root)?;
-    let skill_directory = create_scoped_skill_directory(&root, &plan.skill_name)?;
+    let skill_directory = create_scoped_skill_directory(&root, plan.target, &plan.skill_name)?;
     let path = skill_directory.join("SKILL.md");
     let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(file) => file,
@@ -140,9 +224,14 @@ pub fn materialize(plan: &CodexSkillPlan) -> Result<InstalledArtifact, InstallEr
     })
 }
 
-fn create_scoped_skill_directory(root: &Path, skill_name: &str) -> Result<PathBuf, InstallError> {
+fn create_scoped_skill_directory(
+    root: &Path,
+    target: InstallTarget,
+    skill_name: &str,
+) -> Result<PathBuf, InstallError> {
     let mut current = root.to_path_buf();
-    for component in [".agents", "skills", skill_name] {
+    let [first, second] = target.skill_root();
+    for component in [first, second, skill_name] {
         let next = current.join(component);
         match fs::create_dir(&next) {
             Ok(()) => {}
@@ -191,7 +280,7 @@ pub fn unmaterialize(artifact: &InstalledArtifact) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn render_skill(package: &MutationPackage, skill_name: &str) -> String {
+fn render_skill(package: &MutationPackage, skill_name: &str, target: InstallTarget) -> String {
     let title = package
         .title
         .split_whitespace()
@@ -215,7 +304,34 @@ fn render_skill(package: &MutationPackage, skill_name: &str) -> String {
         writeln!(rendered, "- {exclusion}").expect("String write");
     }
     rendered.push_str("\nThis skill was installed only after challenge, replay, shadow evaluation, and explicit user approval.\n");
+    if target == InstallTarget::ClaudeCode {
+        rendered.push_str(&render_evidence_footer(package, target));
+    }
     rendered
+}
+
+fn render_evidence_footer(package: &MutationPackage, target: InstallTarget) -> String {
+    let mut footer = String::from("\n## Evidence\n\n");
+    writeln!(
+        footer,
+        "Installed for {} from Autophagy mutation `{}` (version `{}`), finding `{}`.",
+        target.agent_name(),
+        package.mutation_id,
+        package.version,
+        package.source_finding_id
+    )
+    .expect("String write");
+    footer.push_str("\nSupporting events:\n\n");
+    for event_id in &package.hypothesis.supporting_event_ids {
+        writeln!(footer, "- `{event_id}`").expect("String write");
+    }
+    if !package.hypothesis.counterexample_event_ids.is_empty() {
+        footer.push_str("\nCounterexample events:\n\n");
+        for event_id in &package.hypothesis.counterexample_event_ids {
+            writeln!(footer, "- `{event_id}`").expect("String write");
+        }
+    }
+    footer
 }
 
 fn yaml_double_quoted(value: &str) -> String {
@@ -231,7 +347,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Error produced by Codex skill planning or materialization.
+/// Error produced by repo-scoped skill planning or materialization.
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
     /// The mutation package failed its semantic contract.

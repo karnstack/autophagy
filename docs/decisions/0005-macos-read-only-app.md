@@ -48,7 +48,7 @@ testable `AutophagyKit` library, opened strictly read-only.
   `max(version)` from `schema_migrations` and classifies the database as
   supported, older-but-readable, newer-than-known, or not-an-Autophagy-database.
   Every query checks for table existence first, so a schema that predates or
-  postdates the app's known version (6) degrades to empty results and a clear
+  postdates the app's known version (currently 7) degrades to empty results and a clear
   message rather than a crash or a misread.
 - **Same default path as the CLI.** The default database location is resolved to
   `~/Library/Application Support/sh.autophagy.Autophagy/autophagy.db`, matching

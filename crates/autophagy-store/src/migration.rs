@@ -50,6 +50,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "exact normalized-signature retrieval index",
         sql: include_str!("../migrations/0006_retrieval_signature.sql"),
     },
+    Migration {
+        version: 7,
+        description: "claude code repo-skill installation target",
+        sql: include_str!("../migrations/0007_claude_code_install_target.sql"),
+    },
 ];
 
 pub(crate) fn apply(connection: &mut Connection) -> Result<(), StoreError> {
@@ -133,17 +138,18 @@ mod tests {
     fn newer_database_is_rejected() {
         let mut connection = Connection::open_in_memory().expect("database");
         apply(&mut connection).expect("initial migration");
+        let future = MIGRATIONS.last().expect("migration").version + 1;
         connection
             .execute(
                 "INSERT INTO schema_migrations(version, description, checksum, applied_at)
-                 VALUES (7, 'future', ?1, '2026-07-16T00:00:00Z')",
-                params![[7_u8; 32].as_slice()],
+                 VALUES (?1, 'future', ?2, '2026-07-16T00:00:00Z')",
+                params![future, [7_u8; 32].as_slice()],
             )
             .expect("future migration");
 
         assert!(matches!(
             apply(&mut connection),
-            Err(StoreError::DatabaseTooNew { version: 7 })
+            Err(StoreError::DatabaseTooNew { version }) if version == future
         ));
     }
 
@@ -243,7 +249,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .expect("schema version"),
-            6
+            MIGRATIONS.last().expect("migration").version
         );
     }
 }

@@ -531,7 +531,35 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
     );
     assert_eq!(preview_install["result"]["dry_run"], true);
     assert_eq!(preview_install["result"]["materialized"], false);
+    assert_eq!(preview_install["result"]["target"], "codex_repo_skill");
     assert!(!install_repository.join(".agents").exists());
+
+    // The `--target claude-code` selector plans a `.claude/skills` skill and
+    // reports the Claude Code target without writing anything on a dry run.
+    let claude_preview = run_json(
+        &database,
+        [
+            "mutations",
+            "install",
+            &failure_id,
+            "--repository",
+            install_repository.to_str().expect("UTF-8 path"),
+            "--target",
+            "claude-code",
+            "--confirm-permissions",
+            "repo-skill-write",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(claude_preview["result"]["target"], "claude_code_repo_skill");
+    assert!(
+        claude_preview["result"]["relative_path"]
+            .as_str()
+            .expect("relative path")
+            .starts_with(".claude/skills/")
+    );
+    assert_eq!(claude_preview["result"]["materialized"], false);
+    assert!(!install_repository.join(".claude").exists());
 
     let installed = run_json(
         &database,

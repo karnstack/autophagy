@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Corresponds to the highest immutable migration in
 /// `crates/autophagy-store/migrations` at the time of writing.
-public let knownSchemaVersion = 6
+public let knownSchemaVersion = 7
 
 /// How the opened database's schema relates to what this app understands.
 public enum SchemaCompatibility: Equatable {
