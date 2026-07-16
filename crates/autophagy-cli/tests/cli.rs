@@ -83,6 +83,44 @@ fn dry_run_with_bad_records_returns_attention_exit_without_creating_database() {
     assert!(!database.exists());
 }
 
+#[test]
+fn claude_code_history_imports_and_reimports_incrementally() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../adapters/claude-code/tests/fixtures/projects");
+
+    let imported = run_json(
+        &database,
+        [
+            "import",
+            fixture.to_str().expect("UTF-8 path"),
+            "--adapter",
+            "claude-code",
+        ],
+    );
+    assert_eq!(imported["result"]["inserted"], 8);
+    assert_eq!(
+        imported["result"]["discovery"]["files"]
+            .as_array()
+            .expect("files")
+            .len(),
+        1
+    );
+
+    let repeated = run_json(
+        &database,
+        [
+            "import",
+            fixture.to_str().expect("UTF-8 path"),
+            "--adapter",
+            "claude-code",
+        ],
+    );
+    assert_eq!(repeated["result"]["records_seen"], 0);
+    assert_eq!(repeated["result"]["inserted"], 0);
+}
+
 fn run_json<const N: usize>(database: &Path, args: [&str; N]) -> Value {
     let output = command(database)
         .args(["--output", "json"])

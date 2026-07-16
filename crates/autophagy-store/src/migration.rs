@@ -19,11 +19,18 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "initial event store",
-    sql: include_str!("../migrations/0001_initial.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "initial event store",
+        sql: include_str!("../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        description: "incremental source cursors",
+        sql: include_str!("../migrations/0002_source_cursors.sql"),
+    },
+];
 
 pub(crate) fn apply(connection: &mut Connection) -> Result<(), StoreError> {
     connection.execute_batch(BOOTSTRAP_SQL)?;
@@ -109,14 +116,14 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO schema_migrations(version, description, checksum, applied_at)
-                 VALUES (2, 'future', ?1, '2026-07-16T00:00:00Z')",
+                 VALUES (3, 'future', ?1, '2026-07-16T00:00:00Z')",
                 params![[7_u8; 32].as_slice()],
             )
             .expect("future migration");
 
         assert!(matches!(
             apply(&mut connection),
-            Err(StoreError::DatabaseTooNew { version: 2 })
+            Err(StoreError::DatabaseTooNew { version: 3 })
         ));
     }
 }

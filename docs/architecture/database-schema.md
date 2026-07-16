@@ -1,14 +1,14 @@
 # Milestone 1 database schema
 
-Status: implemented in PR 2 (2026-07-16)
+Status: implemented through PR 4 (2026-07-16)
 
 SQLite is the single-user source of truth. Foreign keys and WAL mode are enabled
 per connection. Timestamps are canonical RFC 3339 UTC strings so exports remain
 readable; sortable integer sequence fields break same-timestamp ties.
 
-The authoritative DDL is the immutable
-[`0001_initial.sql`](../../crates/autophagy-store/migrations/0001_initial.sql)
-migration. The logical schema and its trust boundaries are summarized here.
+The authoritative DDL lives in the ordered, immutable files under
+[`crates/autophagy-store/migrations`](../../crates/autophagy-store/migrations).
+The logical schema and its trust boundaries are summarized here.
 
 ```sql
 CREATE TABLE schema_migrations (
@@ -132,6 +132,18 @@ CREATE TABLE imports (
   UNIQUE (source_id, origin, fingerprint)
 ) STRICT;
 
+CREATE TABLE source_cursors (
+  adapter       TEXT NOT NULL,
+  instance_key  TEXT NOT NULL,
+  origin        TEXT NOT NULL,
+  byte_offset   INTEGER NOT NULL CHECK (byte_offset >= 0),
+  line_number   INTEGER NOT NULL CHECK (line_number >= 0),
+  head_hash     BLOB NOT NULL CHECK (length(head_hash) = 32),
+  state_json    TEXT NOT NULL CHECK (json_valid(state_json)),
+  updated_at    TEXT NOT NULL,
+  PRIMARY KEY (adapter, instance_key, origin)
+) STRICT;
+
 CREATE VIRTUAL TABLE events_fts USING fts5(
   project_path,
   tool_name,
@@ -162,6 +174,11 @@ are never indexed blindly.
    silently overwritten.
 5. Source-file fingerprints and cursors avoid rescanning unchanged inputs, but
    correctness does not depend on that optimization.
+
+`source_cursors` stores the last complete byte and physical-line boundary plus
+adapter-defined state. The Claude Code adapter includes pending tool calls in
+that state so a result appended in a later run can still link to its call. A
+bounded prefix hash detects replacement or truncation and resets safely.
 
 ## Deletion
 

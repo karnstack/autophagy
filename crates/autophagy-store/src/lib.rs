@@ -12,7 +12,7 @@ mod util;
 
 pub use error::StoreError;
 pub use model::{
-    DeleteSummary, InsertOutcome, SearchHit, SearchProjection, SessionSummary, SourceIdentity,
-    StoreStats,
+    DeleteSummary, InsertOutcome, SearchHit, SearchProjection, SessionSummary, SourceCursor,
+    SourceIdentity, StoreStats,
 };
 pub use store::EventStore;

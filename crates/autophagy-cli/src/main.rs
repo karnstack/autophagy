@@ -7,6 +7,9 @@ use std::{
     process::ExitCode,
 };
 
+use autophagy_adapter_claude_code::{
+    ClaudeImportOptions, ClaudeImportSummary, default_projects_root, import_claude_code,
+};
 use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
 use autophagy_store::{EventStore, SearchHit, SessionSummary, StoreError};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -39,13 +42,23 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ImportAdapter {
+    GenericJsonl,
+    ClaudeCode,
+}
+
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Import normalized AEP JSONL from a file or standard input.
+    /// Import normalized AEP JSONL or native agent history.
     Import {
-        /// JSONL file, or `-` for standard input.
-        #[arg(default_value = "-", value_name = "FILE")]
+        /// Input file/root. `-` means stdin for generic JSONL or Claude's default history root.
+        #[arg(default_value = "-", value_name = "PATH")]
         input: PathBuf,
+
+        /// Source format to discover and normalize.
+        #[arg(long, value_enum, default_value_t = ImportAdapter::GenericJsonl)]
+        adapter: ImportAdapter,
 
         /// Stable source identity. Defaults to the canonical input path or `stdin`.
         #[arg(long, value_name = "KEY")]
@@ -58,6 +71,14 @@ enum Commands {
         /// Include only events with this exact project path. Repeatable.
         #[arg(long = "project", value_name = "PATH")]
         projects: Vec<String>,
+
+        /// Include Claude Code `agent-*.jsonl` subagent transcripts.
+        #[arg(long)]
+        include_subagents: bool,
+
+        /// Persist Claude prompt, response, and tool-result text in event metadata.
+        #[arg(long)]
+        include_content: bool,
 
         /// Index tool input after confirming the source has already been redacted.
         #[arg(long)]
@@ -97,9 +118,25 @@ enum Commands {
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", content = "result", rename_all = "snake_case")]
 enum CommandReport {
-    Import(ImportSummary),
+    Import(ImportReport),
     Sessions(Vec<SessionSummary>),
     Search(Vec<SearchHit>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ImportReport {
+    Generic(ImportSummary),
+    ClaudeCode(ClaudeImportSummary),
+}
+
+impl ImportReport {
+    const fn has_issues(&self) -> bool {
+        match self {
+            Self::Generic(summary) => summary.has_issues(),
+            Self::ClaudeCode(summary) => summary.has_issues(),
+        }
+    }
 }
 
 impl CommandReport {
@@ -119,6 +156,10 @@ enum CliError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Import(#[from] autophagy_core::ImportError),
+    #[error(transparent)]
+    ClaudeImport(#[from] autophagy_adapter_claude_code::ClaudeImportError),
+    #[error(transparent)]
+    ClaudeDiscovery(#[from] autophagy_adapter_claude_code::DiscoveryError),
     #[error("could not serialize command output: {0}")]
     Json(#[from] serde_json::Error),
     #[error("could not determine the platform-local application data directory")]
@@ -146,33 +187,62 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
     match cli.command {
         Commands::Import {
             input,
+            adapter,
             instance_key,
             display_name,
             projects,
+            include_subagents,
+            include_content,
             index_tool_input,
             index_metadata,
             dry_run,
             max_diagnostics,
-        } => {
-            let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
-            let mut options = ImportOptions::new(instance_key);
-            options.display_name = display_name;
-            options.projects = projects;
-            options.index_tool_input = index_tool_input;
-            options.index_metadata = index_metadata;
-            options.dry_run = dry_run;
-            options.max_diagnostics = max_diagnostics;
-            let reader = open_input(&input)?;
-
-            let summary = if dry_run {
-                import_jsonl(reader, None, &options)?
-            } else {
-                let database = resolve_database_path(cli.database)?;
-                let mut store = open_store(&database)?;
-                import_jsonl(reader, Some(&mut store), &options)?
-            };
-            Ok(CommandReport::Import(summary))
-        }
+        } => match adapter {
+            ImportAdapter::GenericJsonl => {
+                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                let mut options = ImportOptions::new(instance_key);
+                options.display_name = display_name;
+                options.projects = projects;
+                options.index_tool_input = index_tool_input;
+                options.index_metadata = index_metadata;
+                options.dry_run = dry_run;
+                options.max_diagnostics = max_diagnostics;
+                let reader = open_input(&input)?;
+                let summary = if dry_run {
+                    import_jsonl(reader, None, &options)?
+                } else {
+                    let database = resolve_database_path(cli.database)?;
+                    let mut store = open_store(&database)?;
+                    import_jsonl(reader, Some(&mut store), &options)?
+                };
+                Ok(CommandReport::Import(ImportReport::Generic(summary)))
+            }
+            ImportAdapter::ClaudeCode => {
+                let input = if input == Path::new("-") {
+                    default_projects_root()?
+                } else {
+                    input
+                };
+                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                let mut options = ClaudeImportOptions::new(input, instance_key);
+                options.display_name = display_name;
+                options.projects = projects;
+                options.include_subagents = include_subagents;
+                options.include_content = include_content;
+                options.index_tool_input = index_tool_input;
+                options.index_metadata = index_metadata;
+                options.dry_run = dry_run;
+                options.max_diagnostics = max_diagnostics;
+                let summary = if dry_run {
+                    import_claude_code(None, &options)?
+                } else {
+                    let database = resolve_database_path(cli.database)?;
+                    let mut store = open_store(&database)?;
+                    import_claude_code(Some(&mut store), &options)?
+                };
+                Ok(CommandReport::Import(ImportReport::ClaudeCode(summary)))
+            }
+        },
         Commands::Sessions { limit } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
@@ -232,7 +302,12 @@ fn write_report(
             writeln!(writer)?;
         }
         OutputFormat::Text => match report {
-            CommandReport::Import(summary) => write_import_summary(&mut writer, summary)?,
+            CommandReport::Import(summary) => match summary {
+                ImportReport::Generic(summary) => write_import_summary(&mut writer, summary)?,
+                ImportReport::ClaudeCode(summary) => {
+                    write_claude_import_summary(&mut writer, summary)?;
+                }
+            },
             CommandReport::Sessions(sessions) => {
                 writeln!(writer, "SESSION\tSOURCE\tEVENTS\tLAST EVENT\tPROJECT")?;
                 for session in sessions {
@@ -253,6 +328,43 @@ fn write_report(
                 }
             }
         },
+    }
+    Ok(())
+}
+
+fn write_claude_import_summary(
+    writer: &mut impl Write,
+    summary: &ClaudeImportSummary,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{} files · {} records · {} events · {} inserted · {} duplicates · {} conflicts · {} unsupported · {} rejected{}",
+        summary.discovery.files.len(),
+        summary.records_seen,
+        summary.events_emitted,
+        summary.inserted,
+        summary.duplicates,
+        summary.conflicts,
+        summary.unsupported,
+        summary.rejected,
+        if summary.dry_run { " · dry run" } else { "" }
+    )?;
+    for file in &summary.discovery.files {
+        writeln!(writer, "{}\t{} bytes", file.relative_path, file.size_bytes)?;
+    }
+    for diagnostic in &summary.diagnostics {
+        writeln!(
+            writer,
+            "{}:{} [{}] {}",
+            diagnostic.file, diagnostic.line, diagnostic.code, diagnostic.message
+        )?;
+    }
+    if summary.diagnostics_suppressed > 0 {
+        writeln!(
+            writer,
+            "{} additional diagnostics suppressed",
+            summary.diagnostics_suppressed
+        )?;
     }
     Ok(())
 }

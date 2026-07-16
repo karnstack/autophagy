@@ -62,6 +62,23 @@ pub enum StoreError {
         /// Rejected zero-based artifact position.
         ordinal: usize,
     },
+    /// An incremental cursor cannot fit `SQLite`'s signed integer representation.
+    #[error("cursor {field} value {value} exceeds SQLite's integer range")]
+    CursorOutOfRange {
+        /// Rejected cursor field.
+        field: &'static str,
+        /// Rejected unsigned value.
+        value: u64,
+    },
+    /// An incremental cursor origin was blank.
+    #[error("cursor origin must not be empty or whitespace")]
+    InvalidCursorOrigin,
+    /// Persisted cursor state violated a database invariant.
+    #[error("persisted cursor contains an invalid {field} value")]
+    CorruptCursor {
+        /// Invalid cursor field.
+        field: &'static str,
+    },
     /// An applied migration's SQL no longer matches the compiled migration.
     #[error("migration {version} checksum does not match the compiled migration")]
     MigrationDrift {

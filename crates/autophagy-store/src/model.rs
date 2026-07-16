@@ -11,6 +11,19 @@ pub struct SourceIdentity {
     pub display_name: Option<String>,
 }
 
+/// Durable position and adapter state for an append-only source file.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SourceCursor {
+    /// Bytes safely consumed from the beginning of the source.
+    pub byte_offset: u64,
+    /// Complete physical lines safely consumed.
+    pub line_number: u64,
+    /// SHA-256 of the source's first bounded block for rotation detection.
+    pub head_hash: [u8; 32],
+    /// Adapter-defined JSON required to resume normalization correctly.
+    pub state: serde_json::Value,
+}
+
 impl SourceIdentity {
     /// Create a source identity without a display label.
     #[must_use]

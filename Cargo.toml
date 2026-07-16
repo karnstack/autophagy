@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "adapters/claude-code",
   "crates/autophagy-cli",
   "crates/autophagy-core",
   "crates/autophagy-events",
