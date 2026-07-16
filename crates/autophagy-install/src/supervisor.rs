@@ -127,10 +127,17 @@ fn render_launchd(arguments: &[String], config: &SupervisorConfig) -> String {
         "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
     );
     rendered.push_str("<plist version=\"1.0\">\n<dict>\n");
-    let _ = writeln!(rendered, "    <key>Label</key>\n    <string>{WATCH_LABEL}</string>");
+    let _ = writeln!(
+        rendered,
+        "    <key>Label</key>\n    <string>{WATCH_LABEL}</string>"
+    );
     rendered.push_str("    <key>ProgramArguments</key>\n    <array>\n");
     for argument in arguments {
-        let _ = writeln!(rendered, "        <string>{}</string>", xml_escape(argument));
+        let _ = writeln!(
+            rendered,
+            "        <string>{}</string>",
+            xml_escape(argument)
+        );
     }
     rendered.push_str("    </array>\n");
     rendered.push_str("    <key>RunAtLoad</key>\n    <true/>\n");
@@ -327,7 +334,10 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(plan.content, expected);
-        assert_eq!(plan.unit_path, PathBuf::from("/agents/sh.autophagy.watch.plist"));
+        assert_eq!(
+            plan.unit_path,
+            PathBuf::from("/agents/sh.autophagy.watch.plist")
+        );
         assert!(is_managed(&plan.content));
     }
 
@@ -355,7 +365,10 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(plan.content, expected);
-        assert_eq!(plan.unit_path, PathBuf::from("/units/autophagy-watch.service"));
+        assert_eq!(
+            plan.unit_path,
+            PathBuf::from("/units/autophagy-watch.service")
+        );
     }
 
     #[test]

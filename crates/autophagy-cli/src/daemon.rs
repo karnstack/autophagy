@@ -65,7 +65,10 @@ impl Supervisor for LaunchctlSupervisor {
     }
 
     fn is_loaded(&self, plan: &SupervisorPlan) -> Result<bool, CliError> {
-        Ok(command_succeeds("launchctl", &["list".into(), plan.label.clone()]))
+        Ok(command_succeeds(
+            "launchctl",
+            &["list".into(), plan.label.clone()],
+        ))
     }
 }
 
@@ -111,12 +114,14 @@ impl Supervisor for SystemctlSupervisor {
 }
 
 fn run_command(program: &str, args: &[String]) -> Result<(), CliError> {
-    let status = Command::new(program).args(args).status().map_err(|error| {
-        CliError::SupervisorCommand {
-            command: format!("{program} {}", args.join(" ")),
-            detail: error.to_string(),
-        }
-    })?;
+    let status =
+        Command::new(program)
+            .args(args)
+            .status()
+            .map_err(|error| CliError::SupervisorCommand {
+                command: format!("{program} {}", args.join(" ")),
+                detail: error.to_string(),
+            })?;
     if status.success() {
         Ok(())
     } else {
@@ -456,11 +461,7 @@ pub fn write_text(report: &DaemonReport, writer: &mut impl Write) -> io::Result<
             if let Some(log) = &report.log_path {
                 writeln!(writer, "logs: {log}")?;
             }
-            writeln!(
-                writer,
-                "loaded: {}",
-                describe_loaded(report.job_loaded)
-            )?;
+            writeln!(writer, "loaded: {}", describe_loaded(report.job_loaded))?;
         }
         "uninstall" => {
             writeln!(

@@ -17,9 +17,7 @@ use autophagy_adapter_claude_code::{
     ClaudeImportOptions, default_projects_root, import_claude_code,
 };
 use autophagy_adapter_codex::{CodexImportOptions, default_sessions_root, import_codex};
-use autophagy_adapter_opencode::{
-    OpenCodeImportOptions, default_storage_root, import_opencode,
-};
+use autophagy_adapter_opencode::{OpenCodeImportOptions, default_storage_root, import_opencode};
 use autophagy_adapter_pi::{
     PiImportOptions, default_sessions_root as default_pi_sessions_root, import_pi,
 };
@@ -406,13 +404,8 @@ pub fn run(
         let _ = report_cycle(&mut stdout, output, report);
     };
 
-    let summary: WatchSummary = run_watch(
-        &mut store,
-        &mut sources,
-        &config,
-        &shutdown,
-        &mut observer,
-    );
+    let summary: WatchSummary =
+        run_watch(&mut store, &mut sources, &config, &shutdown, &mut observer);
 
     let report = WatchRunReport {
         interval_secs,

@@ -930,7 +930,10 @@ fn watch_once_imports_incrementally() {
 
     let second = run_watch_summary(&database, &config_dir);
     assert_eq!(second["cycles"], 1);
-    assert_eq!(second["inserted"], 0, "second cycle is incremental (no re-insert)");
+    assert_eq!(
+        second["inserted"], 0,
+        "second cycle is incremental (no re-insert)"
+    );
 }
 
 /// Run `autophagy watch --adapter claude-code --once` and return the final
