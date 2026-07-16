@@ -1,18 +1,20 @@
 # Milestone 1 database schema
 
-Status: proposed for PR 2 (2026-07-16)
+Status: implemented in PR 2 (2026-07-16)
 
 SQLite is the single-user source of truth. Foreign keys and WAL mode are enabled
 per connection. Timestamps are canonical RFC 3339 UTC strings so exports remain
 readable; sortable integer sequence fields break same-timestamp ties.
 
-PR 2 will implement this schema as an immutable migration, not by executing this
-document directly.
+The authoritative DDL is the immutable
+[`0001_initial.sql`](../../crates/autophagy-store/migrations/0001_initial.sql)
+migration. The logical schema and its trust boundaries are summarized here.
 
 ```sql
 CREATE TABLE schema_migrations (
   version       INTEGER PRIMARY KEY,
   description   TEXT NOT NULL,
+  checksum      BLOB NOT NULL CHECK (length(checksum) = 32),
   applied_at    TEXT NOT NULL
 ) STRICT;
 
@@ -43,7 +45,7 @@ CREATE TABLE events (
   row_id          INTEGER PRIMARY KEY,
   event_id        TEXT NOT NULL UNIQUE CHECK (event_id LIKE 'evt_%'),
   spec_version    TEXT NOT NULL,
-  session_id      TEXT NOT NULL REFERENCES sessions(session_id),
+  session_id      TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
   occurred_at     TEXT NOT NULL,
   sequence        INTEGER CHECK (sequence IS NULL OR sequence >= 0),
   event_type      TEXT NOT NULL,
@@ -52,8 +54,8 @@ CREATE TABLE events (
   tool_name       TEXT,
   tool_input_text TEXT,
   exit_code       INTEGER,
-  event_json      TEXT NOT NULL,
-  content_hash    BLOB NOT NULL,
+  event_json      TEXT NOT NULL CHECK (json_valid(event_json)),
+  content_hash    BLOB NOT NULL CHECK (length(content_hash) = 32),
   imported_at     TEXT NOT NULL,
   UNIQUE (session_id, sequence)
 ) STRICT;
@@ -72,9 +74,17 @@ CREATE TABLE artifacts (
   path            TEXT,
   uri             TEXT,
   digest          TEXT,
-  metadata_json   TEXT NOT NULL DEFAULT '{}',
-  UNIQUE (artifact_type, path, uri, digest)
+  metadata_json   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+  CHECK (path IS NOT NULL OR uri IS NOT NULL OR digest IS NOT NULL)
 ) STRICT;
+
+CREATE UNIQUE INDEX artifacts_identity
+  ON artifacts(
+    artifact_type,
+    coalesce(path, ''),
+    coalesce(uri, ''),
+    coalesce(digest, '')
+  );
 
 CREATE TABLE event_artifacts (
   event_row_id    INTEGER NOT NULL REFERENCES events(row_id) ON DELETE CASCADE,
@@ -82,6 +92,28 @@ CREATE TABLE event_artifacts (
   ordinal         INTEGER NOT NULL CHECK (ordinal >= 0),
   PRIMARY KEY (event_row_id, ordinal),
   UNIQUE (event_row_id, artifact_id)
+) STRICT;
+
+CREATE TABLE events_search (
+  event_row_id     INTEGER PRIMARY KEY REFERENCES events(row_id) ON DELETE CASCADE,
+  project_path     TEXT,
+  tool_name        TEXT,
+  tool_input_text  TEXT,
+  searchable_text  TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+CREATE TABLE event_conflicts (
+  conflict_id              INTEGER PRIMARY KEY,
+  event_id                 TEXT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+  existing_content_hash    BLOB NOT NULL,
+  conflicting_content_hash BLOB NOT NULL,
+  conflicting_event_json   TEXT NOT NULL CHECK (json_valid(conflicting_event_json)),
+  source_adapter           TEXT NOT NULL,
+  source_instance_key      TEXT NOT NULL,
+  first_seen_at            TEXT NOT NULL,
+  last_seen_at             TEXT NOT NULL,
+  observation_count        INTEGER NOT NULL DEFAULT 1,
+  UNIQUE (event_id, conflicting_content_hash)
 ) STRICT;
 
 CREATE TABLE imports (
@@ -111,9 +143,12 @@ CREATE VIRTUAL TABLE events_fts USING fts5(
 );
 ```
 
-`events_search` will be a one-to-one projection populated in the same transaction
-as `events`; it contains only text approved by the redaction policy. Raw JSON is
-never indexed blindly.
+Insert, update, and delete triggers keep the external-content FTS5 table aligned
+with `events_search`, including foreign-key cascades. `events_search` is populated
+in the same transaction as `events`. Project paths and tool names come from the
+already policy-processed AEP envelope; tool input and free text require an
+explicit redaction-approved search projection. Raw event JSON and raw tool input
+are never indexed blindly.
 
 ## Idempotency
 
@@ -122,13 +157,15 @@ never indexed blindly.
    and canonicalized content.
 2. `events.event_id` is the primary deduplication boundary.
 3. A repeated ID with the same `content_hash` is a no-op.
-4. A repeated ID with a different hash is quarantined as a contract conflict; it
-   is never silently overwritten.
+4. A repeated ID with a different hash is committed to `event_conflicts` with
+   its source provenance and observation count. The canonical event is never
+   silently overwritten.
 5. Source-file fingerprints and cursors avoid rescanning unchanged inputs, but
    correctness does not depend on that optimization.
 
 ## Deletion
 
-Deleting a session cascades through event-to-artifact links and FTS projections.
-Unreferenced artifacts are removed in the same transaction. `VACUUM` is an
+Deleting a session cascades through events, conflict records, event-to-artifact
+links, and FTS projections. Unreferenced artifacts are removed in the same
+transaction. Connections enable SQLite `secure_delete`; `VACUUM` remains an
 explicit user operation because it has performance and disk-space implications.
