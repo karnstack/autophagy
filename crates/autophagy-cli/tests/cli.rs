@@ -953,8 +953,7 @@ fn run_watch_summary(database: &Path, claude_config_dir: &Path) -> Value {
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
     let last = stdout
         .lines()
-        .filter(|line| !line.trim().is_empty())
-        .next_back()
+        .rfind(|line| !line.trim().is_empty())
         .expect("at least one summary line");
     serde_json::from_str(last).expect("summary JSON")
 }
