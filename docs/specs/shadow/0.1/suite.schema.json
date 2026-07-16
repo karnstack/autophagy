@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/shadow/0.1/suite.schema.json",
+  "title": "Autophagy Shadow Suite v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec_version", "mutation_id", "observations"],
+  "properties": {
+    "spec_version": { "const": "shadow-suite/0.1" },
+    "mutation_id": { "type": "string", "pattern": "^mut_[A-Za-z0-9._:-]+$" },
+    "observations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/observation" }
+    }
+  },
+  "$defs": {
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec_version",
+        "observation_id",
+        "source_event_ids",
+        "observed_trigger_selectors",
+        "intervention_would_help"
+      ],
+      "properties": {
+        "spec_version": { "const": "shadow-observation/0.1" },
+        "observation_id": { "type": "string", "pattern": "^shd_[A-Za-z0-9._:-]+$" },
+        "source_event_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]+$" }
+        },
+        "observed_trigger_selectors": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "intervention_would_help": { "type": "boolean" },
+        "note": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -60,5 +60,5 @@ A report passes only when all conditions hold:
 4. false interventions do not exceed `maximum_false_positive_rate_bps`.
 
 The report copies the policy and lists every failed threshold. Passing replay is
-still not permission to install: shadow measurement and explicit user promotion
-remain future gates.
+still not permission to install: observation-only shadow measurement and an
+explicit install confirmation remain separate gates.

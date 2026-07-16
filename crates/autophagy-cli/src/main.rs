@@ -17,13 +17,21 @@ use autophagy_adapter_codex::{
 };
 use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
 use autophagy_events::Event;
+use autophagy_install::{
+    CodexSkillPlan, InstallError, InstalledArtifact, materialize, plan_codex_skill, unmaterialize,
+};
 use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
 use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
 use autophagy_replay::{ReplayEvaluationError, ReplayReport, ReplaySuite, evaluate};
+use autophagy_shadow::{
+    ShadowEvaluationError, ShadowReport, ShadowSuite, evaluate as evaluate_shadow,
+};
 use autophagy_store::{
-    DeleteAllSummary, DeleteSummary, EventStore, MutationDetails, MutationRecord,
-    MutationRegisterOutcome, MutationRegistration, MutationTransitionOutcome, PruneSummary,
-    ReplayRegisterOutcome, ReplayRegistration, SearchHit, SessionSummary, StoreError,
+    DeleteAllSummary, DeleteSummary, EventStore, InstallationRegistration,
+    InstallationTransitionOutcome, MutationDetails, MutationRecord, MutationRegisterOutcome,
+    MutationRegistration, MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome,
+    ReplayRegistration, SearchHit, SessionSummary, ShadowRegisterOutcome, ShadowRegistration,
+    StoreError,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
@@ -283,6 +291,37 @@ enum MutationAction {
         #[arg(long, value_name = "PATH")]
         scenarios: PathBuf,
     },
+    /// Measure would-be trigger precision without applying the mutation.
+    Shadow {
+        /// Stable mutation identity.
+        mutation_id: String,
+
+        /// Shadow Suite v0.1 JSON file.
+        #[arg(long, value_name = "PATH")]
+        observations: PathBuf,
+    },
+    /// Install one shadow-passed mutation as a repo-scoped Codex skill.
+    Install {
+        /// Stable mutation identity.
+        mutation_id: String,
+
+        /// Existing target repository root.
+        #[arg(long, value_name = "PATH")]
+        repository: PathBuf,
+
+        /// Required phrase acknowledging the scoped filesystem write: `repo-skill-write`.
+        #[arg(long, value_name = "PHRASE")]
+        confirm_permissions: String,
+
+        /// Preview the exact path and content hash without writing or activating.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove an audited Codex skill and retire its mutation.
+    Uninstall {
+        /// Stable mutation identity.
+        mutation_id: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, ValueEnum)]
@@ -325,6 +364,12 @@ enum CommandReport {
     MutationTransition(MutationTransitionOutcome),
     #[serde(rename = "mutations_replay")]
     MutationReplay(MutationReplayReport),
+    #[serde(rename = "mutations_shadow")]
+    MutationShadow(MutationShadowReport),
+    #[serde(rename = "mutations_install")]
+    MutationInstall(MutationInstallReport),
+    #[serde(rename = "mutations_uninstall")]
+    MutationUninstall(InstallationTransitionOutcome),
     Export(Vec<Event>),
     Prune(PruneSummary),
     DeleteSession(DeleteSummary),
@@ -363,6 +408,26 @@ struct MutationReplayReport {
 }
 
 #[derive(Debug, Serialize)]
+struct MutationShadowReport {
+    evaluation: ShadowReport,
+    registration: ShadowRegisterOutcome,
+}
+
+#[derive(Debug, Serialize)]
+struct MutationInstallReport {
+    installation_id: String,
+    target: &'static str,
+    repository_root: String,
+    relative_path: String,
+    content_hash: String,
+    required_permission: &'static str,
+    dry_run: bool,
+    materialized: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transition: Option<InstallationTransitionOutcome>,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum ImportReport {
     Generic(ImportSummary),
@@ -385,6 +450,7 @@ impl CommandReport {
         match self {
             Self::Import(summary) => summary.has_issues(),
             Self::MutationReplay(report) => !report.evaluation.passed,
+            Self::MutationShadow(report) => !report.evaluation.passed,
             Self::Sessions(_)
             | Self::Search(_)
             | Self::Digest(_)
@@ -393,6 +459,8 @@ impl CommandReport {
             | Self::MutationList(_)
             | Self::MutationShow(_)
             | Self::MutationTransition(_)
+            | Self::MutationInstall(_)
+            | Self::MutationUninstall(_)
             | Self::Export(_)
             | Self::Prune(_)
             | Self::DeleteSession(_)
@@ -429,8 +497,20 @@ enum CliError {
     IncompleteChallenge(String),
     #[error(transparent)]
     Replay(#[from] ReplayEvaluationError),
+    #[error(transparent)]
+    Shadow(#[from] ShadowEvaluationError),
+    #[error(transparent)]
+    Install(#[from] InstallError),
     #[error("replay scenario cites event '{0}', which is not in the local evidence store")]
     MissingReplayEvidence(String),
+    #[error("shadow observation cites event '{0}', which is not in the local evidence store")]
+    MissingShadowEvidence(String),
+    #[error("installation requires --confirm-permissions repo-skill-write")]
+    InstallPermissionConfirmation,
+    #[error("installation audit does not match the deterministic materialization plan")]
+    InstallationAuditMismatch,
+    #[error("audit update failed ({primary}); filesystem rollback also failed ({rollback})")]
+    FilesystemAuditRollback { primary: String, rollback: String },
 }
 
 fn main() -> ExitCode {
@@ -737,7 +817,152 @@ fn execute_mutation_action(
                 registration,
             }))
         }
+        MutationAction::Shadow {
+            mutation_id,
+            observations,
+        } => {
+            let suite: ShadowSuite = serde_json::from_slice(&fs::read(observations)?)?;
+            let details = store.get_mutation(&mutation_id)?;
+            let package = serde_json::from_value(details.mutation.package)?;
+            let evaluation = evaluate_shadow(&package, &suite)?;
+            for event_id in suite
+                .observations
+                .iter()
+                .flat_map(|observation| &observation.source_event_ids)
+            {
+                if store.get_event(event_id)?.is_none() {
+                    return Err(CliError::MissingShadowEvidence(event_id.clone()));
+                }
+            }
+            let registration = store.register_shadow(&ShadowRegistration {
+                shadow_id: evaluation.shadow_id.clone(),
+                mutation_id: evaluation.mutation_id.clone(),
+                observation_set_hash: evaluation.observation_set_hash.clone(),
+                report: serde_json::to_value(&evaluation)?,
+                passed: evaluation.passed,
+                source_event_ids: suite
+                    .observations
+                    .iter()
+                    .flat_map(|observation| observation.source_event_ids.iter().cloned())
+                    .collect(),
+            })?;
+            Ok(CommandReport::MutationShadow(MutationShadowReport {
+                evaluation,
+                registration,
+            }))
+        }
+        MutationAction::Install {
+            mutation_id,
+            repository,
+            confirm_permissions,
+            dry_run,
+        } => {
+            if confirm_permissions != "repo-skill-write" {
+                return Err(CliError::InstallPermissionConfirmation);
+            }
+            let details = store.get_mutation(&mutation_id)?;
+            if details.mutation.state != "shadow_passed" {
+                return Err(StoreError::MutationStateTransition {
+                    mutation_id,
+                    from_state: details.mutation.state,
+                    to_state: "active",
+                }
+                .into());
+            }
+            let package = serde_json::from_value(details.mutation.package)?;
+            let plan = plan_codex_skill(&package, &repository)?;
+            if dry_run {
+                return Ok(CommandReport::MutationInstall(install_report(
+                    &plan, true, false, None,
+                )));
+            }
+            let artifact = materialize(&plan)?;
+            let registration = InstallationRegistration {
+                installation_id: plan.installation_id.clone(),
+                mutation_id: plan.mutation_id.clone(),
+                target: "codex_repo_skill".to_owned(),
+                repository_root: plan.repository_root.to_string_lossy().into_owned(),
+                relative_path: portable_relative_path(&plan.relative_path),
+                content_hash: plan.content_hash.clone(),
+                permission_review: serde_json::json!({
+                    "confirmed": "repo-skill-write",
+                    "filesystem_write": plan.relative_path,
+                    "package_permissions": package.permissions,
+                }),
+            };
+            match store.register_installation(&registration) {
+                Ok(transition) => Ok(CommandReport::MutationInstall(install_report(
+                    &plan,
+                    false,
+                    true,
+                    Some(transition),
+                ))),
+                Err(primary) => match unmaterialize(&artifact) {
+                    Ok(()) => Err(primary.into()),
+                    Err(rollback) => Err(CliError::FilesystemAuditRollback {
+                        primary: primary.to_string(),
+                        rollback: rollback.to_string(),
+                    }),
+                },
+            }
+        }
+        MutationAction::Uninstall { mutation_id } => {
+            let audit = store.get_installation(&mutation_id)?;
+            let details = store.get_mutation(&mutation_id)?;
+            let package = serde_json::from_value(details.mutation.package)?;
+            let plan = plan_codex_skill(&package, Path::new(&audit.repository_root))?;
+            if plan.installation_id != audit.installation_id
+                || portable_relative_path(&plan.relative_path) != audit.relative_path
+                || plan.content_hash != audit.content_hash
+                || audit.target != "codex_repo_skill"
+            {
+                return Err(CliError::InstallationAuditMismatch);
+            }
+            let artifact = InstalledArtifact {
+                mutation_id: mutation_id.clone(),
+                repository_root: plan.repository_root.clone(),
+                relative_path: plan.relative_path.clone(),
+                content_hash: plan.content_hash.clone(),
+            };
+            unmaterialize(&artifact)?;
+            match store.record_uninstall(&mutation_id) {
+                Ok(outcome) => Ok(CommandReport::MutationUninstall(outcome)),
+                Err(primary) => match materialize(&plan) {
+                    Ok(_) => Err(primary.into()),
+                    Err(rollback) => Err(CliError::FilesystemAuditRollback {
+                        primary: primary.to_string(),
+                        rollback: rollback.to_string(),
+                    }),
+                },
+            }
+        }
     }
+}
+
+fn install_report(
+    plan: &CodexSkillPlan,
+    dry_run: bool,
+    materialized: bool,
+    transition: Option<InstallationTransitionOutcome>,
+) -> MutationInstallReport {
+    MutationInstallReport {
+        installation_id: plan.installation_id.clone(),
+        target: "codex_repo_skill",
+        repository_root: plan.repository_root.to_string_lossy().into_owned(),
+        relative_path: portable_relative_path(&plan.relative_path),
+        content_hash: plan.content_hash.clone(),
+        required_permission: "repo-skill-write",
+        dry_run,
+        materialized,
+        transition,
+    }
+}
+
+fn portable_relative_path(path: &Path) -> String {
+    path.iter()
+        .map(|component| component.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn resolve_database_path(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
@@ -880,6 +1105,23 @@ fn write_report(
                         replay.created_at, replay.replay_id, replay.passed
                     )?;
                 }
+                for shadow in &details.shadows {
+                    writeln!(
+                        writer,
+                        "{}\tshadow {}\tpassed={}",
+                        shadow.created_at, shadow.shadow_id, shadow.passed
+                    )?;
+                }
+                for installation in &details.installations {
+                    writeln!(
+                        writer,
+                        "{}\tinstallation {}\t{}\t{}",
+                        installation.installed_at,
+                        installation.installation_id,
+                        installation.state,
+                        installation.relative_path
+                    )?;
+                }
             }
             CommandReport::MutationTransition(outcome) => writeln!(
                 writer,
@@ -895,6 +1137,32 @@ fn write_report(
                 report.evaluation.summary.no_ops,
                 report.evaluation.summary.contradictions,
                 report.evaluation.summary.false_interventions
+            )?,
+            CommandReport::MutationShadow(report) => writeln!(
+                writer,
+                "{}\tpassed={}\tprecision={} bps · recall={} bps · {} false positives\tmutation_applied=false",
+                report.evaluation.shadow_id,
+                report.evaluation.passed,
+                report.evaluation.summary.precision_bps,
+                report.evaluation.summary.recall_bps,
+                report.evaluation.summary.false_positives
+            )?,
+            CommandReport::MutationInstall(report) => writeln!(
+                writer,
+                "{}\t{}\t{}\t{}",
+                report.installation_id,
+                report.relative_path,
+                if report.dry_run {
+                    "dry-run"
+                } else {
+                    "installed"
+                },
+                report.content_hash
+            )?,
+            CommandReport::MutationUninstall(outcome) => writeln!(
+                writer,
+                "{}\t{}\t{}",
+                outcome.installation_id, outcome.installation_state, outcome.mutation_state
             )?,
             CommandReport::Prune(summary) => writeln!(
                 writer,

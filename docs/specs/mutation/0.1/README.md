@@ -5,10 +5,11 @@ candidates. The normative JSON Schema is [`schema.json`](schema.json).
 
 V0.1 intentionally supports one intervention: `agent_instruction`. Generated
 candidates request no filesystem, command, environment, or network capability.
-They cannot be installed, executed, promoted, or marked active by this version.
-The package remains permanently in its generated `candidate` state; challenged
-or rejected review state belongs to the audited registry, outside this immutable
-wire object.
+The package itself carries no installation or execution authority. It remains
+permanently in its generated `candidate` state; challenged, evaluated, active,
+rejected, and retired lifecycle state belongs to the audited registry outside
+this immutable wire object. A separate materializer may install it only after
+the registry's challenge, replay, shadow, and user-approval gates pass.
 
 Each package contains:
 
@@ -18,7 +19,7 @@ Each package contains:
 - exact supporting and counterexample event IDs;
 - observable triggers and explicit exclusions;
 - failure cases that challenge the proposal; and
-- replay and false-positive thresholds required before future promotion.
+- replay and false-positive thresholds required before promotion.
 
 The deterministic template generator may return `insufficient_evidence`. A
 candidate is not proof that the intervention is correct; it is a concrete claim

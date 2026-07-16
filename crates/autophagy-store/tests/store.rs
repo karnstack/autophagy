@@ -6,9 +6,10 @@ use autophagy_events::{
     Artifact, ArtifactKind, Event, EventId, EventKind, SessionId, SpecVersion, ToolCall,
 };
 use autophagy_store::{
-    DeleteAllSummary, DeleteSummary, EventStore, InsertOutcome, MutationRegisterOutcome,
-    MutationRegistration, PruneSummary, ReplayRegisterOutcome, ReplayRegistration,
-    SearchProjection, SourceCursor, SourceIdentity, StoreError, StoreStats,
+    DeleteAllSummary, DeleteSummary, EventStore, InsertOutcome, InstallationRegistration,
+    InstallationTransitionOutcome, MutationRegisterOutcome, MutationRegistration, PruneSummary,
+    ReplayRegisterOutcome, ReplayRegistration, SearchProjection, ShadowRegisterOutcome,
+    ShadowRegistration, SourceCursor, SourceIdentity, StoreError, StoreStats,
 };
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -28,7 +29,7 @@ fn migrations_persist_and_reopen_cleanly() {
 
     {
         let mut store = EventStore::open(&database).expect("store should open");
-        assert_eq!(store.schema_version().expect("schema version"), 4);
+        assert_eq!(store.schema_version().expect("schema version"), 5);
         assert!(matches!(
             store
                 .insert_event(&source, &event, &SearchProjection::default())
@@ -38,7 +39,7 @@ fn migrations_persist_and_reopen_cleanly() {
     }
 
     let reopened = EventStore::open(&database).expect("store should reopen");
-    assert_eq!(reopened.schema_version().expect("schema version"), 4);
+    assert_eq!(reopened.schema_version().expect("schema version"), 5);
     assert_eq!(
         reopened
             .get_event(event.event_id.as_str())
@@ -633,31 +634,80 @@ fn mutation_registry_is_idempotent_audited_and_evidence_bound() {
             mutation_state: "replay_passed".to_owned(),
         }
     );
-    let rejected = store
-        .reject_mutation("mut_registry", "counterexample risk remains")
-        .expect("reject");
-    assert!(rejected.changed);
-    assert_eq!(rejected.from_state, "replay_passed");
-    assert!(
-        !store
-            .reject_mutation("mut_registry", "same decision")
-            .expect("repeat")
-            .changed
+    let failed_shadow = shadow_registration("shr_failed", "shh_failed", false);
+    assert_eq!(
+        store
+            .register_shadow(&failed_shadow)
+            .expect("failed shadow"),
+        ShadowRegisterOutcome::Inserted {
+            shadow_id: "shr_failed".to_owned(),
+            advanced: false,
+            mutation_state: "replay_passed".to_owned(),
+        }
+    );
+    let passing_shadow = shadow_registration("shr_passing", "shh_passing", true);
+    assert_eq!(
+        store
+            .register_shadow(&passing_shadow)
+            .expect("passing shadow"),
+        ShadowRegisterOutcome::Inserted {
+            shadow_id: "shr_passing".to_owned(),
+            advanced: true,
+            mutation_state: "shadow_passed".to_owned(),
+        }
+    );
+    let installation = installation_registration();
+    assert_eq!(
+        store
+            .register_installation(&installation)
+            .expect("installation"),
+        InstallationTransitionOutcome {
+            installation_id: "ins_registry".to_owned(),
+            mutation_state: "active".to_owned(),
+            installation_state: "installed".to_owned(),
+        }
+    );
+    assert_eq!(
+        store
+            .get_installation("mut_registry")
+            .expect("installation audit")
+            .relative_path,
+        ".agents/skills/autophagy-registry/SKILL.md"
+    );
+    assert!(matches!(
+        store.delete_session("ses_replay-only"),
+        Err(StoreError::ActiveInstallationBlocksEvidenceDeletion { .. })
+    ));
+    assert!(matches!(
+        store.prune_before(
+            OffsetDateTime::parse("2027-01-01T00:00:00Z", &Rfc3339).expect("cutoff"),
+            None,
+            true,
+        ),
+        Err(StoreError::ActiveInstallationBlocksEvidenceDeletion { .. })
+    ));
+    assert!(matches!(
+        store.delete_all(),
+        Err(StoreError::ActiveInstallationBlocksEvidenceDeletion { .. })
+    ));
+    assert_eq!(
+        store.record_uninstall("mut_registry").expect("uninstall"),
+        InstallationTransitionOutcome {
+            installation_id: "ins_registry".to_owned(),
+            mutation_state: "retired".to_owned(),
+            installation_state: "uninstalled".to_owned(),
+        }
     );
     assert!(matches!(
         store.challenge_mutation("mut_registry", &assessment),
         Err(StoreError::MutationStateTransition { .. })
     ));
-    let details = store
-        .get_mutation("mut_registry")
-        .expect("rejected details");
-    assert_eq!(details.mutation.state, "rejected");
-    assert_eq!(
-        details.mutation.rejection_reason.as_deref(),
-        Some("counterexample risk remains")
-    );
-    assert_eq!(details.transitions.len(), 4);
+    let details = store.get_mutation("mut_registry").expect("retired details");
+    assert_eq!(details.mutation.state, "retired");
+    assert_eq!(details.transitions.len(), 6);
     assert_eq!(details.replays.len(), 2);
+    assert_eq!(details.shadows.len(), 2);
+    assert_eq!(details.installations.len(), 1);
     assert!(!details.replays[0].passed);
     assert!(details.replays[1].passed);
 
@@ -714,6 +764,39 @@ fn replay_registration(
         }),
         passed,
         source_event_ids: vec!["evt_replay-only".to_owned()],
+    }
+}
+
+fn shadow_registration(
+    shadow_id: &str,
+    observation_set_hash: &str,
+    passed: bool,
+) -> ShadowRegistration {
+    ShadowRegistration {
+        shadow_id: shadow_id.to_owned(),
+        mutation_id: "mut_registry".to_owned(),
+        observation_set_hash: observation_set_hash.to_owned(),
+        report: json!({
+            "shadow_id": shadow_id,
+            "mutation_id": "mut_registry",
+            "observation_set_hash": observation_set_hash,
+            "passed": passed,
+            "results": [{"source_event_ids": ["evt_replay-only"]}],
+        }),
+        passed,
+        source_event_ids: vec!["evt_replay-only".to_owned()],
+    }
+}
+
+fn installation_registration() -> InstallationRegistration {
+    InstallationRegistration {
+        installation_id: "ins_registry".to_owned(),
+        mutation_id: "mut_registry".to_owned(),
+        target: "codex_repo_skill".to_owned(),
+        repository_root: "/workspace/project".to_owned(),
+        relative_path: ".agents/skills/autophagy-registry/SKILL.md".to_owned(),
+        content_hash: "a".repeat(64),
+        permission_review: json!({"confirmed":"repo-skill-write"}),
     }
 }
 

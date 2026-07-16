@@ -31,6 +31,12 @@ pub enum LifecycleState {
     Challenged,
     /// Deterministic replay coverage and thresholds passed.
     ReplayPassed,
+    /// Observation-only shadow precision thresholds passed.
+    ShadowPassed,
+    /// Explicitly installed into a supported agent target.
+    Active,
+    /// Reversibly uninstalled and no longer active.
+    Retired,
     /// A user rejected the candidate before activation.
     Rejected,
 }
@@ -43,6 +49,9 @@ impl LifecycleState {
             Self::Candidate => "candidate",
             Self::Challenged => "challenged",
             Self::ReplayPassed => "replay_passed",
+            Self::ShadowPassed => "shadow_passed",
+            Self::Active => "active",
+            Self::Retired => "retired",
             Self::Rejected => "rejected",
         }
     }

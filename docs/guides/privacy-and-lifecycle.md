@@ -71,6 +71,12 @@ scenarios, preventing a passing evaluation from outliving its local evidence.
 Delete-all also removes candidates, sources, import records, and incremental
 cursors.
 
+An active mutation has behavior materialized outside SQLite. Deletion and prune
+therefore refuse any operation that would remove its evidence until
+`autophagy mutations uninstall <mutation-id>` completes. This prevents privacy
+deletion from silently orphaning an active repo skill; uninstall first, then
+repeat the deletion.
+
 SQLite uses `secure_delete`, but filesystem snapshots, backups, exported files,
 and previous database copies remain outside Autophagy's control. `VACUUM` is not
 run automatically because it can be expensive and needs additional free space.

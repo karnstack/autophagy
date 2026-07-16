@@ -7,10 +7,12 @@ members = [
   "crates/autophagy-cli",
   "crates/autophagy-core",
   "crates/autophagy-events",
+  "crates/autophagy-install",
   "crates/autophagy-mutations",
   "crates/autophagy-patterns",
   "crates/autophagy-redaction",
   "crates/autophagy-replay",
+  "crates/autophagy-shadow",
   "crates/autophagy-store",
 ]
 

@@ -45,6 +45,11 @@ boundaries.
 | Unreviewed candidate advances | Challenge requires all six explicit adversarial checks |
 | Replay fixture executes untrusted content | Replay v0.1 performs exact string matching only; reports assert no mutation or model execution |
 | Easy-only replay creates false confidence | Passing requires intervention and no-op coverage plus package thresholds |
+| Shadow mode changes agent behavior | Shadow evaluator only exact-matches annotations and asserts `mutation_applied: false` |
+| Installer overwrites user content | Codex skill target uses create-new semantics and refuses existing paths |
+| Installer escapes repository | Every created path component is canonicalized and checked against the approved root |
+| Uninstall deletes user edits | Rollback verifies the installation SHA-256 and refuses content drift |
+| Evidence deletion orphans active behavior | Retention and deletion require audited uninstall first |
 
 ## Residual risks
 
@@ -56,6 +61,11 @@ boundaries.
   JSONL are outside delete-all's reach.
 - A local process with the user's filesystem permissions can read the database.
 - Findings demonstrate recurrence, not causality or intervention correctness.
+- Shadow usefulness labels remain human-authored annotations, not causal proof.
+- Codex skill selection is agent-mediated; exact-selector shadow metrics do not
+  guarantee identical implicit skill activation behavior.
+- Manual edits or removal of an installed skill create drift that requires user
+  resolution before audited uninstall can complete.
 
 ## Security invariants
 
@@ -70,6 +80,8 @@ boundaries.
 7. Candidate packages are immutable; lifecycle state changes are append-only
    audited transitions outside the package.
 8. Replay v0.1 never executes mutation content, commands, hooks, or models.
+9. Installation requires a shadow-passed state and exact
+   `repo-skill-write` confirmation; uninstall is hash-verified and audited.
 
 Report failures of these invariants privately using the process in
 [`SECURITY.md`](../../SECURITY.md).

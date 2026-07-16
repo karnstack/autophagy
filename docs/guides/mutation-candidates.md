@@ -27,15 +27,15 @@ an initial audit entry, and each challenge or rejection appends another entry.
 The only supported transitions are:
 
 ```text
-candidate -> challenged -> rejected
-         \--------------> rejected
+candidate -> challenged -> replay_passed -> shadow_passed -> active -> retired
+candidate/challenged/replay_passed/shadow_passed -> rejected
 ```
 
 Repeated requests for the current state are no-ops. A rejected candidate cannot
 return to challenged. A challenged candidate can become `replay_passed` only
 when a persisted deterministic replay report satisfies every coverage and
-package threshold. There is deliberately no active, install, or promote state
-yet.
+package threshold. No candidate can become active without passing shadow
+evaluation and receiving explicit scoped filesystem approval.
 
 ## Challenge and rejection
 
@@ -77,10 +77,11 @@ V0.1 supports only `agent_instruction`. Its permission manifest must contain:
 - no environment variables; and
 - `network: false`.
 
-The registry stores and reviews packages but has no install command, hook
-materializer, active state, or execution path. Replay v0.1 classifies annotated
-fixtures without running the intervention. Shadow observation, explicit user
-promotion, and reversible installation remain separate gates.
+Replay and shadow evaluation never run the intervention. The only activation
+path is a manually confirmed repo-scoped Codex `SKILL.md` materializer after all
+prior gates pass. It requests no command, network, environment, or general
+filesystem permission; its installer receives one separately reviewed write to
+`.agents/skills` and records that exact path and hash.
 
 ## Deterministic templates
 

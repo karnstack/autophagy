@@ -407,6 +407,134 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
         2
     );
 
+    let failing_shadow = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/shadow/command-preflight-fail.json");
+    let failed_shadow = command(&database)
+        .args([
+            "--output",
+            "json",
+            "mutations",
+            "shadow",
+            &failure_id,
+            "--observations",
+            failing_shadow.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("failed shadow");
+    assert_eq!(failed_shadow.status.code(), Some(2));
+    let failed_shadow: Value =
+        serde_json::from_slice(&failed_shadow.stdout).expect("failed shadow JSON");
+    assert_eq!(failed_shadow["result"]["evaluation"]["passed"], false);
+    assert_eq!(
+        failed_shadow["result"]["registration"]["mutation_state"],
+        "replay_passed"
+    );
+
+    let passing_shadow = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/shadow/command-preflight-pass.json");
+    let passed_shadow = run_json(
+        &database,
+        [
+            "mutations",
+            "shadow",
+            &failure_id,
+            "--observations",
+            passing_shadow.to_str().expect("UTF-8 path"),
+        ],
+    );
+    assert_eq!(passed_shadow["result"]["evaluation"]["passed"], true);
+    assert_eq!(
+        passed_shadow["result"]["evaluation"]["mutation_applied"],
+        false
+    );
+    assert_eq!(
+        passed_shadow["result"]["registration"]["mutation_state"],
+        "shadow_passed"
+    );
+
+    let install_repository = directory.path().join("install-target");
+    fs::create_dir(&install_repository).expect("install target");
+    fs::create_dir(install_repository.join(".git")).expect("git marker");
+    let refused_install = command(&database)
+        .args([
+            "mutations",
+            "install",
+            &failure_id,
+            "--repository",
+            install_repository.to_str().expect("UTF-8 path"),
+            "--confirm-permissions",
+            "nope",
+        ])
+        .output()
+        .expect("refused install");
+    assert!(!refused_install.status.success());
+    assert!(!install_repository.join(".agents").exists());
+
+    let preview_install = run_json(
+        &database,
+        [
+            "mutations",
+            "install",
+            &failure_id,
+            "--repository",
+            install_repository.to_str().expect("UTF-8 path"),
+            "--confirm-permissions",
+            "repo-skill-write",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(preview_install["result"]["dry_run"], true);
+    assert_eq!(preview_install["result"]["materialized"], false);
+    assert!(!install_repository.join(".agents").exists());
+
+    let installed = run_json(
+        &database,
+        [
+            "mutations",
+            "install",
+            &failure_id,
+            "--repository",
+            install_repository.to_str().expect("UTF-8 path"),
+            "--confirm-permissions",
+            "repo-skill-write",
+        ],
+    );
+    assert_eq!(installed["result"]["materialized"], true);
+    assert_eq!(
+        installed["result"]["transition"]["mutation_state"],
+        "active"
+    );
+    let installed_path = install_repository.join(
+        installed["result"]["relative_path"]
+            .as_str()
+            .expect("relative path"),
+    );
+    assert!(installed_path.is_file());
+    assert!(
+        fs::read_to_string(&installed_path)
+            .expect("installed skill")
+            .contains("Mutation: `mut_")
+    );
+
+    let uninstalled = run_json(&database, ["mutations", "uninstall", &failure_id]);
+    assert_eq!(uninstalled["result"]["mutation_state"], "retired");
+    assert_eq!(uninstalled["result"]["installation_state"], "uninstalled");
+    assert!(!installed_path.exists());
+
+    let retired = run_json(&database, ["mutations", "show", &failure_id]);
+    assert_eq!(retired["result"]["mutation"]["state"], "retired");
+    assert_eq!(
+        retired["result"]["shadows"]
+            .as_array()
+            .expect("shadows")
+            .len(),
+        2
+    );
+    assert_eq!(
+        retired["result"]["installations"][0]["state"],
+        "uninstalled"
+    );
+
     let rejected = run_json(
         &database,
         [

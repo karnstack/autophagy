@@ -74,6 +74,12 @@ pub enum StoreError {
         /// Rejected zero-based evidence position.
         ordinal: usize,
     },
+    /// A shadow evidence position cannot fit `SQLite`'s integer representation.
+    #[error("shadow evidence ordinal {ordinal} exceeds SQLite's integer range")]
+    ShadowEvidenceOrdinalOutOfRange {
+        /// Rejected zero-based evidence position.
+        ordinal: usize,
+    },
     /// An incremental cursor cannot fit `SQLite`'s signed integer representation.
     #[error("cursor {field} value {value} exceeds SQLite's integer range")]
     CursorOutOfRange {
@@ -145,5 +151,37 @@ pub enum StoreError {
     ReplayContentConflict {
         /// Conflicting replay identity.
         replay_id: String,
+    },
+    /// Shadow identity, mutation identity, hash, pass status, or evidence disagreed.
+    #[error("shadow registration does not match its versioned report")]
+    InvalidShadowRegistration,
+    /// Immutable shadow content changed under the same ID.
+    #[error("shadow '{shadow_id}' already exists with different report content")]
+    ShadowContentConflict {
+        /// Conflicting shadow identity.
+        shadow_id: String,
+    },
+    /// Installation registration violated the supported target contract.
+    #[error("installation registration is invalid")]
+    InvalidInstallationRegistration,
+    /// No installation audit exists for the mutation.
+    #[error("mutation '{mutation_id}' has no installation record")]
+    InstallationNotFound {
+        /// Mutation identity.
+        mutation_id: String,
+    },
+    /// Installation is not currently installed.
+    #[error("installation '{installation_id}' is in state '{state}', not 'installed'")]
+    InstallationState {
+        /// Installation identity.
+        installation_id: String,
+        /// Current installation state.
+        state: String,
+    },
+    /// Evidence deletion would orphan a materialized active skill.
+    #[error("installation '{installation_id}' must be uninstalled before deleting its evidence")]
+    ActiveInstallationBlocksEvidenceDeletion {
+        /// Active installation requiring rollback first.
+        installation_id: String,
     },
 }
