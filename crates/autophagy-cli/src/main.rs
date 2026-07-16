@@ -1440,14 +1440,14 @@ fn write_report(
                 writer,
                 "{}\t{}\t{}\t{}\t{}",
                 report.installation_id,
-                report.target,
                 report.relative_path,
                 if report.dry_run {
                     "dry-run"
                 } else {
                     "installed"
                 },
-                report.content_hash
+                report.content_hash,
+                report.target
             )?,
             CommandReport::MutationUninstall(outcome) => writeln!(
                 writer,

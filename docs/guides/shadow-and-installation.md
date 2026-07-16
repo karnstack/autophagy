@@ -72,6 +72,13 @@ supporting (and any counterexample) AEP event IDs alongside the mutation ID and
 version. Every identifier is reproduced deterministically from the reviewed,
 shadow-passed package; nothing is model-generated.
 
+The event-ID evidence footer appears only in the Claude Code body: the Codex
+body is kept byte-for-byte identical to earlier releases so its content hash —
+and therefore drift detection for Codex skills installed before this change —
+stays stable. This is only a difference in the on-disk body; the installation
+audit in SQLite retains the mutation link (and thus its exact evidence
+identifiers) for both targets.
+
 Both agents select skills from their descriptions and task context. The
 installed skill repeats the reviewed selectors as instructions, but it is not a
 mechanically enforced pre-tool hook; shadow precision therefore remains evidence

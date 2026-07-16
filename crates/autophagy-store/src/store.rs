@@ -1251,11 +1251,18 @@ impl EventStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (installation_id, installation_state) = transaction
+        let (installation_id, installation_state, target) = transaction
             .query_row(
-                "SELECT installation_id, state FROM mutation_installations WHERE mutation_id = ?1",
+                "SELECT installation_id, state, target FROM mutation_installations
+                 WHERE mutation_id = ?1",
                 [mutation_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| StoreError::InstallationNotFound {
@@ -1290,14 +1297,20 @@ impl EventStore {
              WHERE mutation_id = ?1",
             params![mutation_id, now],
         )?;
+        let reason = match target.as_str() {
+            "claude_code_repo_skill" => "Claude Code repo skill uninstalled",
+            _ => "Codex repo skill uninstalled",
+        };
         transaction.execute(
             "INSERT INTO mutation_transitions(
                 mutation_id, from_state, to_state, reason, metadata_json, occurred_at
-             ) VALUES (?1, 'active', 'retired', 'Codex repo skill uninstalled', ?2, ?3)",
+             ) VALUES (?1, 'active', 'retired', ?2, ?3, ?4)",
             params![
                 mutation_id,
+                reason,
                 serde_json::to_string(&serde_json::json!({
                     "installation_id": installation_id,
+                    "target": target,
                 }))?,
                 now
             ],

@@ -817,6 +817,14 @@ fn claude_code_installation_registers_audits_and_reverses() {
     let details = store.get_mutation("mut_registry").expect("retired details");
     assert_eq!(details.mutation.state, "retired");
     assert_eq!(details.installations[0].state, "uninstalled");
+    // The retirement transition reason is derived from the stored target, not
+    // hardcoded to Codex.
+    let retire = details
+        .transitions
+        .iter()
+        .find(|transition| transition.to_state == "retired")
+        .expect("retire transition");
+    assert_eq!(retire.reason, "Claude Code repo skill uninstalled");
 }
 
 fn source(instance_key: &str) -> SourceIdentity {

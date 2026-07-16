@@ -40,7 +40,14 @@ and relax the registry constraints with a new migration.
   the reviewed instruction, the exact versioned trigger selectors, the
   exclusions, and an evidence footer citing the exact supporting and
   counterexample AEP event IDs plus the mutation ID and version. The Codex body
-  is byte-for-byte unchanged.
+  is byte-for-byte unchanged. The evidence footer with event IDs is therefore
+  deliberately asymmetric — it is emitted only in the Claude Code body, because
+  changing the Codex body would alter the content hash of the skill Autophagy
+  materializes and break drift detection for skills installed before this
+  change; the constraint "every derived finding retains exact evidence
+  identifiers" is already satisfied for both targets by the installation audit
+  in `mutation_installations`, which links the mutation (and thus its evidence)
+  to the on-disk file regardless of target.
 - **Migration 0007.** `mutation_installations` is recreated (SQLite cannot alter
   a `CHECK` in place) with `target IN ('codex_repo_skill',
   'claude_code_repo_skill')` and a `relative_path` check that accepts either
