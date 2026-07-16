@@ -896,6 +896,66 @@ fn claude_code_install_and_uninstall_round_trip_through_cli() {
     assert_eq!(shown["result"]["installations"][0]["state"], "uninstalled");
 }
 
+const CLAUDE_TRANSCRIPT: &str = concat!(
+    "{\"type\":\"user\",\"uuid\":\"r1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",",
+    "\"timestamp\":\"2026-07-16T08:00:00Z\",\"cwd\":\"/workspace/demo\",",
+    "\"message\":{\"role\":\"user\",\"content\":\"Please inspect the build.\"}}\n",
+    "{\"type\":\"assistant\",\"uuid\":\"r2\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",",
+    "\"timestamp\":\"2026-07-16T08:00:01Z\",\"cwd\":\"/workspace/demo\",",
+    "\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"I will run the build.\"},",
+    "{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":{\"command\":\"mise run check\"}}]}}\n",
+    "{\"type\":\"user\",\"uuid\":\"r3\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",",
+    "\"timestamp\":\"2026-07-16T08:00:02Z\",\"cwd\":\"/workspace/demo\",",
+    "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",",
+    "\"is_error\":true,\"content\":\"Exit code 1\\nfixture failure\"}]}}\n"
+);
+
+/// One watch cycle imports the fixture; a second cycle inserts nothing because
+/// the source cursor has already consumed the transcript. Uses `CLAUDE_CONFIG_DIR`
+/// so the real `~/.claude` is never touched.
+#[test]
+fn watch_once_imports_incrementally() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let config_dir = directory.path().join("claude-config");
+    let project_dir = config_dir.join("projects").join("-workspace-demo");
+    fs::create_dir_all(&project_dir).expect("create projects dir");
+    fs::write(project_dir.join("session.jsonl"), CLAUDE_TRANSCRIPT).expect("write transcript");
+    let database = directory.path().join("watch.db");
+
+    let first = run_watch_summary(&database, &config_dir);
+    assert_eq!(first["cycles"], 1);
+    assert_eq!(first["failures"], 0);
+    let first_inserted = first["inserted"].as_u64().expect("inserted count");
+    assert!(first_inserted > 0, "first cycle should insert events");
+
+    let second = run_watch_summary(&database, &config_dir);
+    assert_eq!(second["cycles"], 1);
+    assert_eq!(second["inserted"], 0, "second cycle is incremental (no re-insert)");
+}
+
+/// Run `autophagy watch --adapter claude-code --once` and return the final
+/// summary object (the last JSON line the command prints).
+fn run_watch_summary(database: &Path, claude_config_dir: &Path) -> Value {
+    let output = command(database)
+        .args(["--output", "json"])
+        .args(["watch", "--adapter", "claude-code", "--once"])
+        .env("CLAUDE_CONFIG_DIR", claude_config_dir)
+        .output()
+        .expect("run watch");
+    assert!(
+        output.status.success(),
+        "watch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    let last = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .next_back()
+        .expect("at least one summary line");
+    serde_json::from_str(last).expect("summary JSON")
+}
+
 fn run_json<const N: usize>(database: &Path, args: [&str; N]) -> Value {
     let output = command(database)
         .args(["--output", "json"])

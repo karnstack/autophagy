@@ -1,5 +1,8 @@
 //! Command-line entry point for importing and querying local agent activity.
 
+mod daemon;
+mod watch;
+
 use std::{
     collections::BTreeSet,
     fmt::Write as _,
@@ -24,8 +27,8 @@ use autophagy_adapter_pi::{
 use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
 use autophagy_events::Event;
 use autophagy_install::{
-    InstallError, InstallTarget, InstalledArtifact, SkillPlan, materialize, plan_skill,
-    unmaterialize,
+    InstallError, InstallTarget, InstalledArtifact, SkillPlan, SupervisorError, materialize,
+    plan_skill, unmaterialize,
 };
 use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
 use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
@@ -249,6 +252,60 @@ enum Commands {
         #[command(subcommand)]
         target: DeleteTarget,
     },
+
+    /// Continuously ingest native agent history until interrupted.
+    ///
+    /// Ingest-only: applies the same redaction, privacy, and projection gates as
+    /// `import` and never executes or installs anything.
+    Watch {
+        /// Native adapter to watch. Repeatable; defaults to all native adapters.
+        #[arg(long = "adapter", value_enum, value_name = "ADAPTER")]
+        adapters: Vec<watch::NativeAdapter>,
+
+        /// Seconds to wait between discovery cycles.
+        #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+        interval: u64,
+
+        /// Run one cycle and exit (useful for launchd/systemd and tests).
+        #[arg(long)]
+        once: bool,
+
+        /// Persist native-adapter prompt, response, and tool-result text.
+        #[arg(long)]
+        include_content: bool,
+
+        /// Include only events with this exact project path. Repeatable.
+        #[arg(long = "project", value_name = "PATH")]
+        projects: Vec<String>,
+
+        /// Exclude project or artifact paths matching this glob. Repeatable.
+        #[arg(long = "exclude-path", value_name = "GLOB")]
+        exclude_paths: Vec<String>,
+    },
+
+    /// Manage the background watch daemon (launchd on macOS, systemd on Linux).
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// Generate and load a user-level supervisor unit running `autophagy watch`.
+    Install {
+        /// Native adapter to watch. Repeatable; defaults to all native adapters.
+        #[arg(long = "adapter", value_enum, value_name = "ADAPTER")]
+        adapters: Vec<watch::NativeAdapter>,
+
+        /// Seconds to wait between discovery cycles.
+        #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+        interval: u64,
+    },
+    /// Unload and remove the supervisor unit, leaving nothing behind.
+    Uninstall,
+    /// Report whether the unit is present and the job loaded.
+    Status,
 }
 
 #[allow(clippy::struct_field_names)]
@@ -528,6 +585,8 @@ enum CommandReport {
     Prune(PruneSummary),
     DeleteSession(DeleteSummary),
     DeleteAll(DeleteAllSummary),
+    Watch(watch::WatchRunReport),
+    Daemon(daemon::DaemonReport),
 }
 
 #[derive(Debug, Serialize)]
@@ -640,6 +699,7 @@ impl CommandReport {
             Self::Import(summary) => summary.has_issues(),
             Self::MutationReplay(report) => !report.evaluation.passed,
             Self::MutationShadow(report) => !report.evaluation.passed,
+            Self::Watch(report) => report.has_issues(),
             Self::Sessions(_)
             | Self::Search(_)
             | Self::Digest(_)
@@ -655,7 +715,8 @@ impl CommandReport {
             | Self::Export(_)
             | Self::Prune(_)
             | Self::DeleteSession(_)
-            | Self::DeleteAll(_) => false,
+            | Self::DeleteAll(_)
+            | Self::Daemon(_) => false,
         }
     }
 }
@@ -702,6 +763,17 @@ enum CliError {
     Shadow(#[from] ShadowEvaluationError),
     #[error(transparent)]
     Install(#[from] InstallError),
+    #[error(transparent)]
+    Supervisor(#[from] SupervisorError),
+    #[error("could not determine the home directory; set HOME")]
+    HomeDirectoryUnavailable,
+    #[error("supervisor command failed ({command}): {detail}")]
+    SupervisorCommand {
+        /// The command that failed.
+        command: String,
+        /// Failure detail.
+        detail: String,
+    },
     #[error(transparent)]
     Manifest(#[from] ManifestError),
     #[error(
@@ -975,6 +1047,37 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
                     Ok(CommandReport::DeleteAll(store.delete_all()?))
                 }
             }
+        }
+        Commands::Watch {
+            adapters,
+            interval,
+            once,
+            include_content,
+            projects,
+            exclude_paths,
+        } => {
+            let report = watch::run(
+                cli.database,
+                &adapters,
+                interval,
+                once,
+                include_content,
+                &projects,
+                &exclude_paths,
+                cli.output,
+            )?;
+            Ok(CommandReport::Watch(report))
+        }
+        Commands::Daemon { action } => {
+            let report = match action {
+                DaemonCommand::Install { adapters, interval } => {
+                    let names = watch::adapter_names(&adapters);
+                    daemon::install(cli.database, interval, names)?
+                }
+                DaemonCommand::Uninstall => daemon::uninstall(cli.database)?,
+                DaemonCommand::Status => daemon::status(cli.database)?,
+            };
+            Ok(CommandReport::Daemon(report))
         }
     }
 }
@@ -1439,6 +1542,11 @@ fn write_report(
         }
         return Ok(());
     }
+    // The watch loop streams its own per-cycle lines and final summary during
+    // execution, so there is no deferred report to render here.
+    if matches!(report, CommandReport::Watch(_)) {
+        return Ok(());
+    }
     match format {
         OutputFormat::Json => {
             serde_json::to_writer_pretty(&mut writer, report)?;
@@ -1648,6 +1756,8 @@ fn write_report(
                 summary.mutations_deleted
             )?,
             CommandReport::Export(_) => unreachable!("export handled before format selection"),
+            CommandReport::Watch(_) => unreachable!("watch streams its own output"),
+            CommandReport::Daemon(report) => daemon::write_text(report, &mut writer)?,
         },
     }
     Ok(())

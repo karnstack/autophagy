@@ -56,10 +56,21 @@ immutable candidate registry, evidence links, lifecycle audit, and replay
 reports. `autophagy-replay` derives evidence-linked decision-point review
 drafts, preserves unknown counterfactuals, and performs deterministic
 non-executable evaluation. `autophagy-shadow` measures would-be
-trigger precision without intervention, and `autophagy-install` owns the single
-repo-scoped Codex skill materializer and rollback boundary. A crate or package
-is added when its PR contains an executable vertical slice; empty placeholder
-crates are avoided.
+trigger precision without intervention, and `autophagy-install` owns the
+repo-scoped skill materializers and rollback boundary. A crate or package is
+added when its PR contains an executable vertical slice; empty placeholder crates
+are avoided.
+
+Continuous ingestion (0.1.0) reuses existing crates rather than introducing the
+sketched `autophagy-daemon` crate, which would have been a placeholder. The
+model-free watch loop and its `WatchSource` seam live in `autophagy-core`; the
+CLI implements the seam for the native adapters and drives the daemon lifecycle.
+`autophagy-install` remains the only crate that writes outside the database, and
+its charter is extended from repo-scoped skills to explicit, reversible
+out-of-database filesystem artifacts generally — which now also covers the
+launchd/systemd supervisor unit that runs `autophagy watch` (see ADR 0008). The
+CLI shims `launchctl`/`systemctl`; no crate gains process-execution
+responsibility.
 
 ## Dependency direction
 

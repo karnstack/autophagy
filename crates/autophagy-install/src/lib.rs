@@ -1,9 +1,21 @@
-//! Explicit, reversible mutation installation targets.
+//! Explicit, reversible out-of-database filesystem artifacts.
 //!
 //! Materializers write one repo-scoped skill for a supported coding agent:
 //! Codex under `.agents/skills` or Claude Code under `.claude/skills`. Every
 //! target follows the same lifecycle discipline: it never overwrites an
 //! existing file and uninstall refuses content drift.
+//!
+//! The [`supervisor`] module extends the same discipline to platform supervisor
+//! units (launchd/systemd) that run `autophagy watch` in the background (ADR
+//! 0008). Both are explicit, reversible, and refuse to clobber files Autophagy
+//! did not author.
+
+pub mod supervisor;
+
+pub use supervisor::{
+    MANAGED_MARKER, SupervisorConfig, SupervisorError, SupervisorKind, SupervisorPlan, WATCH_LABEL,
+    is_managed, plan_supervisor, remove_supervisor, write_supervisor,
+};
 
 use std::{
     fmt::Write as _,
