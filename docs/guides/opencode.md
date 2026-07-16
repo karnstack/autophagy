@@ -12,10 +12,22 @@ storage/part/<messageID>/<partID>.json         one message part
 ```
 
 The adapter targets this file-based JSON storage layout. Message and part
-identifiers ascend over time, so a session is the incremental unit: the cursor
-records the highest message identifier already normalized and resumes past it.
-Recent OpenCode builds are migrating this data into a single SQLite database;
-that backing store is out of scope for v0.1 and is neither read nor written.
+identifiers are creation-ordered ascending ULIDs — OpenCode's `Identifier`
+generator (verified against sst/opencode at tag `v0.15.0`) prefixes each id with
+a big-endian millisecond timestamp, so a plain lexicographic sort is
+chronological. A session is therefore the incremental unit: the cursor records
+the highest message identifier already normalized and resumes past it. Recent
+OpenCode builds are migrating this data into a single SQLite database; that
+backing store is out of scope for v0.1 and is neither read nor written.
+
+Tool parts are updated in place as a call moves through `pending` → `running` →
+`completed`/`error`. The cursor only advances across a contiguous prefix of
+fully terminal messages: the moment a message still holds a non-terminal tool
+part (or cannot be read), the watermark freezes at the previous message so that
+message — and everything after it — is re-read on the next import. Re-reads are
+safe because the store deduplicates unchanged events and inserts only the newly
+terminal `tool.completed` / `tool.failed` outcome. No failure-or-recovery signal
+is lost to a session that was still in flight at first import.
 
 OpenCode's on-disk layout is an application detail rather than a stable
 integration interface, so this adapter treats every mapping as a version-observed
@@ -59,10 +71,13 @@ cursor scope, so changing policy safely rescans instead of losing skipped data.
 
 ## Incremental and cross-adapter guarantees
 
-The per-session cursor advances only past the highest message identifier read,
-so an unchanged reimport reads no message records and inserts nothing. The
-session-start event is emitted once and tracked in cursor state. Stable event IDs
-keep rescans idempotent.
+The per-session cursor advances only across a contiguous prefix of terminal
+messages, so an unchanged reimport of a finished session reads no message records
+and inserts nothing. A session that was still in flight re-reads only its
+deferred tail until those tool calls terminate, and the store deduplicates the
+unchanged events. The session-start event is emitted once and tracked in cursor
+state. Event IDs are keyed on message and part identifiers (not positional
+indices), so rescans and out-of-order part writes stay idempotent.
 
 Every native adapter runs through the same conformance harness. It requires a
 non-empty initial import, zero rejected or conflicting fixture evidence, a
@@ -79,7 +94,7 @@ remains distinct.
 | Message role `assistant` text parts | `decision.recorded` | Emitted only when text parts are non-empty |
 | `tool` part `state.status` `completed` | `tool.called` + `tool.completed` | Self-contained pair; file input preserved |
 | `tool` part `state.status` `error` | `tool.called` + `tool.failed` | Failure carried from the error state |
-| `tool` part `state.status` `pending` / `running` | `tool.called` | No terminal outcome is invented |
+| `tool` part `state.status` `pending` / `running` | `tool.called` | No terminal outcome is invented; the message is deferred and re-read until the tool reaches `completed`/`error`, whose event then lands |
 | `reasoning`, `file`, `step-start`, `step-finish`, `snapshot`, `patch`, `agent` parts | Dropped | Not normalized into events |
 | Unknown message role | Unsupported/skipped | Counted without semantic inference |
 | SQLite-backed storage | Not read | v0.1 targets the file-based JSON layout only |

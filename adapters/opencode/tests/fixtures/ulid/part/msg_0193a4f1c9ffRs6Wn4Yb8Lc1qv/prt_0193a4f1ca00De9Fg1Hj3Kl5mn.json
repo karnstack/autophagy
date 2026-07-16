@@ -1,0 +1,1 @@
+{"id":"prt_0193a4f1ca00De9Fg1Hj3Kl5mn","sessionID":"ses_5vJ8kQ2mNp0193a4f1c2e0","messageID":"msg_0193a4f1c9ffRs6Wn4Yb8Lc1qv","type":"tool","callID":"call_read_realistic","tool":"read","state":{"status":"completed","input":{"filePath":"src/lib.rs"},"output":"contents omitted","title":"read","metadata":{},"time":{"start":1784192403000,"end":1784192403400}}}

@@ -192,6 +192,12 @@ pub fn import_opencode(
         )?;
 
         if !options.dry_run {
+            // Unlike the append-only JSONL adapters, OpenCode resume state is
+            // carried entirely in `state` (the per-session `high_water` message
+            // id). The byte-oriented fields are therefore not load-bearing:
+            // `byte_offset` is unused, `line_number` mirrors the sequence
+            // counter for observability, and `head_hash` pins the session
+            // identity so an unrelated cursor can never be misread as this one.
             let cursor = SourceCursor {
                 byte_offset: 0,
                 line_number: state.next_sequence,
@@ -258,11 +264,27 @@ fn import_session(
         ),
     }
 
-    // New messages, ordered by ascending identifier.
+    // New messages, ordered by ascending identifier. Message identifiers are
+    // creation-ordered ascending ULIDs (verified against sst/opencode's
+    // `Identifier.ascending`), so a lexicographic sort is chronological.
+    //
+    // The cursor watermark (`frontier`) only advances across a contiguous
+    // prefix of fully terminal messages. As soon as one message defers (a tool
+    // part is still non-terminal) or cannot be read, the frontier freezes at
+    // the previous message so the deferred message — and everything after it —
+    // is re-read next run. Re-reads are safe: the store deduplicates unchanged
+    // events and inserts only the newly terminal tool outcome.
+    //
+    // Sequence numbers must be reproducible across those re-reads, so only the
+    // counter as of the committed frontier is persisted (`committed_sequence`).
+    // Re-reading a deferred tail therefore re-numbers it identically each run;
+    // the deduplicating store sees the same event bodies rather than conflicts.
     let message_dir = root.join("message").join(&session.session_id);
     let mut message_stems = json_stems(&message_dir)?;
     message_stems.sort();
-    let mut new_high_water = state.high_water.clone();
+    let mut frontier = state.high_water.clone();
+    let mut committed_sequence = state.next_sequence;
+    let mut frozen = false;
     for stem in message_stems {
         if state
             .high_water
@@ -271,10 +293,6 @@ fn import_session(
         {
             continue;
         }
-        new_high_water = Some(match new_high_water {
-            Some(current) if current >= stem => current,
-            _ => stem.clone(),
-        });
         summary.records_seen += 1;
         let message_rel = format!("message/{}/{stem}.json", session.session_id);
         let message_path = message_dir.join(format!("{stem}.json"));
@@ -282,6 +300,7 @@ fn import_session(
             Ok(value) => value,
             Err(message) => {
                 reject(summary, options, &message_rel, "invalid_json", message);
+                frozen = true;
                 continue;
             }
         };
@@ -290,6 +309,7 @@ fn import_session(
             Ok(value) => value,
             Err(message) => {
                 reject(summary, options, &message_rel, "unsupported_shape", message);
+                frozen = true;
                 continue;
             }
         };
@@ -308,8 +328,15 @@ fn import_session(
                 summary,
             )?;
         }
+        if outcome.deferred {
+            frozen = true;
+        } else if !frozen {
+            frontier = Some(stem);
+            committed_sequence = state.next_sequence;
+        }
     }
-    state.high_water = new_high_water;
+    state.high_water = frontier;
+    state.next_sequence = committed_sequence;
     Ok(())
 }
 

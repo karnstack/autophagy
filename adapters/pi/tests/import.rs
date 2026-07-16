@@ -89,6 +89,29 @@ fn partial_tail_is_deferred_until_newline() {
     assert_eq!(complete.unsupported, 1);
 }
 
+#[test]
+fn unknown_message_role_is_unsupported_not_rejected() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    copy_tree(&fixture_root(), directory.path());
+    let session = find_session(directory.path());
+    let mut store = EventStore::open_in_memory().expect("store");
+    let options = PiImportOptions::new(directory.path().to_path_buf(), "fixture:role");
+    let baseline = import_pi(Some(&mut store), &options).expect("baseline import");
+
+    append(
+        &session,
+        "{\"type\":\"message\",\"id\":\"rec-sys\",\"parentId\":\"rec-custom\",\"timestamp\":\"2026-07-16T09:00:12.000Z\",\"message\":{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"system notice\"}],\"timestamp\":1784192412000}}\n",
+    );
+    let after = import_pi(Some(&mut store), &options).expect("second import");
+    assert_eq!(after.records_seen, 1);
+    assert_eq!(after.events_emitted, 0);
+    assert_eq!(after.unsupported, 1);
+    assert_eq!(after.rejected, 0);
+    // The unknown role adds no diagnostics: it is a counted skip, not an error.
+    assert!(after.diagnostics.is_empty());
+    assert_eq!(baseline.rejected, 0);
+}
+
 fn metrics(summary: &PiImportSummary) -> ImportMetrics {
     ImportMetrics {
         discovered_files: summary

@@ -29,6 +29,11 @@ pub(crate) struct NormalizeContext<'a> {
 pub(crate) struct MessageOutcome {
     pub events: Vec<Event>,
     pub supported: bool,
+    /// A tool part in this message is still non-terminal (pending/running or an
+    /// unrecognized status), so a later terminal outcome may yet be written to
+    /// the same part file. The importer must not advance its cursor past this
+    /// message until every tool part has reached `completed` or `error`.
+    pub deferred: bool,
 }
 
 /// Emit the session-start event once, recording the working directory.
@@ -53,6 +58,10 @@ pub(crate) fn session_started_event(
         "opencode.session_id".to_owned(),
         Value::String(context.session_id.to_owned()),
     );
+    metadata.insert(
+        "opencode.source_file".to_owned(),
+        Value::String(session_source_file(context)),
+    );
     if let Some(version) = object.get("version") {
         metadata.insert("opencode.version".to_owned(), version.clone());
     }
@@ -61,7 +70,7 @@ pub(crate) fn session_started_event(
         &session,
         timestamp,
         EventKind::SessionStarted,
-        event_id(context.session_id, "session", "session-start", 0),
+        event_id(context.session_id, "session", "session-start", ""),
         metadata,
     );
     state.started = true;
@@ -86,6 +95,7 @@ pub(crate) fn normalize_message(
         return Ok(MessageOutcome {
             events: Vec::new(),
             supported: false,
+            deferred: false,
         });
     }
     let timestamp = created_timestamp(object)?;
@@ -105,12 +115,13 @@ pub(crate) fn normalize_message(
             &session,
             timestamp,
             EventKind::PromptSubmitted,
-            event_id(context.session_id, &message_id, "prompt", 0),
+            event_id(context.session_id, &message_id, "prompt", ""),
             metadata,
         ));
         return Ok(MessageOutcome {
             events,
             supported: true,
+            deferred: false,
         });
     }
 
@@ -126,11 +137,12 @@ pub(crate) fn normalize_message(
             &session,
             timestamp,
             EventKind::DecisionRecorded,
-            event_id(context.session_id, &message_id, "decision", 0),
+            event_id(context.session_id, &message_id, "decision", ""),
             metadata,
         ));
     }
 
+    let mut deferred = false;
     for (index, part) in parts.iter().enumerate() {
         let Some(part) = part.as_object() else {
             continue;
@@ -138,7 +150,7 @@ pub(crate) fn normalize_message(
         if string(part, "type") != Some("tool") {
             continue;
         }
-        normalize_tool_part(
+        let terminal = normalize_tool_part(
             part,
             index,
             timestamp,
@@ -148,14 +160,21 @@ pub(crate) fn normalize_message(
             context,
             &mut events,
         );
+        deferred = deferred || !terminal;
     }
 
     Ok(MessageOutcome {
         events,
         supported: true,
+        deferred,
     })
 }
 
+/// Normalize one tool part, returning whether it reached a terminal outcome.
+///
+/// Tool identity is keyed on the part's own identifier (falling back to the
+/// call identifier, then the positional index) so event IDs are stable across
+/// out-of-order part writes and cursor resets.
 #[allow(clippy::too_many_arguments)]
 fn normalize_tool_part(
     part: &Map<String, Value>,
@@ -166,24 +185,30 @@ fn normalize_tool_part(
     state: &mut SessionState,
     context: &NormalizeContext<'_>,
     events: &mut Vec<Event>,
-) {
+) -> bool {
     let tool = string(part, "tool").unwrap_or("tool").to_owned();
     let call_id = string(part, "callID").map(str::to_owned);
+    let part_id = string(part, "id").map(str::to_owned);
+    let identity = part_id
+        .clone()
+        .or_else(|| call_id.clone())
+        .unwrap_or_else(|| format!("idx{index}"));
+    let source_file = part_source_file(message_id, &identity);
     let state_object = part.get("state").and_then(Value::as_object);
     let status = state_object
         .and_then(|value| string(value, "status"))
         .unwrap_or("pending");
     let input = state_object.and_then(|value| value.get("input")).cloned();
 
-    let called_id = event_id(context.session_id, message_id, "tool-called", index);
-    let mut called_metadata = message_metadata(context, message_id, "assistant");
-    called_metadata.insert("opencode.tool".to_owned(), Value::String(tool.clone()));
-    if let Some(call_id) = &call_id {
-        called_metadata.insert(
-            "opencode.call_id".to_owned(),
-            Value::String(call_id.clone()),
-        );
-    }
+    let called_id = event_id(context.session_id, message_id, "tool-called", &identity);
+    let called_metadata = tool_metadata(
+        context,
+        message_id,
+        &source_file,
+        part_id.as_deref(),
+        &tool,
+        call_id.as_deref(),
+    );
     let mut called = base_event(
         state,
         session,
@@ -205,17 +230,18 @@ fn normalize_tool_part(
     let (kind, exit_code) = match status {
         "completed" => (EventKind::ToolCompleted, 0),
         "error" => (EventKind::ToolFailed, 1),
-        // Pending or running tool calls have no terminal outcome to normalize.
-        _ => return,
+        // Pending, running, or unrecognized statuses have no terminal outcome
+        // yet; report the call as non-terminal so the cursor defers past it.
+        _ => return false,
     };
-    let mut result_metadata = message_metadata(context, message_id, "assistant");
-    result_metadata.insert("opencode.tool".to_owned(), Value::String(tool.clone()));
-    if let Some(call_id) = &call_id {
-        result_metadata.insert(
-            "opencode.call_id".to_owned(),
-            Value::String(call_id.clone()),
-        );
-    }
+    let mut result_metadata = tool_metadata(
+        context,
+        message_id,
+        &source_file,
+        part_id.as_deref(),
+        &tool,
+        call_id.as_deref(),
+    );
     if context.include_content {
         if let Some(state_object) = state_object {
             if let Some(output) = state_object.get("output") {
@@ -231,7 +257,7 @@ fn normalize_tool_part(
         session,
         timestamp,
         kind,
-        event_id(context.session_id, message_id, "tool-result", index),
+        event_id(context.session_id, message_id, "tool-result", &identity),
         result_metadata,
     );
     result.parent_event_id = Some(EventId::new(called_id.as_str().to_owned()));
@@ -244,6 +270,7 @@ fn normalize_tool_part(
         metadata: BTreeMap::new(),
     });
     events.push(result);
+    true
 }
 
 fn base_event(
@@ -290,7 +317,61 @@ fn message_metadata(
         Value::String(message_id.to_owned()),
     );
     metadata.insert("opencode.role".to_owned(), Value::String(role.to_owned()));
+    metadata.insert(
+        "opencode.source_file".to_owned(),
+        Value::String(message_source_file(context, message_id)),
+    );
     metadata
+}
+
+/// Provenance for a tool event: the exact part file and part identifier.
+fn tool_metadata(
+    context: &NormalizeContext<'_>,
+    message_id: &str,
+    source_file: &str,
+    part_id: Option<&str>,
+    tool: &str,
+    call_id: Option<&str>,
+) -> BTreeMap<String, Value> {
+    let mut metadata = base_metadata(context);
+    metadata.insert(
+        "opencode.message_id".to_owned(),
+        Value::String(message_id.to_owned()),
+    );
+    metadata.insert(
+        "opencode.role".to_owned(),
+        Value::String("assistant".to_owned()),
+    );
+    metadata.insert(
+        "opencode.source_file".to_owned(),
+        Value::String(source_file.to_owned()),
+    );
+    metadata.insert("opencode.tool".to_owned(), Value::String(tool.to_owned()));
+    if let Some(part_id) = part_id {
+        metadata.insert(
+            "opencode.part_id".to_owned(),
+            Value::String(part_id.to_owned()),
+        );
+    }
+    if let Some(call_id) = call_id {
+        metadata.insert(
+            "opencode.call_id".to_owned(),
+            Value::String(call_id.to_owned()),
+        );
+    }
+    metadata
+}
+
+fn session_source_file(context: &NormalizeContext<'_>) -> String {
+    format!("session/{}/{}.json", context.project_id, context.session_id)
+}
+
+fn message_source_file(context: &NormalizeContext<'_>, message_id: &str) -> String {
+    format!("message/{}/{message_id}.json", context.session_id)
+}
+
+fn part_source_file(message_id: &str, part_id: &str) -> String {
+    format!("part/{message_id}/{part_id}.json")
 }
 
 fn created_timestamp(object: &Map<String, Value>) -> Result<OffsetDateTime, String> {
@@ -325,10 +406,10 @@ fn session_id(context: &NormalizeContext<'_>) -> SessionId {
     ))
 }
 
-fn event_id(session_id: &str, message_id: &str, role: &str, index: usize) -> EventId {
+fn event_id(session_id: &str, message_id: &str, role: &str, key: &str) -> EventId {
     EventId::new(format!(
         "evt_opencode_{}",
-        digest(&format!("{session_id}\0{message_id}\0{role}\0{index}"))
+        digest(&format!("{session_id}\0{message_id}\0{role}\0{key}"))
     ))
 }
 
@@ -360,4 +441,93 @@ fn file_artifacts(input: Option<&Value>) -> Vec<Artifact> {
             metadata: BTreeMap::new(),
         })
         .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn context() -> (String, String) {
+        ("ses_x".to_owned(), "prj_x".to_owned())
+    }
+
+    #[test]
+    fn tool_event_retains_part_id_and_source_file() {
+        let (session, project) = context();
+        let ctx = NormalizeContext {
+            session_id: &session,
+            project_id: &project,
+            include_content: false,
+        };
+        let info = json!({"id": "msg_1", "role": "assistant", "time": {"created": 1000}});
+        let parts = vec![json!({
+            "id": "prt_9",
+            "type": "tool",
+            "callID": "call_1",
+            "tool": "read",
+            "state": {
+                "status": "completed",
+                "input": {"filePath": "a.rs"},
+                "output": "x",
+                "title": "t",
+                "metadata": {},
+                "time": {"start": 1, "end": 2}
+            }
+        })];
+        let mut state = SessionState::default();
+        let outcome = normalize_message(&info, &parts, &mut state, &ctx).expect("normalize");
+        assert!(!outcome.deferred);
+        let called = outcome
+            .events
+            .iter()
+            .find(|event| event.kind == EventKind::ToolCalled)
+            .expect("tool.called");
+        assert_eq!(
+            called.metadata.get("opencode.part_id"),
+            Some(&Value::String("prt_9".to_owned()))
+        );
+        assert_eq!(
+            called.metadata.get("opencode.source_file"),
+            Some(&Value::String("part/msg_1/prt_9.json".to_owned()))
+        );
+        // Event identity is keyed on the part id, not the positional index.
+        assert_eq!(
+            called.event_id.as_str(),
+            event_id("ses_x", "msg_1", "tool-called", "prt_9").as_str()
+        );
+    }
+
+    #[test]
+    fn running_tool_defers_without_terminal_event() {
+        let (session, project) = context();
+        let ctx = NormalizeContext {
+            session_id: &session,
+            project_id: &project,
+            include_content: false,
+        };
+        let info = json!({"id": "msg_1", "role": "assistant", "time": {"created": 1000}});
+        let parts = vec![json!({
+            "id": "prt_9",
+            "type": "tool",
+            "callID": "call_1",
+            "tool": "bash",
+            "state": {"status": "running", "input": {"command": "x"}, "time": {"start": 1}}
+        })];
+        let mut state = SessionState::default();
+        let outcome = normalize_message(&info, &parts, &mut state, &ctx).expect("normalize");
+        assert!(outcome.deferred);
+        assert!(
+            outcome
+                .events
+                .iter()
+                .any(|event| event.kind == EventKind::ToolCalled)
+        );
+        assert!(
+            !outcome.events.iter().any(|event| matches!(
+                event.kind,
+                EventKind::ToolCompleted | EventKind::ToolFailed
+            ))
+        );
+    }
 }
