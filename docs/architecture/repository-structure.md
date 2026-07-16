@@ -49,9 +49,10 @@ exist through PR 5. `autophagy-patterns` and Evidence Packet v0.1 exist through
 PR 6. `autophagy-redaction` and the offline digestion/privacy CLI complete
 Milestone 1 through PR 7. `autophagy-mutations` begins Phase 2 with the
 review-only Mutation Package v0.1 contract, while `autophagy-store` owns the
-immutable candidate registry, evidence links, and lifecycle audit. A crate or
-package is added when its PR contains an executable vertical slice; empty
-placeholder crates are avoided.
+immutable candidate registry, evidence links, lifecycle audit, and replay
+reports. `autophagy-replay` adds versioned annotated decision points and
+deterministic non-executable evaluation. A crate or package is added when its PR
+contains an executable vertical slice; empty placeholder crates are avoided.
 
 ## Dependency direction
 

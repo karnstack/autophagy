@@ -19,10 +19,11 @@ use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
 use autophagy_events::Event;
 use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
 use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
+use autophagy_replay::{ReplayEvaluationError, ReplayReport, ReplaySuite, evaluate};
 use autophagy_store::{
     DeleteAllSummary, DeleteSummary, EventStore, MutationDetails, MutationRecord,
     MutationRegisterOutcome, MutationRegistration, MutationTransitionOutcome, PruneSummary,
-    SearchHit, SessionSummary, StoreError,
+    ReplayRegisterOutcome, ReplayRegistration, SearchHit, SessionSummary, StoreError,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
@@ -273,6 +274,15 @@ enum MutationAction {
         #[arg(long, value_name = "TEXT")]
         reason: String,
     },
+    /// Evaluate annotated decision points without executing the mutation.
+    Replay {
+        /// Stable mutation identity.
+        mutation_id: String,
+
+        /// Replay Suite v0.1 JSON file.
+        #[arg(long, value_name = "PATH")]
+        scenarios: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, ValueEnum)]
@@ -313,6 +323,8 @@ enum CommandReport {
     MutationShow(MutationDetails),
     #[serde(rename = "mutations_transition")]
     MutationTransition(MutationTransitionOutcome),
+    #[serde(rename = "mutations_replay")]
+    MutationReplay(MutationReplayReport),
     Export(Vec<Event>),
     Prune(PruneSummary),
     DeleteSession(DeleteSummary),
@@ -345,6 +357,12 @@ struct ChallengeAssessment {
 }
 
 #[derive(Debug, Serialize)]
+struct MutationReplayReport {
+    evaluation: ReplayReport,
+    registration: ReplayRegisterOutcome,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum ImportReport {
     Generic(ImportSummary),
@@ -366,6 +384,7 @@ impl CommandReport {
     const fn has_issues(&self) -> bool {
         match self {
             Self::Import(summary) => summary.has_issues(),
+            Self::MutationReplay(report) => !report.evaluation.passed,
             Self::Sessions(_)
             | Self::Search(_)
             | Self::Digest(_)
@@ -408,6 +427,10 @@ enum CliError {
     DeleteAllConfirmation,
     #[error("challenge is incomplete; missing checks: {0}")]
     IncompleteChallenge(String),
+    #[error(transparent)]
+    Replay(#[from] ReplayEvaluationError),
+    #[error("replay scenario cites event '{0}', which is not in the local evidence store")]
+    MissingReplayEvidence(String),
 }
 
 fn main() -> ExitCode {
@@ -592,6 +615,7 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn execute_mutation_action(
     database: Option<PathBuf>,
     action: MutationAction,
@@ -679,6 +703,40 @@ fn execute_mutation_action(
         } => Ok(CommandReport::MutationTransition(
             store.reject_mutation(&mutation_id, &reason)?,
         )),
+        MutationAction::Replay {
+            mutation_id,
+            scenarios,
+        } => {
+            let suite: ReplaySuite = serde_json::from_slice(&fs::read(scenarios)?)?;
+            let details = store.get_mutation(&mutation_id)?;
+            let package = serde_json::from_value(details.mutation.package)?;
+            let evaluation = evaluate(&package, &suite)?;
+            for event_id in suite
+                .scenarios
+                .iter()
+                .flat_map(|scenario| &scenario.source_event_ids)
+            {
+                if store.get_event(event_id)?.is_none() {
+                    return Err(CliError::MissingReplayEvidence(event_id.clone()));
+                }
+            }
+            let registration = store.register_replay(&ReplayRegistration {
+                replay_id: evaluation.replay_id.clone(),
+                mutation_id: evaluation.mutation_id.clone(),
+                scenario_set_hash: evaluation.scenario_set_hash.clone(),
+                report: serde_json::to_value(&evaluation)?,
+                passed: evaluation.passed,
+                source_event_ids: suite
+                    .scenarios
+                    .iter()
+                    .flat_map(|scenario| scenario.source_event_ids.iter().cloned())
+                    .collect(),
+            })?;
+            Ok(CommandReport::MutationReplay(MutationReplayReport {
+                evaluation,
+                registration,
+            }))
+        }
     }
 }
 
@@ -815,11 +873,28 @@ fn write_report(
                         transition.reason
                     )?;
                 }
+                for replay in &details.replays {
+                    writeln!(
+                        writer,
+                        "{}\treplay {}\tpassed={}",
+                        replay.created_at, replay.replay_id, replay.passed
+                    )?;
+                }
             }
             CommandReport::MutationTransition(outcome) => writeln!(
                 writer,
                 "{}\t{} -> {}\tchanged={}",
                 outcome.mutation_id, outcome.from_state, outcome.to_state, outcome.changed
+            )?,
+            CommandReport::MutationReplay(report) => writeln!(
+                writer,
+                "{}\tpassed={}\t{} success · {} no-op · {} contradiction · {} false intervention\tmutation_executed=false",
+                report.evaluation.replay_id,
+                report.evaluation.passed,
+                report.evaluation.summary.successes,
+                report.evaluation.summary.no_ops,
+                report.evaluation.summary.contradictions,
+                report.evaluation.summary.false_interventions
             )?,
             CommandReport::Prune(summary) => writeln!(
                 writer,

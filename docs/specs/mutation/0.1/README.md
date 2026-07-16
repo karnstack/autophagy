@@ -23,3 +23,7 @@ Each package contains:
 The deterministic template generator may return `insufficient_evidence`. A
 candidate is not proof that the intervention is correct; it is a concrete claim
 ready for challenge and replay.
+
+Its promotion thresholds are consumed by
+[Replay Result v0.1](../../replay/0.1/README.md); they are copied into each
+report so the pass decision remains inspectable.

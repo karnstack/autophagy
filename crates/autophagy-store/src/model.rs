@@ -276,6 +276,8 @@ pub struct MutationDetails {
     pub mutation: MutationRecord,
     /// Complete append-only audit history.
     pub transitions: Vec<MutationTransition>,
+    /// Immutable deterministic replay reports in creation order.
+    pub replays: Vec<MutationReplayRecord>,
 }
 
 /// Idempotent lifecycle transition result.
@@ -289,4 +291,60 @@ pub struct MutationTransitionOutcome {
     pub to_state: String,
     /// Whether a new transition was committed.
     pub changed: bool,
+}
+
+/// Owned deterministic replay report ready for persistence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplayRegistration {
+    /// Stable content-derived replay identity.
+    pub replay_id: String,
+    /// Evaluated mutation identity.
+    pub mutation_id: String,
+    /// Stable scenario-suite hash.
+    pub scenario_set_hash: String,
+    /// Complete versioned replay report.
+    pub report: Value,
+    /// Whether every coverage and threshold gate passed.
+    pub passed: bool,
+    /// Exact source events cited across all independent scenarios.
+    pub source_event_ids: Vec<String>,
+}
+
+/// One persisted immutable replay report.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MutationReplayRecord {
+    /// Stable replay identity.
+    pub replay_id: String,
+    /// Evaluated mutation identity.
+    pub mutation_id: String,
+    /// Stable scenario-suite hash.
+    pub scenario_set_hash: String,
+    /// Complete versioned replay report.
+    pub report: Value,
+    /// Whether every coverage and threshold gate passed.
+    pub passed: bool,
+    /// Canonical persistence timestamp.
+    pub created_at: String,
+}
+
+/// Idempotent replay persistence and lifecycle result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReplayRegisterOutcome {
+    /// A new replay report was stored.
+    Inserted {
+        /// Stable replay identity.
+        replay_id: String,
+        /// Whether this replay advanced the lifecycle.
+        advanced: bool,
+        /// Registry state after persistence.
+        mutation_state: String,
+    },
+    /// The identical replay report was already stored.
+    Duplicate {
+        /// Stable replay identity.
+        replay_id: String,
+        /// Current mutation registry state.
+        mutation_state: String,
+    },
 }

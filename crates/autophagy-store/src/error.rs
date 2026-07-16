@@ -68,6 +68,12 @@ pub enum StoreError {
         /// Rejected zero-based evidence position.
         ordinal: usize,
     },
+    /// A replay evidence position cannot fit `SQLite`'s integer representation.
+    #[error("replay evidence ordinal {ordinal} exceeds SQLite's integer range")]
+    ReplayEvidenceOrdinalOutOfRange {
+        /// Rejected zero-based evidence position.
+        ordinal: usize,
+    },
     /// An incremental cursor cannot fit `SQLite`'s signed integer representation.
     #[error("cursor {field} value {value} exceeds SQLite's integer range")]
     CursorOutOfRange {
@@ -131,4 +137,13 @@ pub enum StoreError {
     /// A required lifecycle reason was blank.
     #[error("mutation lifecycle reason must not be blank")]
     InvalidMutationReason,
+    /// Replay identity, mutation identity, hash, or pass status disagreed with its report.
+    #[error("replay registration does not match its versioned report")]
+    InvalidReplayRegistration,
+    /// Immutable replay content changed under the same ID.
+    #[error("replay '{replay_id}' already exists with different report content")]
+    ReplayContentConflict {
+        /// Conflicting replay identity.
+        replay_id: String,
+    },
 }

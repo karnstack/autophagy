@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
 use autophagy_events::{Event, EventKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -6,9 +6,10 @@ use time::OffsetDateTime;
 
 use crate::{
     DeleteAllSummary, DeleteSummary, InsertOutcome, MutationDetails, MutationRecord,
-    MutationRegisterOutcome, MutationRegistration, MutationTransition, MutationTransitionOutcome,
-    PruneSummary, SearchHit, SearchProjection, SessionSummary, SourceCursor, SourceIdentity,
-    StoreError, StoreStats, migration, util,
+    MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationTransition,
+    MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome, ReplayRegistration, SearchHit,
+    SearchProjection, SessionSummary, SourceCursor, SourceIdentity, StoreError, StoreStats,
+    migration, util,
 };
 
 /// Transactional owner of one local Autophagy `SQLite` database.
@@ -626,9 +627,155 @@ impl EventStore {
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
+        let mut statement = self.connection.prepare(
+            "SELECT replay_id, mutation_id, scenario_set_hash, report_json, passed, created_at
+             FROM mutation_replays
+             WHERE mutation_id = ?1
+             ORDER BY created_at, replay_id",
+        )?;
+        let rows = statement.query_map([mutation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        let replays = rows
+            .map(|row| {
+                let (replay_id, mutation_id, scenario_set_hash, report, passed, created_at) = row?;
+                Ok(MutationReplayRecord {
+                    replay_id,
+                    mutation_id,
+                    scenario_set_hash,
+                    report: serde_json::from_str(&report)?,
+                    passed,
+                    created_at,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
         Ok(MutationDetails {
             mutation,
             transitions,
+            replays,
+        })
+    }
+
+    /// Persist one immutable replay report and advance a challenged candidate only on pass.
+    ///
+    /// Failed reports remain auditable without changing lifecycle state. Identical
+    /// report registration is a no-op.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for inconsistent report metadata, content
+    /// conflicts, invalid lifecycle state, or database failures.
+    #[allow(clippy::too_many_lines)]
+    pub fn register_replay(
+        &mut self,
+        registration: &ReplayRegistration,
+    ) -> Result<ReplayRegisterOutcome, StoreError> {
+        if !replay_report_matches_registration(registration) {
+            return Err(StoreError::InvalidReplayRegistration);
+        }
+        let report_json = serde_json::to_string(&registration.report)?;
+        let content_hash = util::sha256(report_json.as_bytes());
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing_hash) = transaction
+            .query_row(
+                "SELECT content_hash FROM mutation_replays WHERE replay_id = ?1",
+                [&registration.replay_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+        {
+            if existing_hash.as_slice() != content_hash {
+                return Err(StoreError::ReplayContentConflict {
+                    replay_id: registration.replay_id.clone(),
+                });
+            }
+            let mutation_state = transaction.query_row(
+                "SELECT state FROM mutation_candidates WHERE mutation_id = ?1",
+                [&registration.mutation_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            return Ok(ReplayRegisterOutcome::Duplicate {
+                replay_id: registration.replay_id.clone(),
+                mutation_state,
+            });
+        }
+        let from_state = transaction
+            .query_row(
+                "SELECT state FROM mutation_candidates WHERE mutation_id = ?1",
+                [&registration.mutation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::MutationNotFound {
+                mutation_id: registration.mutation_id.clone(),
+            })?;
+        if from_state != "challenged" {
+            return Err(StoreError::MutationStateTransition {
+                mutation_id: registration.mutation_id.clone(),
+                from_state,
+                to_state: "replay_passed",
+            });
+        }
+        let now = util::now_timestamp()?;
+        transaction.execute(
+            "INSERT INTO mutation_replays(
+                replay_id, mutation_id, scenario_set_hash, report_json,
+                content_hash, passed, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                registration.replay_id,
+                registration.mutation_id,
+                registration.scenario_set_hash,
+                report_json,
+                content_hash.as_slice(),
+                registration.passed,
+                now,
+            ],
+        )?;
+        for (ordinal, event_id) in registration.source_event_ids.iter().enumerate() {
+            let stored_ordinal = i64::try_from(ordinal)
+                .map_err(|_| StoreError::ReplayEvidenceOrdinalOutOfRange { ordinal })?;
+            transaction.execute(
+                "INSERT INTO mutation_replay_evidence(replay_id, event_id, ordinal)
+                 VALUES (?1, ?2, ?3)",
+                params![registration.replay_id, event_id, stored_ordinal],
+            )?;
+        }
+        let mutation_state = if registration.passed {
+            transaction.execute(
+                "UPDATE mutation_candidates
+                 SET state = 'replay_passed', updated_at = ?2
+                 WHERE mutation_id = ?1",
+                params![registration.mutation_id, now],
+            )?;
+            let metadata = serde_json::to_string(&serde_json::json!({
+                "replay_id": registration.replay_id,
+                "scenario_set_hash": registration.scenario_set_hash,
+            }))?;
+            transaction.execute(
+                "INSERT INTO mutation_transitions(
+                    mutation_id, from_state, to_state, reason, metadata_json, occurred_at
+                 ) VALUES (?1, 'challenged', 'replay_passed',
+                           'deterministic replay thresholds passed', ?2, ?3)",
+                params![registration.mutation_id, metadata, now],
+            )?;
+            "replay_passed"
+        } else {
+            "challenged"
+        };
+        transaction.commit()?;
+        Ok(ReplayRegisterOutcome::Inserted {
+            replay_id: registration.replay_id.clone(),
+            advanced: registration.passed,
+            mutation_state: mutation_state.to_owned(),
         })
     }
 
@@ -697,7 +844,8 @@ impl EventStore {
         }
         let allowed = matches!(
             (from_state.as_str(), to_state),
-            ("candidate", "challenged") | ("candidate" | "challenged", "rejected")
+            ("candidate", "challenged")
+                | ("candidate" | "challenged" | "replay_passed", "rejected")
         );
         if !allowed {
             return Err(StoreError::MutationStateTransition {
@@ -992,6 +1140,64 @@ fn count_mutations(transaction: &Transaction<'_>) -> Result<i64, rusqlite::Error
     transaction.query_row("SELECT count(*) FROM mutation_candidates", [], |row| {
         row.get(0)
     })
+}
+
+fn replay_report_matches_registration(registration: &ReplayRegistration) -> bool {
+    if registration
+        .report
+        .get("replay_id")
+        .and_then(serde_json::Value::as_str)
+        != Some(&registration.replay_id)
+        || registration
+            .report
+            .get("mutation_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(&registration.mutation_id)
+        || registration
+            .report
+            .get("scenario_set_hash")
+            .and_then(serde_json::Value::as_str)
+            != Some(&registration.scenario_set_hash)
+        || registration
+            .report
+            .get("passed")
+            .and_then(serde_json::Value::as_bool)
+            != Some(registration.passed)
+    {
+        return false;
+    }
+    let Some(results) = registration
+        .report
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    let mut report_event_values = Vec::new();
+    for result in results {
+        let Some(event_ids) = result
+            .get("source_event_ids")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        for event_id in event_ids {
+            let Some(event_id) = event_id.as_str() else {
+                return false;
+            };
+            report_event_values.push(event_id);
+        }
+    }
+    let report_event_ids = report_event_values.iter().copied().collect::<BTreeSet<_>>();
+    let registered_event_ids = registration
+        .source_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    !report_event_ids.is_empty()
+        && report_event_ids.len() == report_event_values.len()
+        && report_event_ids.len() == registration.source_event_ids.len()
+        && report_event_ids == registered_event_ids
 }
 
 fn validate_source(source: &SourceIdentity) -> Result<(), StoreError> {

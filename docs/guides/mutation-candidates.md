@@ -32,8 +32,10 @@ candidate -> challenged -> rejected
 ```
 
 Repeated requests for the current state are no-ops. A rejected candidate cannot
-return to challenged. There is deliberately no replayed, active, install, or
-promote state yet.
+return to challenged. A challenged candidate can become `replay_passed` only
+when a persisted deterministic replay report satisfies every coverage and
+package threshold. There is deliberately no active, install, or promote state
+yet.
 
 ## Challenge and rejection
 
@@ -76,9 +78,9 @@ V0.1 supports only `agent_instruction`. Its permission manifest must contain:
 - `network: false`.
 
 The registry stores and reviews packages but has no install command, hook
-materializer, active state, or execution path. Challenge, replay, shadow
-observation, explicit user promotion, and reversible installation remain
-separate gates.
+materializer, active state, or execution path. Replay v0.1 classifies annotated
+fixtures without running the intervention. Shadow observation, explicit user
+promotion, and reversible installation remain separate gates.
 
 ## Deterministic templates
 

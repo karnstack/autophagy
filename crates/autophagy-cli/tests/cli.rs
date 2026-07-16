@@ -307,6 +307,106 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
         2
     );
 
+    let passing_suite = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/replay/command-preflight-pass.json");
+    let mut missing_evidence: Value =
+        serde_json::from_slice(&fs::read(&passing_suite).expect("read passing replay fixture"))
+            .expect("passing replay fixture JSON");
+    missing_evidence["scenarios"][0]["source_event_ids"][0] =
+        Value::String("evt_missing_replay_evidence".to_owned());
+    let missing_suite = directory.path().join("missing-replay-evidence.json");
+    fs::write(
+        &missing_suite,
+        serde_json::to_vec(&missing_evidence).expect("missing fixture JSON"),
+    )
+    .expect("write missing fixture");
+    let missing = command(&database)
+        .args([
+            "mutations",
+            "replay",
+            &failure_id,
+            "--scenarios",
+            missing_suite.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("missing evidence replay");
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("not in the local evidence store"));
+
+    let failing_suite = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/replay/command-preflight-fail.json");
+    let failed_replay = command(&database)
+        .args([
+            "--output",
+            "json",
+            "mutations",
+            "replay",
+            &failure_id,
+            "--scenarios",
+            failing_suite.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("failed replay");
+    assert_eq!(failed_replay.status.code(), Some(2));
+    let failed_replay: Value =
+        serde_json::from_slice(&failed_replay.stdout).expect("failed replay JSON");
+    assert_eq!(failed_replay["result"]["evaluation"]["passed"], false);
+    assert_eq!(
+        failed_replay["result"]["registration"]["mutation_state"],
+        "challenged"
+    );
+
+    let passed_replay = run_json(
+        &database,
+        [
+            "mutations",
+            "replay",
+            &failure_id,
+            "--scenarios",
+            passing_suite.to_str().expect("UTF-8 path"),
+        ],
+    );
+    assert_eq!(passed_replay["result"]["evaluation"]["passed"], true);
+    assert_eq!(
+        passed_replay["result"]["registration"]["mutation_state"],
+        "replay_passed"
+    );
+    assert_eq!(
+        passed_replay["result"]["evaluation"]["mutation_executed"],
+        false
+    );
+    let duplicate_replay = run_json(
+        &database,
+        [
+            "mutations",
+            "replay",
+            &failure_id,
+            "--scenarios",
+            passing_suite.to_str().expect("UTF-8 path"),
+        ],
+    );
+    assert_eq!(
+        duplicate_replay["result"]["registration"]["status"],
+        "duplicate"
+    );
+
+    let replayed = run_json(&database, ["mutations", "show", &failure_id]);
+    assert_eq!(replayed["result"]["mutation"]["state"], "replay_passed");
+    assert_eq!(
+        replayed["result"]["transitions"]
+            .as_array()
+            .expect("transitions")
+            .len(),
+        3
+    );
+    assert_eq!(
+        replayed["result"]["replays"]
+            .as_array()
+            .expect("replays")
+            .len(),
+        2
+    );
+
     let rejected = run_json(
         &database,
         [

@@ -181,6 +181,26 @@ CREATE TABLE mutation_transitions (
   occurred_at   TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE mutation_replays (
+  replay_id         TEXT PRIMARY KEY,
+  mutation_id       TEXT NOT NULL REFERENCES mutation_candidates(mutation_id)
+    ON DELETE CASCADE,
+  scenario_set_hash TEXT NOT NULL,
+  report_json       TEXT NOT NULL,
+  content_hash      BLOB NOT NULL,
+  passed            INTEGER NOT NULL,
+  created_at        TEXT NOT NULL,
+  UNIQUE (mutation_id, scenario_set_hash)
+) STRICT;
+
+CREATE TABLE mutation_replay_evidence (
+  replay_id TEXT NOT NULL REFERENCES mutation_replays(replay_id) ON DELETE CASCADE,
+  event_id  TEXT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+  ordinal   INTEGER NOT NULL,
+  PRIMARY KEY (replay_id, ordinal),
+  UNIQUE (replay_id, event_id)
+) STRICT;
+
 CREATE VIRTUAL TABLE events_fts USING fts5(
   project_path,
   tool_name,
@@ -217,6 +237,11 @@ content hashes are no-ops; matching IDs with different package content fail.
 The unique source-finding and semantic equivalence keys prevent duplicate
 proposals from entering the registry.
 
+Replay reports use content-derived IDs and suite hashes under the same rule. A
+failed report remains attached to a challenged candidate. Only a passing report
+updates registry state to `replay_passed` and appends the corresponding
+lifecycle transition in the same transaction.
+
 `source_cursors` stores the last complete byte and physical-line boundary plus
 adapter-defined state. The Claude Code adapter includes pending tool calls in
 that state so a result appended in a later run can still link to its call. A
@@ -231,3 +256,7 @@ remaining evidence links and audit transitions. Unreferenced artifacts are
 removed in the same transaction. Connections enable SQLite `secure_delete`;
 `VACUUM` remains an explicit user operation because it has performance and
 disk-space implications.
+
+Replay scenario event IDs are also foreign-key links. Removing any event cited
+by a replay removes the candidate, its reports, and its lifecycle audit, so a
+`replay_passed` state can never survive its local evaluation evidence.

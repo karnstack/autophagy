@@ -43,6 +43,8 @@ boundaries.
 | Candidate gains execution authority | Mutation Package v0.1 permits only zero-permission instructions |
 | Candidate survives evidence deletion | Any removed cited event cascades deletion of the candidate and its audit |
 | Unreviewed candidate advances | Challenge requires all six explicit adversarial checks |
+| Replay fixture executes untrusted content | Replay v0.1 performs exact string matching only; reports assert no mutation or model execution |
+| Easy-only replay creates false confidence | Passing requires intervention and no-op coverage plus package thresholds |
 
 ## Residual risks
 
@@ -67,6 +69,7 @@ boundaries.
    read environment variables, or access the network.
 7. Candidate packages are immutable; lifecycle state changes are append-only
    audited transitions outside the package.
+8. Replay v0.1 never executes mutation content, commands, hooks, or models.
 
 Report failures of these invariants privately using the process in
 [`SECURITY.md`](../../SECURITY.md).

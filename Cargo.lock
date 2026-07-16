@@ -138,6 +138,7 @@ dependencies = [
  "autophagy-events",
  "autophagy-mutations",
  "autophagy-patterns",
+ "autophagy-replay",
  "autophagy-store",
  "clap",
  "directories",
@@ -211,6 +212,21 @@ dependencies = [
  "serde_json",
  "thiserror",
  "time",
+]
+
+[[package]]
+name = "autophagy-replay"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "autophagy-core",
+ "autophagy-mutations",
+ "autophagy-patterns",
+ "autophagy-store",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

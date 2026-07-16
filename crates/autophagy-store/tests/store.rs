@@ -7,8 +7,8 @@ use autophagy_events::{
 };
 use autophagy_store::{
     DeleteAllSummary, DeleteSummary, EventStore, InsertOutcome, MutationRegisterOutcome,
-    MutationRegistration, PruneSummary, SearchProjection, SourceCursor, SourceIdentity, StoreError,
-    StoreStats,
+    MutationRegistration, PruneSummary, ReplayRegisterOutcome, ReplayRegistration,
+    SearchProjection, SourceCursor, SourceIdentity, StoreError, StoreStats,
 };
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -28,7 +28,7 @@ fn migrations_persist_and_reopen_cleanly() {
 
     {
         let mut store = EventStore::open(&database).expect("store should open");
-        assert_eq!(store.schema_version().expect("schema version"), 3);
+        assert_eq!(store.schema_version().expect("schema version"), 4);
         assert!(matches!(
             store
                 .insert_event(&source, &event, &SearchProjection::default())
@@ -38,7 +38,7 @@ fn migrations_persist_and_reopen_cleanly() {
     }
 
     let reopened = EventStore::open(&database).expect("store should reopen");
-    assert_eq!(reopened.schema_version().expect("schema version"), 3);
+    assert_eq!(reopened.schema_version().expect("schema version"), 4);
     assert_eq!(
         reopened
             .get_event(event.event_id.as_str())
@@ -542,6 +542,7 @@ fn mutation_registry_is_idempotent_audited_and_evidence_bound() {
             "ses_mutation-counter",
             "2026-07-16T06:02:00Z",
         ),
+        ("evt_replay-only", "ses_replay-only", "2026-07-16T06:03:00Z"),
     ] {
         store
             .insert_event(
@@ -595,11 +596,48 @@ fn mutation_registry_is_idempotent_audited_and_evidence_bound() {
             .expect("repeat")
             .changed
     );
+    let failed_replay = replay_registration("rpl_failed", "rsh_failed", false);
+    let mut mismatched_evidence = failed_replay.clone();
+    mismatched_evidence.source_event_ids = vec!["evt_mutation-support-a".to_owned()];
+    assert!(matches!(
+        store.register_replay(&mismatched_evidence),
+        Err(StoreError::InvalidReplayRegistration)
+    ));
+    assert_eq!(
+        store
+            .register_replay(&failed_replay)
+            .expect("failed replay record"),
+        ReplayRegisterOutcome::Inserted {
+            replay_id: "rpl_failed".to_owned(),
+            advanced: false,
+            mutation_state: "challenged".to_owned(),
+        }
+    );
+    assert_eq!(
+        store
+            .register_replay(&failed_replay)
+            .expect("duplicate replay"),
+        ReplayRegisterOutcome::Duplicate {
+            replay_id: "rpl_failed".to_owned(),
+            mutation_state: "challenged".to_owned(),
+        }
+    );
+    let passing_replay = replay_registration("rpl_passing", "rsh_passing", true);
+    assert_eq!(
+        store
+            .register_replay(&passing_replay)
+            .expect("passing replay"),
+        ReplayRegisterOutcome::Inserted {
+            replay_id: "rpl_passing".to_owned(),
+            advanced: true,
+            mutation_state: "replay_passed".to_owned(),
+        }
+    );
     let rejected = store
         .reject_mutation("mut_registry", "counterexample risk remains")
         .expect("reject");
     assert!(rejected.changed);
-    assert_eq!(rejected.from_state, "challenged");
+    assert_eq!(rejected.from_state, "replay_passed");
     assert!(
         !store
             .reject_mutation("mut_registry", "same decision")
@@ -618,11 +656,14 @@ fn mutation_registry_is_idempotent_audited_and_evidence_bound() {
         details.mutation.rejection_reason.as_deref(),
         Some("counterexample risk remains")
     );
-    assert_eq!(details.transitions.len(), 3);
+    assert_eq!(details.transitions.len(), 4);
+    assert_eq!(details.replays.len(), 2);
+    assert!(!details.replays[0].passed);
+    assert!(details.replays[1].passed);
 
     let deleted = store
-        .delete_session("ses_mutation-support-a")
-        .expect("delete evidence");
+        .delete_session("ses_replay-only")
+        .expect("delete replay evidence");
     assert_eq!(deleted.mutations_deleted, 1);
     assert!(matches!(
         store.get_mutation("mut_registry"),
@@ -652,6 +693,27 @@ fn mutation_registration(
             "evt_mutation-support-b".to_owned(),
         ],
         counterexample_event_ids: vec!["evt_mutation-counter".to_owned()],
+    }
+}
+
+fn replay_registration(
+    replay_id: &str,
+    scenario_set_hash: &str,
+    passed: bool,
+) -> ReplayRegistration {
+    ReplayRegistration {
+        replay_id: replay_id.to_owned(),
+        mutation_id: "mut_registry".to_owned(),
+        scenario_set_hash: scenario_set_hash.to_owned(),
+        report: json!({
+            "replay_id": replay_id,
+            "mutation_id": "mut_registry",
+            "scenario_set_hash": scenario_set_hash,
+            "passed": passed,
+            "results": [{"source_event_ids": ["evt_replay-only"]}],
+        }),
+        passed,
+        source_event_ids: vec!["evt_replay-only".to_owned()],
     }
 }
 
