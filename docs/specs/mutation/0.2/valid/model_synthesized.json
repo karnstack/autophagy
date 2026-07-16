@@ -1,0 +1,49 @@
+{
+  "spec_version": "mutation/0.2",
+  "mutation_id": "mut_model_cargo_build_lockfile",
+  "version": "0.1.0",
+  "state": "candidate",
+  "generated_by": "model_synthesis_v1",
+  "source_finding_id": "fnd_cargo_build_exit101",
+  "source_detector": "repeated_command_failure",
+  "title": "Refresh the stale lockfile before `cargo build`",
+  "hypothesis": {
+    "statement": "The recurring `cargo build` exit-code-101 failure follows an out-of-date lockfile, and refreshing it first removes the failure.",
+    "expected_result": "Matching `cargo build` attempts succeed on the first try once the lockfile is refreshed, with no repeated exit-code-101 failures.",
+    "supporting_event_ids": ["evt_build_a", "evt_build_b"],
+    "counterexample_event_ids": [],
+    "failure_cases": [
+      "The lockfile can be intentionally pinned, so refreshing it may be unwanted.",
+      "The failure can be transient and unrelated to the lockfile."
+    ]
+  },
+  "triggers": [
+    { "type": "tool_call", "selector": "failure/v1|shell|cargo build|exit:101" }
+  ],
+  "exclusions": [
+    "Do not refresh the lockfile when the repository pins dependencies deliberately."
+  ],
+  "intervention": {
+    "type": "agent_instruction",
+    "instruction": "Before running `cargo build`, check whether Cargo.lock is older than Cargo.toml. When it is, run `cargo update` first; otherwise leave the workflow unchanged."
+  },
+  "permissions": {
+    "filesystem_read": [],
+    "filesystem_write": [],
+    "commands": [],
+    "environment": [],
+    "network": false
+  },
+  "promotion": {
+    "minimum_replays": 5,
+    "minimum_success_rate_bps": 8000,
+    "maximum_false_positive_rate_bps": 1000
+  },
+  "provenance": {
+    "provider": "ollama",
+    "model_name": "qwen3-coder:30b",
+    "model_revision": "30b-a3b",
+    "model_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "manifest_spec_version": "synthesis-manifest/0.2"
+  }
+}

@@ -6,15 +6,18 @@
 //! assembles a mutation candidate, and re-validates it against the exact
 //! Mutation Package v0.1 contract.
 
-use autophagy_mutations::{GenerationOutcome, MutationPackage, Trigger, generate_candidate};
+use autophagy_mutations::{
+    GeneratedBy, GenerationOutcome, MutationPackage, MutationSpecVersion, Provenance, Trigger,
+    generate_candidate,
+};
 use autophagy_patterns::EvidencePacket;
 use serde::Serialize;
 
 use crate::{
     manifest::ModelManifest,
     provider::{
-        SynthesisBaseline, SynthesisConstraints, SynthesisProposal, SynthesisProvider,
-        SynthesisRequest, SynthesisResponse,
+        ProviderResponse, SynthesisBaseline, SynthesisConstraints, SynthesisProposal,
+        SynthesisProvider, SynthesisRequest, SynthesisResponse, TokenUsage,
     },
     validate::{SynthesisDiagnostic, validate_response},
 };
@@ -31,6 +34,8 @@ pub enum SynthesisOutcome {
         model: String,
         /// Whether a language model was consulted.
         model_used: bool,
+        /// Token usage the provider reported for this candidate.
+        usage: TokenUsage,
         /// The candidate package, ready for the review-only registry.
         package: Box<MutationPackage>,
     },
@@ -49,6 +54,8 @@ pub enum SynthesisOutcome {
         provider: String,
         /// Inspectable reason for declining.
         reason: String,
+        /// Token usage the provider reported before declining.
+        usage: TokenUsage,
     },
     /// The provider proposed, but the response violated the contract.
     Rejected {
@@ -58,6 +65,19 @@ pub enum SynthesisOutcome {
         provider: String,
         /// Every detected violation.
         diagnostics: Vec<SynthesisDiagnostic>,
+        /// Token usage the provider reported, if any.
+        usage: TokenUsage,
+    },
+    /// The provider could not be reached or was misconfigured (transport,
+    /// timeout, missing API key, or a refused non-loopback endpoint). This is a
+    /// clean, structured failure — never a panic.
+    ProviderError {
+        /// Finding that was considered.
+        finding_id: String,
+        /// Provider that failed.
+        provider: String,
+        /// Secret-free description of the failure.
+        message: String,
     },
 }
 
@@ -96,19 +116,32 @@ pub fn synthesize_candidate(
                     capability.as_str()
                 ),
             }],
+            usage: TokenUsage::unavailable(),
         };
     }
 
     // 3. Build the structured request from the deterministic template.
     let request = build_request(finding, &template);
 
-    // 4. Consult the provider.
-    let response = match provider.propose(&request) {
+    // 4. Consult the provider. A transport or configuration failure is a clean,
+    //    structured outcome, never a panic.
+    let ProviderResponse { proposal, usage } = match provider.propose(&request) {
+        Ok(response) => response,
+        Err(error) => {
+            return SynthesisOutcome::ProviderError {
+                finding_id: finding.finding_id.clone(),
+                provider: provider.name().to_owned(),
+                message: error.to_string(),
+            };
+        }
+    };
+    let response = match proposal {
         SynthesisProposal::Declined { reason } => {
             return SynthesisOutcome::ProviderDeclined {
                 finding_id: finding.finding_id.clone(),
                 provider: provider.name().to_owned(),
                 reason,
+                usage,
             };
         }
         SynthesisProposal::Proposed { response } => *response,
@@ -120,12 +153,14 @@ pub fn synthesize_candidate(
             finding_id: finding.finding_id.clone(),
             provider: provider.name().to_owned(),
             diagnostics: rejection.into_diagnostics(),
+            usage,
         };
     }
 
-    // 6. Assemble the candidate and re-validate it against the mutation
-    //    contract. The boundary cannot emit a candidate the contract rejects.
-    let package = assemble(&template, &request, &response);
+    // 6. Assemble the candidate, stamp model provenance when a model was
+    //    consulted, and re-validate against the mutation contract. The boundary
+    //    cannot emit a candidate the contract rejects.
+    let package = stamp_provenance(assemble(&template, &request, &response), manifest, provider);
     if let Err(errors) = package.validate() {
         let diagnostics = errors
             .iter()
@@ -139,6 +174,7 @@ pub fn synthesize_candidate(
             finding_id: finding.finding_id.clone(),
             provider: provider.name().to_owned(),
             diagnostics,
+            usage,
         };
     }
 
@@ -146,8 +182,35 @@ pub fn synthesize_candidate(
         provider: provider.name().to_owned(),
         model: manifest.name.clone(),
         model_used: provider.uses_model(),
+        usage,
         package: Box::new(package),
     }
+}
+
+/// Stamp model provenance onto a package when a model was consulted.
+///
+/// A model-backed provider produces a `mutation/0.2` package that records the
+/// provider and model in a provenance block; the deterministic reference
+/// provider consults no model and leaves the package as `mutation/0.1`.
+/// Identity, evidence, triggers, and the permission ceiling always come from the
+/// deterministic template regardless.
+fn stamp_provenance(
+    mut package: MutationPackage,
+    manifest: &ModelManifest,
+    provider: &dyn SynthesisProvider,
+) -> MutationPackage {
+    if provider.uses_model() {
+        package.spec_version = MutationSpecVersion::V0_2;
+        package.generated_by = GeneratedBy::ModelSynthesisV1;
+        package.provenance = Some(Provenance {
+            provider: provider.name().to_owned(),
+            model_name: manifest.name.clone(),
+            model_revision: manifest.revision.clone(),
+            model_digest: manifest.digest.clone(),
+            manifest_spec_version: manifest.spec_version.as_str().to_owned(),
+        });
+    }
+    package
 }
 
 /// Synthesize stable outcomes for every finding, ordered deterministically.
@@ -250,6 +313,7 @@ fn outcome_key(outcome: &SynthesisOutcome) -> &str {
         SynthesisOutcome::Candidate { package, .. } => &package.mutation_id,
         SynthesisOutcome::InsufficientEvidence { finding_id, .. }
         | SynthesisOutcome::ProviderDeclined { finding_id, .. }
-        | SynthesisOutcome::Rejected { finding_id, .. } => finding_id,
+        | SynthesisOutcome::Rejected { finding_id, .. }
+        | SynthesisOutcome::ProviderError { finding_id, .. } => finding_id,
     }
 }

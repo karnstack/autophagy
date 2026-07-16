@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use semver::Version;
 
-use crate::{InterventionKind, LifecycleState, MutationPackage};
+use crate::{GeneratedBy, InterventionKind, LifecycleState, MutationPackage, MutationSpecVersion};
 
 /// One stable mutation contract violation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -202,10 +202,78 @@ pub(crate) fn validate(package: &MutationPackage) -> Result<(), MutationValidati
             "rates must be between 0 and 10000",
         );
     }
+    validate_provenance(package, &mut errors);
     if errors.is_empty() {
         Ok(())
     } else {
         Err(MutationValidationErrors(errors))
+    }
+}
+
+/// Enforce the compatibility contract between `spec_version`, `generated_by`,
+/// and the optional `provenance` block.
+///
+/// A `mutation/0.1` package is deterministic-template output with no provenance.
+/// A `mutation/0.2` package is model synthesis output that must carry a complete
+/// provenance block. The two shapes are never mixed: a deterministic package can
+/// never carry provenance, and a model package can never omit it.
+fn validate_provenance(package: &MutationPackage, errors: &mut Vec<MutationValidationError>) {
+    match (package.spec_version, package.generated_by) {
+        (MutationSpecVersion::V0_1, GeneratedBy::DeterministicTemplateV1) => {
+            if package.provenance.is_some() {
+                push(
+                    errors,
+                    "provenance",
+                    "unexpected_provenance",
+                    "mutation/0.1 deterministic packages must not carry provenance",
+                );
+            }
+        }
+        (MutationSpecVersion::V0_2, GeneratedBy::ModelSynthesisV1) => {
+            let Some(provenance) = package.provenance.as_ref() else {
+                push(
+                    errors,
+                    "provenance",
+                    "required",
+                    "mutation/0.2 model synthesis packages must carry provenance",
+                );
+                return;
+            };
+            nonblank(&provenance.provider, "provenance.provider", errors);
+            nonblank(&provenance.model_name, "provenance.model_name", errors);
+            nonblank(
+                &provenance.model_revision,
+                "provenance.model_revision",
+                errors,
+            );
+            nonblank(
+                &provenance.manifest_spec_version,
+                "provenance.manifest_spec_version",
+                errors,
+            );
+            if provenance
+                .model_digest
+                .as_deref()
+                .is_some_and(|digest| digest.trim().is_empty())
+            {
+                push(
+                    errors,
+                    "provenance.model_digest",
+                    "blank",
+                    "model digest, when present, must not be blank",
+                );
+            }
+        }
+        (MutationSpecVersion::V0_1, GeneratedBy::ModelSynthesisV1)
+        | (MutationSpecVersion::V0_2, GeneratedBy::DeterministicTemplateV1) => {
+            push(
+                errors,
+                "generated_by",
+                "provenance_mismatch",
+                "spec_version and generated_by disagree: mutation/0.1 pairs with \
+                 deterministic_template_v1 and mutation/0.2 pairs with model_synthesis_v1",
+            );
+        }
     }
 }
 

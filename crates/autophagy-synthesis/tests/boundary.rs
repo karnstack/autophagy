@@ -8,8 +8,9 @@ use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
 use autophagy_store::EventStore;
 use autophagy_synthesis::{
     Capability, DeterministicReferenceProvider, ManifestError, ManifestSpecVersion, ModelFormat,
-    ModelManifest, ResourceHints, SynthesisOutcome, SynthesisProposal, SynthesisProvider,
-    SynthesisRequest, SynthesisResponse, synthesize_candidate, synthesize_candidates,
+    ModelManifest, ProviderError, ProviderResponse, ResourceHints, SynthesisOutcome,
+    SynthesisProposal, SynthesisProvider, SynthesisRequest, SynthesisResponse,
+    synthesize_candidate, synthesize_candidates,
 };
 
 const CORPUS: &str = include_str!("../../../evals/fixtures/findings/deterministic.jsonl");
@@ -42,7 +43,7 @@ impl SynthesisProvider for TripwireProvider {
         "tripwire"
     }
 
-    fn propose(&self, _request: &SynthesisRequest) -> SynthesisProposal {
+    fn propose(&self, _request: &SynthesisRequest) -> Result<ProviderResponse, ProviderError> {
         panic!("provider was consulted despite a gate that should have refused first");
     }
 }
@@ -55,11 +56,11 @@ impl SynthesisProvider for MaliciousProvider {
         "malicious"
     }
 
-    fn propose(&self, request: &SynthesisRequest) -> SynthesisProposal {
+    fn propose(&self, request: &SynthesisRequest) -> Result<ProviderResponse, ProviderError> {
         let mut permissions = request.constraints.permission_ceiling.clone();
         permissions.commands.push("rm -rf /".to_owned());
         permissions.network = true;
-        SynthesisProposal::Proposed {
+        Ok(ProviderResponse::offline(SynthesisProposal::Proposed {
             response: Box::new(SynthesisResponse {
                 title: "Do the thing".to_owned(),
                 statement: "Trust me.".to_owned(),
@@ -75,7 +76,7 @@ impl SynthesisProvider for MaliciousProvider {
                 trigger_selectors: vec!["failure/v1|shell|sudo anything|exit:0".to_owned()],
                 permissions,
             }),
-        }
+        }))
     }
 }
 
@@ -87,10 +88,10 @@ impl SynthesisProvider for DecliningProvider {
         "declining"
     }
 
-    fn propose(&self, _request: &SynthesisRequest) -> SynthesisProposal {
-        SynthesisProposal::Declined {
+    fn propose(&self, _request: &SynthesisRequest) -> Result<ProviderResponse, ProviderError> {
+        Ok(ProviderResponse::offline(SynthesisProposal::Declined {
             reason: "not confident enough".to_owned(),
-        }
+        }))
     }
 }
 
@@ -180,6 +181,8 @@ fn missing_capability_refuses_without_consulting_a_provider() {
             recommended_memory_mb: None,
             context_window_tokens: None,
         },
+        timeouts: None,
+        api_key_env: None,
     };
     // Tripwire provider must not be consulted when the capability is absent.
     let outcome = synthesize_candidate(&finding, &manifest, &TripwireProvider);
@@ -321,6 +324,165 @@ fn response_schema_accepts_valid_and_rejects_invalid_fixtures() {
             "schema accepted invalid {name}"
         );
     }
+}
+
+#[test]
+fn mutation_v0_2_schema_accepts_valid_and_rejects_invalid_fixtures() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/specs/mutation/0.2/schema.json"))
+            .expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/mutation/0.2");
+    for name in ["model_synthesized.json", "model_synthesized_no_digest.json"] {
+        let instance = read_json(&base.join("valid").join(name));
+        assert!(
+            validator.is_valid(&instance),
+            "schema rejected valid {name}"
+        );
+    }
+    for name in [
+        "missing_provenance.json",
+        "deterministic_generated_by.json",
+        "blank_provider.json",
+        "unknown_field.json",
+        "excessive_permissions.json",
+    ] {
+        let instance = read_json(&base.join("invalid").join(name));
+        assert!(
+            !validator.is_valid(&instance),
+            "schema accepted invalid {name}"
+        );
+    }
+}
+
+#[test]
+fn mutation_v0_1_fixtures_still_validate_against_v0_1_schema() {
+    // The v0.1 contract is untouched: a v0.1 package (no provenance) parses,
+    // validates, and round-trips byte-for-byte.
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/specs/mutation/0.1/schema.json"))
+            .expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    let findings = fixture_findings();
+    let manifest = synthesis_manifest();
+    let provider = DeterministicReferenceProvider;
+    let mut checked = 0;
+    for outcome in synthesize_candidates(&findings, &manifest, &provider) {
+        let SynthesisOutcome::Candidate { package, .. } = outcome else {
+            continue;
+        };
+        checked += 1;
+        // Deterministic candidates stay v0.1 with no provenance.
+        assert!(
+            package.provenance.is_none(),
+            "deterministic must not stamp provenance"
+        );
+        let value = serde_json::to_value(&*package).expect("package JSON");
+        assert!(
+            value.get("provenance").is_none(),
+            "v0.1 package must not serialize a provenance key"
+        );
+        assert!(validator.is_valid(&value), "v0.1 schema rejected {value}");
+        // Round-trip.
+        let round: autophagy_mutations::MutationPackage =
+            serde_json::from_value(value.clone()).expect("round-trip");
+        assert_eq!(&round, &*package);
+    }
+    assert!(checked >= 1);
+}
+
+#[test]
+fn manifest_v0_2_schema_accepts_valid_and_rejects_invalid_fixtures() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/specs/synthesis/0.2/manifest.schema.json"
+    ))
+    .expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    let base =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/synthesis/0.2/manifest");
+    for name in [
+        "ollama_endpoint.json",
+        "openai_compatible_hosted.json",
+        "minimal_no_extras.json",
+    ] {
+        let instance = read_json(&base.join("valid").join(name));
+        assert!(
+            validator.is_valid(&instance),
+            "schema rejected valid {name}"
+        );
+    }
+    for name in [
+        "api_key_inline.json",
+        "zero_timeout.json",
+        "blank_api_key_env.json",
+        "wrong_spec_version.json",
+    ] {
+        let instance = read_json(&base.join("invalid").join(name));
+        assert!(
+            !validator.is_valid(&instance),
+            "schema accepted invalid {name}"
+        );
+    }
+}
+
+#[test]
+fn manifest_v0_2_fields_load_and_are_validated() {
+    let base =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/synthesis/0.2/manifest");
+    let ollama = ModelManifest::from_path(&base.join("valid/ollama_endpoint.json"))
+        .expect("ollama endpoint manifest loads");
+    assert_eq!(ollama.spec_version, ManifestSpecVersion::V0_2);
+    assert_eq!(ollama.format, ModelFormat::Ollama);
+    let timeouts = ollama.timeouts.expect("timeouts present");
+    assert_eq!(timeouts.connect_ms, Some(2000));
+    assert_eq!(timeouts.request_ms, Some(90000));
+
+    let hosted = ModelManifest::from_path(&base.join("valid/openai_compatible_hosted.json"))
+        .expect("hosted manifest loads");
+    assert_eq!(
+        hosted.api_key_env.as_deref(),
+        Some("AUTOPHAGY_OPENAI_API_KEY")
+    );
+
+    // An inline api_key is an unknown field: it must never be accepted.
+    assert!(matches!(
+        ModelManifest::from_path(&base.join("invalid/api_key_inline.json")),
+        Err(ManifestError::Malformed { .. })
+    ));
+    // A v0.1 manifest carrying a v0.2-only field is semantically invalid.
+    assert!(matches!(
+        ModelManifest::from_path(&base.join("invalid/wrong_spec_version.json")),
+        Err(ManifestError::Malformed { .. } | ManifestError::Invalid(_))
+    ));
+    // A blank api_key_env is semantically invalid.
+    assert!(matches!(
+        ModelManifest::from_path(&base.join("invalid/blank_api_key_env.json")),
+        Err(ManifestError::Invalid(_))
+    ));
+}
+
+#[test]
+fn v0_1_manifest_rejects_v0_2_only_fields() {
+    let manifest = ModelManifest {
+        spec_version: ManifestSpecVersion::V0_1,
+        name: "m".to_owned(),
+        format: ModelFormat::Ollama,
+        path: "http://localhost:11434".to_owned(),
+        revision: "v1".to_owned(),
+        digest: None,
+        capabilities: vec![Capability::MutationSynthesis],
+        resource_hints: ResourceHints {
+            min_memory_mb: 1,
+            recommended_memory_mb: None,
+            context_window_tokens: None,
+        },
+        timeouts: None,
+        api_key_env: Some("SOME_VAR".to_owned()),
+    };
+    assert!(matches!(
+        manifest.validate(),
+        Err(ManifestError::Invalid(_))
+    ));
 }
 
 fn read_json(path: &Path) -> serde_json::Value {

@@ -30,7 +30,7 @@ fn migrations_persist_and_reopen_cleanly() {
 
     {
         let mut store = EventStore::open(&database).expect("store should open");
-        assert_eq!(store.schema_version().expect("schema version"), 7);
+        assert_eq!(store.schema_version().expect("schema version"), 8);
         assert!(matches!(
             store
                 .insert_event(&source, &event, &SearchProjection::default())
@@ -40,7 +40,7 @@ fn migrations_persist_and_reopen_cleanly() {
     }
 
     let reopened = EventStore::open(&database).expect("store should reopen");
-    assert_eq!(reopened.schema_version().expect("schema version"), 7);
+    assert_eq!(reopened.schema_version().expect("schema version"), 8);
     assert_eq!(
         reopened
             .get_event(event.event_id.as_str())

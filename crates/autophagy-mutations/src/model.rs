@@ -9,6 +9,13 @@ pub enum MutationSpecVersion {
     /// Initial review-only candidate contract.
     #[serde(rename = "mutation/0.1")]
     V0_1,
+    /// Additive revision that carries optional model synthesis provenance.
+    ///
+    /// A v0.2 package is a v0.1 package plus a `provenance` block recording the
+    /// provider and model that enriched it. A package with no provenance is a
+    /// v0.1 package; the two shapes are otherwise byte-identical.
+    #[serde(rename = "mutation/0.2")]
+    V0_2,
 }
 
 impl MutationSpecVersion {
@@ -17,6 +24,7 @@ impl MutationSpecVersion {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::V0_1 => "mutation/0.1",
+            Self::V0_2 => "mutation/0.2",
         }
     }
 }
@@ -63,6 +71,31 @@ impl LifecycleState {
 pub enum GeneratedBy {
     /// Inspectable built-in template version 1; no model involved.
     DeterministicTemplateV1,
+    /// A local model enriched the deterministic template's reviewable content
+    /// through the synthesis boundary. The evidence, triggers, and permission
+    /// ceiling still come from the deterministic template; only the reviewable
+    /// prose was model-enriched, and a `provenance` block records the model.
+    ModelSynthesisV1,
+}
+
+/// Exact identity of the model that enriched a synthesized candidate.
+///
+/// Present only on `mutation/0.2` packages produced by a model-backed provider.
+/// It never contains secrets, endpoints, prompts, or raw payloads — only stable
+/// model identity, so a reviewer can see exactly what proposed the enrichment.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Provenance {
+    /// Stable provider identifier (for example `ollama` or `openai-compatible`).
+    pub provider: String,
+    /// Human-readable model name from the manifest.
+    pub model_name: String,
+    /// Model revision, tag, or version string from the manifest.
+    pub model_revision: String,
+    /// Optional content digest of the model weights from the manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_digest: Option<String>,
+    /// Manifest contract version the provider was configured from.
+    pub manifest_spec_version: String,
 }
 
 /// Observable condition at which an intervention may apply.
@@ -175,6 +208,10 @@ pub struct MutationPackage {
     pub permissions: PermissionManifest,
     /// Future replay/shadow promotion thresholds.
     pub promotion: PromotionPolicy,
+    /// Model synthesis provenance. Present only on `mutation/0.2` packages; a
+    /// package without it is a `mutation/0.1` package and round-trips as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
 }
 
 impl MutationPackage {

@@ -16,6 +16,10 @@ pub enum ManifestSpecVersion {
     /// Initial local model manifest contract.
     #[serde(rename = "synthesis-manifest/0.1")]
     V0_1,
+    /// Additive revision adding optional endpoint `timeouts` and an
+    /// `api_key_env` field for HTTP-backed providers.
+    #[serde(rename = "synthesis-manifest/0.2")]
+    V0_2,
 }
 
 impl ManifestSpecVersion {
@@ -24,6 +28,7 @@ impl ManifestSpecVersion {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::V0_1 => "synthesis-manifest/0.1",
+            Self::V0_2 => "synthesis-manifest/0.2",
         }
     }
 }
@@ -41,6 +46,7 @@ pub enum ModelFormat {
     /// An MLX model bundle.
     Mlx,
     /// A local OpenAI-compatible server endpoint.
+    #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
     /// A deterministic, model-free reference provider.
     Deterministic,
@@ -98,6 +104,22 @@ pub struct ResourceHints {
     pub context_window_tokens: Option<u32>,
 }
 
+/// Optional per-request timeouts for HTTP-backed providers (manifest v0.2).
+///
+/// Both bounds are optional; a provider falls back to its own sane defaults
+/// when a value is absent. Timeouts are mandatory at the provider level — this
+/// only lets an operator override the defaults.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestTimeouts {
+    /// Maximum time to establish a connection, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_ms: Option<u64>,
+    /// Maximum total time for the whole request, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_ms: Option<u64>,
+}
+
 /// A versioned, local model manifest.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +141,15 @@ pub struct ModelManifest {
     pub capabilities: Vec<Capability>,
     /// Advisory resource hints.
     pub resource_hints: ResourceHints,
+    /// Optional per-request timeouts for HTTP-backed providers. Requires
+    /// manifest spec version `synthesis-manifest/0.2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeouts: Option<ManifestTimeouts>,
+    /// Optional name of the environment variable that holds the API key for a
+    /// hosted OpenAI-compatible endpoint. The key itself is NEVER stored in the
+    /// manifest; only the variable name is. Requires `synthesis-manifest/0.2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
 }
 
 impl ModelManifest {
@@ -176,6 +207,36 @@ impl ModelManifest {
         if self.resource_hints.min_memory_mb == 0 {
             reasons.push("`resource_hints.min_memory_mb` must be greater than zero".to_owned());
         }
+        if self.spec_version == ManifestSpecVersion::V0_1 {
+            if self.timeouts.is_some() {
+                reasons
+                    .push("`timeouts` requires spec_version `synthesis-manifest/0.2`".to_owned());
+            }
+            if self.api_key_env.is_some() {
+                reasons.push(
+                    "`api_key_env` requires spec_version `synthesis-manifest/0.2`".to_owned(),
+                );
+            }
+        }
+        if self
+            .api_key_env
+            .as_deref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            reasons.push("`api_key_env`, when present, must not be blank".to_owned());
+        }
+        if let Some(timeouts) = self.timeouts {
+            if timeouts.connect_ms == Some(0) {
+                reasons.push(
+                    "`timeouts.connect_ms`, when present, must be greater than zero".to_owned(),
+                );
+            }
+            if timeouts.request_ms == Some(0) {
+                reasons.push(
+                    "`timeouts.request_ms`, when present, must be greater than zero".to_owned(),
+                );
+            }
+        }
         if reasons.is_empty() {
             Ok(())
         } else {
@@ -197,7 +258,7 @@ pub enum ManifestError {
         source: std::io::Error,
     },
     /// The manifest file is not valid manifest JSON.
-    #[error("model manifest at {path} is not valid synthesis-manifest/0.1 JSON: {source}")]
+    #[error("model manifest at {path} is not valid synthesis-manifest JSON: {source}")]
     Malformed {
         /// Manifest path.
         path: String,
