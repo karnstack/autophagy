@@ -76,6 +76,36 @@ fn tool_input_indexing_requires_explicit_opt_in() {
 }
 
 #[test]
+fn privacy_policy_redacts_secrets_and_excludes_paths_before_storage() {
+    let input = concat!(
+        "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_secret\",",
+        "\"session_id\":\"ses_secret\",\"timestamp\":\"2026-07-16T09:00:00Z\",",
+        "\"source\":\"generic-jsonl\",\"type\":\"tool.called\",",
+        "\"project\":\"/repo/public\",\"tool\":{\"name\":\"shell\",",
+        "\"input\":{\"command\":\"API_KEY=abcdefgh12345678\"}}}\n",
+        "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_private\",",
+        "\"session_id\":\"ses_private\",\"timestamp\":\"2026-07-16T09:01:00Z\",",
+        "\"source\":\"generic-jsonl\",\"type\":\"session.started\",",
+        "\"project\":\"/repo/private/client\"}\n"
+    );
+    let mut store = EventStore::open_in_memory().expect("store");
+    let mut options = ImportOptions::new("fixture:privacy");
+    options.exclude_paths = vec!["**/private/**".to_owned()];
+    let summary = import_jsonl(Cursor::new(input), Some(&mut store), &options).expect("import");
+    assert_eq!(summary.inserted, 1);
+    assert_eq!(summary.privacy_skipped, 1);
+    assert_eq!(summary.redacted_fields, 1);
+    let stored = store
+        .get_event("evt_secret")
+        .expect("query")
+        .expect("event");
+    let encoded = serde_json::to_string(&stored).expect("JSON");
+    assert!(encoded.contains("[REDACTED]"));
+    assert!(!encoded.contains("abcdefgh12345678"));
+    assert!(store.get_event("evt_private").expect("query").is_none());
+}
+
+#[test]
 fn dry_run_validates_without_a_store_or_writes() {
     let mut options = ImportOptions::new("fixture:dry-run");
     options.dry_run = true;

@@ -28,3 +28,7 @@ run = "actionlint"
 [tasks.check]
 description = "Run the pull-request quality gate"
 depends = ["ci", "docs", "fmt", "lint", "test"]
+
+[tasks.demo]
+description = "Run the offline Milestone 1 import-to-digest demonstration"
+run = "scripts/demo-milestone-1.sh"

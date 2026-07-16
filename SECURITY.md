@@ -15,4 +15,8 @@ repository. Include a minimal, redacted reproduction and the affected version.
 - Generated mutations are inspectable, permission-scoped, and reversible.
 - Generated scripts never become executable without explicit approval.
 
+The implemented Milestone 1 trust boundaries, residual risks, deletion
+semantics, and disclosure guidance are documented in the
+[threat model](docs/security/threat-model.md).
+
 The project is pre-alpha and does not yet make production security guarantees.

@@ -11,11 +11,10 @@ change because of what happened?”
 
 ## Status
 
-Autophagy is in foundation development. Agent Event Protocol (AEP) v0.1, the
-transactional local SQLite event store, generic JSONL CLI vertical slice, and
-incremental Claude Code and Codex history adapters are implemented. No daemon
-or background capture ships yet. Deterministic repeated-failure and explicit
-user-correction detectors now emit versioned, evidence-linked packets.
+The local-only Milestone 1 engine is implemented: AEP v0.1, transactional
+SQLite storage, generic JSONL plus Claude Code and Codex adapters, deterministic
+evidence-linked findings, ingestion redaction, retention, export, and deletion.
+No daemon, mutation generation, replay, or background capture ships yet.
 
 ## Principles
 
@@ -35,12 +34,14 @@ crates/autophagy-cli/      User-facing import, sessions, and search commands
 crates/autophagy-core/     Reusable streaming import application services
 crates/autophagy-events/   AEP Rust types, parsing, and validation
 crates/autophagy-patterns/ Model-free recurrence detectors and evidence packets
+crates/autophagy-redaction/ Secret rules and project/artifact path policy
 crates/autophagy-store/    SQLite migrations, idempotency, FTS, and deletion
 docs/architecture/        Planned component and storage boundaries
 docs/blueprint/           Complete normalized product and implementation brief
 docs/decisions/           Architecture decision records
 docs/roadmap/              Small pull-request delivery sequence
 docs/specs/aep/0.1/       Versioned AEP JSON Schema and examples
+docs/specs/evidence/0.1/  Versioned deterministic finding contract
 ```
 
 The intended repository structure is documented in
@@ -93,6 +94,31 @@ narrow compatibility matrix and the upstream transcript-stability boundary.
 The [deterministic findings guide](docs/guides/deterministic-findings.md)
 documents recurrence thresholds, signature normalization, counterexamples, and
 the versioned Evidence Packet contract.
+
+## Run the offline milestone demo
+
+```sh
+mise run demo
+```
+
+The demo imports anonymized evidence, emits two deterministic patterns with
+exact evidence IDs, produces a digest that confirms no model or network was
+used, and previews retention deletion. Its temporary database is removed on
+exit.
+
+Useful privacy and lifecycle commands:
+
+```sh
+autophagy import history.jsonl --exclude-path '**/private/**'
+autophagy export > autophagy-export.jsonl
+autophagy prune --older-than-days 30 --dry-run
+autophagy prune --older-than-days 30
+autophagy delete session ses_example
+autophagy delete all --confirm delete-all
+```
+
+See the [privacy and lifecycle guide](docs/guides/privacy-and-lifecycle.md) and
+[threat model](docs/security/threat-model.md) for guarantees and limitations.
 
 ## Try the contract
 

@@ -1,6 +1,7 @@
 //! Command-line entry point for importing and querying local agent activity.
 
 use std::{
+    fmt::Write as _,
     fs::{self, File},
     io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -14,10 +15,17 @@ use autophagy_adapter_codex::{
     CodexImportOptions, CodexImportSummary, default_sessions_root, import_codex,
 };
 use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
-use autophagy_store::{EventStore, SearchHit, SessionSummary, StoreError};
+use autophagy_events::Event;
+use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
+use autophagy_store::{
+    DeleteAllSummary, DeleteSummary, EventStore, PruneSummary, SearchHit, SessionSummary,
+    StoreError,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -76,6 +84,10 @@ enum Commands {
         #[arg(long = "project", value_name = "PATH")]
         projects: Vec<String>,
 
+        /// Exclude project or artifact paths matching this glob. Repeatable.
+        #[arg(long = "exclude-path", value_name = "GLOB")]
+        exclude_paths: Vec<String>,
+
         /// Include Claude Code `agent-*.jsonl` subagent transcripts.
         #[arg(long)]
         include_subagents: bool,
@@ -117,6 +129,95 @@ enum Commands {
         #[arg(long, default_value_t = 20, value_name = "COUNT")]
         limit: u32,
     },
+
+    /// Run every deterministic detector and emit a digestion report.
+    Digest {
+        /// Limit digestion to one exact project path.
+        #[arg(long, value_name = "PATH")]
+        project: Option<String>,
+
+        #[command(flatten)]
+        thresholds: ThresholdArgs,
+    },
+
+    /// List deterministic Evidence Packet v0.1 findings.
+    Patterns {
+        /// Limit detection to one exact project path.
+        #[arg(long, value_name = "PATH")]
+        project: Option<String>,
+
+        #[command(flatten)]
+        thresholds: ThresholdArgs,
+    },
+
+    /// Export redacted canonical AEP events as JSONL to standard output.
+    Export {
+        /// Limit export to one exact project path.
+        #[arg(long, value_name = "PATH")]
+        project: Option<String>,
+    },
+
+    /// Apply an age-based session retention policy.
+    Prune {
+        /// Delete sessions whose last event is older than this many days.
+        #[arg(long, value_name = "DAYS")]
+        older_than_days: u32,
+
+        /// Limit pruning to one exact project path.
+        #[arg(long, value_name = "PATH")]
+        project: Option<String>,
+
+        /// Report the exact deletion effect and roll the transaction back.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Delete a session or all local Autophagy data.
+    Delete {
+        #[command(subcommand)]
+        target: DeleteTarget,
+    },
+}
+
+#[allow(clippy::struct_field_names)]
+#[derive(Clone, Copy, Debug, clap::Args)]
+struct ThresholdArgs {
+    /// Minimum supporting events.
+    #[arg(long, default_value_t = 3, value_name = "COUNT")]
+    min_occurrences: u32,
+
+    /// Minimum distinct supporting sessions.
+    #[arg(long, default_value_t = 2, value_name = "COUNT")]
+    min_sessions: u32,
+
+    /// Minimum support share in basis points (0-10000).
+    #[arg(long, default_value_t = 5_000, value_parser = clap::value_parser!(u16).range(0..=10_000), value_name = "BPS")]
+    min_support_ratio_bps: u16,
+}
+
+impl From<ThresholdArgs> for DetectorConfig {
+    fn from(value: ThresholdArgs) -> Self {
+        Self {
+            min_occurrences: value.min_occurrences,
+            min_sessions: value.min_sessions,
+            min_support_ratio_bps: value.min_support_ratio_bps,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum DeleteTarget {
+    /// Delete one session and its evidence.
+    Session {
+        /// AEP session identifier.
+        session_id: String,
+    },
+    /// Delete every local source, cursor, session, event, and artifact.
+    All {
+        /// Required destructive confirmation phrase: `delete-all`.
+        #[arg(long, value_name = "PHRASE")]
+        confirm: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +226,22 @@ enum CommandReport {
     Import(ImportReport),
     Sessions(Vec<SessionSummary>),
     Search(Vec<SearchHit>),
+    Digest(DigestReport),
+    Patterns(Vec<EvidencePacket>),
+    Export(Vec<Event>),
+    Prune(PruneSummary),
+    DeleteSession(DeleteSummary),
+    DeleteAll(DeleteAllSummary),
+}
+
+#[derive(Debug, Serialize)]
+struct DigestReport {
+    spec_version: &'static str,
+    generated_at: String,
+    events_scanned: usize,
+    model_used: bool,
+    network_used: bool,
+    findings: Vec<EvidencePacket>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,7 +266,14 @@ impl CommandReport {
     const fn has_issues(&self) -> bool {
         match self {
             Self::Import(summary) => summary.has_issues(),
-            Self::Sessions(_) | Self::Search(_) => false,
+            Self::Sessions(_)
+            | Self::Search(_)
+            | Self::Digest(_)
+            | Self::Patterns(_)
+            | Self::Export(_)
+            | Self::Prune(_)
+            | Self::DeleteSession(_)
+            | Self::DeleteAll(_) => false,
         }
     }
 }
@@ -174,6 +298,10 @@ enum CliError {
     Json(#[from] serde_json::Error),
     #[error("could not determine the platform-local application data directory")]
     DataDirectoryUnavailable,
+    #[error("could not format report timestamp: {0}")]
+    TimeFormat(#[from] time::error::Format),
+    #[error("deleting all data requires --confirm delete-all")]
+    DeleteAllConfirmation,
 }
 
 fn main() -> ExitCode {
@@ -193,6 +321,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn execute(cli: Cli) -> Result<CommandReport, CliError> {
     match cli.command {
         Commands::Import {
@@ -201,6 +330,7 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             instance_key,
             display_name,
             projects,
+            exclude_paths,
             include_subagents,
             include_content,
             index_tool_input,
@@ -213,6 +343,7 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
                 let mut options = ImportOptions::new(instance_key);
                 options.display_name = display_name;
                 options.projects = projects;
+                options.exclude_paths = exclude_paths;
                 options.index_tool_input = index_tool_input;
                 options.index_metadata = index_metadata;
                 options.dry_run = dry_run;
@@ -237,6 +368,7 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
                 let mut options = ClaudeImportOptions::new(input, instance_key);
                 options.display_name = display_name;
                 options.projects = projects;
+                options.exclude_paths = exclude_paths;
                 options.include_subagents = include_subagents;
                 options.include_content = include_content;
                 options.index_tool_input = index_tool_input;
@@ -262,6 +394,7 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
                 let mut options = CodexImportOptions::new(input, instance_key);
                 options.display_name = display_name;
                 options.projects = projects;
+                options.exclude_paths = exclude_paths;
                 options.include_content = include_content;
                 options.index_tool_input = index_tool_input;
                 options.index_metadata = index_metadata;
@@ -286,6 +419,68 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
             Ok(CommandReport::Search(store.search(&query, limit)?))
+        }
+        Commands::Digest {
+            project,
+            thresholds,
+        } => {
+            let database = resolve_database_path(cli.database)?;
+            let store = open_store(&database)?;
+            let events = store.list_events_for_detection(project.as_deref())?;
+            let findings = detect(&events, thresholds.into());
+            Ok(CommandReport::Digest(DigestReport {
+                spec_version: "digest/0.1",
+                generated_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
+                events_scanned: events.len(),
+                model_used: false,
+                network_used: false,
+                findings,
+            }))
+        }
+        Commands::Patterns {
+            project,
+            thresholds,
+        } => {
+            let database = resolve_database_path(cli.database)?;
+            let store = open_store(&database)?;
+            let events = store.list_events_for_detection(project.as_deref())?;
+            Ok(CommandReport::Patterns(detect(&events, thresholds.into())))
+        }
+        Commands::Export { project } => {
+            let database = resolve_database_path(cli.database)?;
+            let store = open_store(&database)?;
+            Ok(CommandReport::Export(
+                store.list_events_for_detection(project.as_deref())?,
+            ))
+        }
+        Commands::Prune {
+            older_than_days,
+            project,
+            dry_run,
+        } => {
+            let database = resolve_database_path(cli.database)?;
+            let mut store = open_store(&database)?;
+            let cutoff = OffsetDateTime::now_utc() - Duration::days(i64::from(older_than_days));
+            Ok(CommandReport::Prune(store.prune_before(
+                cutoff,
+                project.as_deref(),
+                dry_run,
+            )?))
+        }
+        Commands::Delete { target } => {
+            let database = resolve_database_path(cli.database)?;
+            let mut store = open_store(&database)?;
+            match target {
+                DeleteTarget::Session { session_id } => Ok(CommandReport::DeleteSession(
+                    store.delete_session(&session_id)?,
+                )),
+                DeleteTarget::All { confirm } => {
+                    if confirm != "delete-all" {
+                        return Err(CliError::DeleteAllConfirmation);
+                    }
+                    Ok(CommandReport::DeleteAll(store.delete_all()?))
+                }
+            }
         }
     }
 }
@@ -321,7 +516,13 @@ fn derive_instance_key(input: &Path) -> Result<String, CliError> {
     if input == Path::new("-") {
         Ok("stdin".to_owned())
     } else {
-        Ok(fs::canonicalize(input)?.to_string_lossy().into_owned())
+        let canonical = fs::canonicalize(input)?;
+        let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+        let mut encoded = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        Ok(format!("path:{encoded}"))
     }
 }
 
@@ -330,6 +531,13 @@ fn write_report(
     format: OutputFormat,
     report: &CommandReport,
 ) -> Result<(), CliError> {
+    if let CommandReport::Export(events) = report {
+        for event in events {
+            serde_json::to_writer(&mut writer, event)?;
+            writeln!(writer)?;
+        }
+        return Ok(());
+    }
     match format {
         OutputFormat::Json => {
             serde_json::to_writer_pretty(&mut writer, report)?;
@@ -362,7 +570,63 @@ fn write_report(
                     writeln!(writer, "{}\t{}", hit.event_id, hit.snippet)?;
                 }
             }
+            CommandReport::Digest(report) => {
+                writeln!(
+                    writer,
+                    "{} events · {} findings · local deterministic digest",
+                    report.events_scanned,
+                    report.findings.len()
+                )?;
+                write_findings(&mut writer, &report.findings)?;
+            }
+            CommandReport::Patterns(findings) => write_findings(&mut writer, findings)?,
+            CommandReport::Prune(summary) => writeln!(
+                writer,
+                "{} sessions · {} events · {} artifacts{}",
+                summary.sessions_deleted,
+                summary.events_deleted,
+                summary.artifacts_deleted,
+                if summary.dry_run {
+                    " · dry run"
+                } else {
+                    " deleted"
+                }
+            )?,
+            CommandReport::DeleteSession(summary) => writeln!(
+                writer,
+                "session_deleted={} · {} events · {} artifacts",
+                summary.session_deleted, summary.events_deleted, summary.artifacts_deleted
+            )?,
+            CommandReport::DeleteAll(summary) => writeln!(
+                writer,
+                "{} sources · {} sessions · {} events · {} artifacts · {} conflicts · {} cursors deleted",
+                summary.sources_deleted,
+                summary.sessions_deleted,
+                summary.events_deleted,
+                summary.artifacts_deleted,
+                summary.conflicts_deleted,
+                summary.cursors_deleted
+            )?,
+            CommandReport::Export(_) => unreachable!("export handled before format selection"),
         },
+    }
+    Ok(())
+}
+
+fn write_findings(writer: &mut impl Write, findings: &[EvidencePacket]) -> io::Result<()> {
+    if findings.is_empty() {
+        writeln!(writer, "no findings above threshold")?;
+    }
+    for finding in findings {
+        writeln!(
+            writer,
+            "{}\t{}\t{} bps\t{} evidence\t{} counterexamples",
+            finding.finding_id,
+            finding.title,
+            finding.score.score_bps,
+            finding.evidence.len(),
+            finding.counterexamples.len()
+        )?;
     }
     Ok(())
 }
@@ -373,7 +637,7 @@ fn write_codex_import_summary(
 ) -> io::Result<()> {
     writeln!(
         writer,
-        "{} files · {} records · {} events · {} inserted · {} duplicates · {} conflicts · {} unsupported · {} rejected{}",
+        "{} files · {} records · {} events · {} inserted · {} duplicates · {} conflicts · {} unsupported · {} privacy excluded · {} redacted fields · {} rejected{}",
         summary.discovery.files.len(),
         summary.records_seen,
         summary.events_emitted,
@@ -381,6 +645,8 @@ fn write_codex_import_summary(
         summary.duplicates,
         summary.conflicts,
         summary.unsupported,
+        summary.privacy_skipped,
+        summary.redacted_fields,
         summary.rejected,
         if summary.dry_run { " · dry run" } else { "" }
     )?;
@@ -410,7 +676,7 @@ fn write_claude_import_summary(
 ) -> io::Result<()> {
     writeln!(
         writer,
-        "{} files · {} records · {} events · {} inserted · {} duplicates · {} conflicts · {} unsupported · {} rejected{}",
+        "{} files · {} records · {} events · {} inserted · {} duplicates · {} conflicts · {} unsupported · {} privacy excluded · {} redacted fields · {} rejected{}",
         summary.discovery.files.len(),
         summary.records_seen,
         summary.events_emitted,
@@ -418,6 +684,8 @@ fn write_claude_import_summary(
         summary.duplicates,
         summary.conflicts,
         summary.unsupported,
+        summary.privacy_skipped,
+        summary.redacted_fields,
         summary.rejected,
         if summary.dry_run { " · dry run" } else { "" }
     )?;
@@ -444,13 +712,15 @@ fn write_claude_import_summary(
 fn write_import_summary(writer: &mut impl Write, summary: &ImportSummary) -> io::Result<()> {
     writeln!(
         writer,
-        "{} lines · {} events · {} inserted · {} duplicates · {} conflicts · {} skipped · {} rejected{}",
+        "{} lines · {} events · {} inserted · {} duplicates · {} conflicts · {} skipped · {} privacy excluded · {} redacted fields · {} rejected{}",
         summary.lines_read,
         summary.events_seen,
         summary.inserted,
         summary.duplicates,
         summary.conflicts,
         summary.skipped,
+        summary.privacy_skipped,
+        summary.redacted_fields,
         summary.rejected,
         if summary.dry_run { " · dry run" } else { "" }
     )?;

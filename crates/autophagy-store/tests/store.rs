@@ -6,8 +6,8 @@ use autophagy_events::{
     Artifact, ArtifactKind, Event, EventId, EventKind, SessionId, SpecVersion, ToolCall,
 };
 use autophagy_store::{
-    DeleteSummary, EventStore, InsertOutcome, SearchProjection, SourceCursor, SourceIdentity,
-    StoreError, StoreStats,
+    DeleteAllSummary, DeleteSummary, EventStore, InsertOutcome, PruneSummary, SearchProjection,
+    SourceCursor, SourceIdentity, StoreError, StoreStats,
 };
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -441,6 +441,80 @@ fn invalid_events_are_rejected_before_storage() {
         store.search("   ", 10),
         Err(StoreError::EmptySearchQuery)
     ));
+}
+
+#[test]
+fn retention_preview_rolls_back_and_delete_all_removes_local_state() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    let source = source("instance-retention");
+    let mut old = tool_failure(
+        "evt_retention-old",
+        "ses_retention-old",
+        "2026-07-01T00:00:00Z",
+        0,
+    );
+    old.artifacts.push(file_artifact("old.log"));
+    store
+        .insert_event(&source, &old, &SearchProjection::default())
+        .expect("old event");
+    store
+        .insert_event(
+            &source,
+            &session_event(
+                "evt_retention-new",
+                "ses_retention-new",
+                EventKind::SessionStarted,
+                "2026-07-15T00:00:00Z",
+                0,
+            ),
+            &SearchProjection::default(),
+        )
+        .expect("new event");
+    store
+        .save_source_cursor(
+            &source,
+            "retention.jsonl",
+            &SourceCursor {
+                byte_offset: 10,
+                line_number: 1,
+                head_hash: [1; 32],
+                state: json!({}),
+            },
+        )
+        .expect("cursor");
+    let cutoff = OffsetDateTime::parse("2026-07-10T00:00:00Z", &Rfc3339).expect("cutoff");
+    assert_eq!(
+        store.prune_before(cutoff, None, true).expect("preview"),
+        PruneSummary {
+            sessions_deleted: 1,
+            events_deleted: 1,
+            artifacts_deleted: 1,
+            dry_run: true,
+        }
+    );
+    assert_eq!(store.stats().expect("stats after preview").events, 2);
+    assert_eq!(
+        store.prune_before(cutoff, None, false).expect("prune"),
+        PruneSummary {
+            sessions_deleted: 1,
+            events_deleted: 1,
+            artifacts_deleted: 1,
+            dry_run: false,
+        }
+    );
+    assert_eq!(store.stats().expect("stats after prune").events, 1);
+    assert_eq!(
+        store.delete_all().expect("delete all"),
+        DeleteAllSummary {
+            sources_deleted: 1,
+            sessions_deleted: 1,
+            events_deleted: 1,
+            artifacts_deleted: 0,
+            conflicts_deleted: 0,
+            cursors_deleted: 1,
+        }
+    );
+    assert_eq!(store.stats().expect("empty stats"), StoreStats::default());
 }
 
 fn source(instance_key: &str) -> SourceIdentity {

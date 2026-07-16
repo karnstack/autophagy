@@ -6,6 +6,7 @@ use std::{
 };
 
 use autophagy_events::Event;
+use autophagy_redaction::{PrivacyError, PrivacyPolicy};
 use autophagy_store::{
     EventStore, InsertOutcome, SearchProjection, SourceCursor, SourceIdentity, StoreError,
 };
@@ -31,6 +32,8 @@ pub struct ClaudeImportOptions {
     pub display_name: Option<String>,
     /// Exact working directories to include; empty includes all.
     pub projects: Vec<String>,
+    /// Glob patterns that exclude matching project or artifact paths.
+    pub exclude_paths: Vec<String>,
     /// Include nested `agent-*.jsonl` transcripts.
     pub include_subagents: bool,
     /// Persist prompt, assistant, and result text in namespaced metadata.
@@ -54,6 +57,7 @@ impl ClaudeImportOptions {
             instance_key: instance_key.into(),
             display_name: None,
             projects: Vec::new(),
+            exclude_paths: Vec::new(),
             include_subagents: false,
             include_content: false,
             index_tool_input: false,
@@ -98,6 +102,10 @@ pub struct ClaudeImportSummary {
     pub conflicts: u64,
     /// Events excluded by project selection.
     pub skipped: u64,
+    /// Events excluded by path privacy policy.
+    pub privacy_skipped: u64,
+    /// String fields changed by default secret redaction.
+    pub redacted_fields: u64,
     /// Structurally valid but unsupported Claude records.
     pub unsupported: u64,
     /// Invalid records or normalization failures.
@@ -135,6 +143,7 @@ pub fn import_claude_code(
     options: &ClaudeImportOptions,
 ) -> Result<ClaudeImportSummary, ClaudeImportError> {
     validate_options(options)?;
+    let privacy = PrivacyPolicy::new(&options.exclude_paths)?;
     if !options.dry_run && store.is_none() {
         return Err(ClaudeImportError::MissingStore);
     }
@@ -157,6 +166,8 @@ pub fn import_claude_code(
         duplicates: 0,
         conflicts: 0,
         skipped: 0,
+        privacy_skipped: 0,
+        redacted_fields: 0,
         unsupported: 0,
         rejected: 0,
         cursor_resets: 0,
@@ -166,7 +177,7 @@ pub fn import_claude_code(
         diagnostics_suppressed: 0,
         dry_run: options.dry_run,
     };
-    let scope = project_scope(&options.projects);
+    let scope = import_scope(&options.projects, &options.exclude_paths);
 
     for discovered in &discovery.files {
         summary.files_read += 1;
@@ -263,6 +274,12 @@ pub fn import_claude_code(
                     summary.skipped += 1;
                     continue;
                 }
+                let outcome = privacy.apply(&event);
+                let Some(event) = outcome.event else {
+                    summary.privacy_skipped += 1;
+                    continue;
+                };
+                summary.redacted_fields += outcome.redacted_fields;
                 if options.dry_run {
                     continue;
                 }
@@ -318,10 +335,17 @@ fn validate_options(options: &ClaudeImportOptions) -> Result<(), ClaudeImportErr
     Ok(())
 }
 
-fn project_scope(projects: &[String]) -> String {
+fn import_scope(projects: &[String], exclude_paths: &[String]) -> String {
     let mut selected = projects.to_vec();
     selected.sort();
-    let digest = Sha256::digest(selected.join("\0").as_bytes());
+    let mut excluded = exclude_paths.to_vec();
+    excluded.sort();
+    let scope = format!(
+        "privacy/v1\0projects\0{}\0exclusions\0{}",
+        selected.join("\0"),
+        excluded.join("\0")
+    );
+    let digest = Sha256::digest(scope.as_bytes());
     let mut encoded = String::with_capacity(digest.len() * 2);
     for byte in digest {
         write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
@@ -407,6 +431,9 @@ pub enum ClaudeImportError {
     /// Database operation failed.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// Privacy policy could not be compiled.
+    #[error(transparent)]
+    Privacy(#[from] PrivacyError),
     /// Cursor JSON could not be encoded.
     #[error("could not serialize Claude Code cursor state: {0}")]
     Json(#[from] serde_json::Error),

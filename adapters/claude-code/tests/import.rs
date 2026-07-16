@@ -119,6 +119,24 @@ fn orphaned_tool_results_are_skipped_without_guessing() {
     assert_eq!(summary.inserted, 1);
 }
 
+#[test]
+fn changing_path_exclusions_uses_an_independent_cursor_scope() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    copy_tree(&fixture_root(), directory.path());
+    let mut store = EventStore::open_in_memory().expect("store");
+    let mut options =
+        ClaudeImportOptions::new(directory.path().to_path_buf(), "fixture:policy-scope");
+    options.exclude_paths = vec!["/workspace/**".to_owned()];
+    let excluded = import_claude_code(Some(&mut store), &options).expect("excluded import");
+    assert_eq!(excluded.inserted, 0);
+    assert_eq!(excluded.privacy_skipped, 8);
+
+    options.exclude_paths.clear();
+    let included = import_claude_code(Some(&mut store), &options).expect("included import");
+    assert_eq!(included.records_seen, 7);
+    assert_eq!(included.inserted, 8);
+}
+
 fn append(path: &Path, value: &str) {
     use std::io::Write;
     let mut file = fs::OpenOptions::new()

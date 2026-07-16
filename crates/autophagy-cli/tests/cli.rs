@@ -42,6 +42,7 @@ fn import_sessions_search_and_reimport_work_end_to_end() {
     assert_eq!(sessions["result"].as_array().expect("sessions").len(), 1);
     assert_eq!(sessions["result"][0]["session_id"], "ses_cli");
     assert_eq!(sessions["result"][0]["event_count"], 2);
+    assert_eq!(sessions["result"][0]["instance_key"], "fixture:cli");
 
     let search = run_json(&database, ["search", "generated"]);
     assert_eq!(search["result"].as_array().expect("hits").len(), 1);
@@ -173,6 +174,130 @@ fn codex_rollouts_import_and_reimport_incrementally() {
             .iter()
             .any(|session| session["adapter"] == "claude-code")
     );
+}
+
+#[test]
+fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    let imported = run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+    assert_eq!(imported["result"]["inserted"], 11);
+
+    let patterns = run_json(&database, ["patterns"]);
+    let findings = patterns["result"].as_array().expect("findings");
+    assert_eq!(findings.len(), 2);
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding["evidence"].as_array().expect("evidence").len() == 3)
+    );
+
+    let digest = run_json(&database, ["digest"]);
+    assert_eq!(digest["result"]["spec_version"], "digest/0.1");
+    assert_eq!(digest["result"]["events_scanned"], 11);
+    assert_eq!(digest["result"]["model_used"], false);
+    assert_eq!(digest["result"]["network_used"], false);
+    assert_eq!(
+        digest["result"]["findings"]
+            .as_array()
+            .expect("findings")
+            .len(),
+        2
+    );
+
+    let exported = command(&database).arg("export").output().expect("export");
+    assert!(exported.status.success());
+    let lines = String::from_utf8(exported.stdout).expect("UTF-8 export");
+    assert_eq!(lines.lines().count(), 11);
+    for line in lines.lines() {
+        autophagy_events::Event::from_json_str(line).expect("valid exported AEP event");
+    }
+
+    let deleted = run_json(&database, ["delete", "session", "ses_failure_1"]);
+    assert_eq!(deleted["result"]["session_deleted"], true);
+    assert_eq!(deleted["result"]["events_deleted"], 1);
+
+    let preview = run_json(&database, ["prune", "--older-than-days", "0", "--dry-run"]);
+    assert_eq!(preview["result"]["events_deleted"], 10);
+    assert_eq!(preview["result"]["dry_run"], true);
+    assert_eq!(
+        run_json(&database, ["sessions"])["result"]
+            .as_array()
+            .expect("sessions")
+            .len(),
+        9
+    );
+
+    let pruned = run_json(&database, ["prune", "--older-than-days", "0"]);
+    assert_eq!(pruned["result"]["events_deleted"], 10);
+    assert_eq!(pruned["result"]["dry_run"], false);
+    assert!(
+        run_json(&database, ["sessions"])["result"]
+            .as_array()
+            .expect("sessions")
+            .is_empty()
+    );
+}
+
+#[test]
+fn import_redacts_secrets_excludes_paths_and_requires_delete_confirmation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let input = directory.path().join("privacy.jsonl");
+    fs::write(&input, concat!(
+        "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_cli_secret\",\"session_id\":\"ses_cli_secret\",\"timestamp\":\"2026-07-16T09:00:00Z\",\"source\":\"generic-jsonl\",\"type\":\"tool.called\",\"project\":\"/repo/public\",\"tool\":{\"name\":\"shell\",\"input\":{\"command\":\"API_KEY=abcdefgh12345678\"}}}\n",
+        "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_cli_private\",\"session_id\":\"ses_cli_private\",\"timestamp\":\"2026-07-16T09:01:00Z\",\"source\":\"generic-jsonl\",\"type\":\"session.started\",\"project\":\"/repo/private/client\"}\n"
+    )).expect("privacy fixture");
+    let imported = run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--exclude-path",
+            "**/private/**",
+        ],
+    );
+    assert_eq!(imported["result"]["inserted"], 1);
+    assert_eq!(imported["result"]["privacy_skipped"], 1);
+    assert_eq!(imported["result"]["redacted_fields"], 1);
+    let sessions = run_json(&database, ["sessions"]);
+    assert!(
+        sessions["result"][0]["instance_key"]
+            .as_str()
+            .expect("instance key")
+            .starts_with("path:")
+    );
+    assert!(
+        !sessions["result"][0]["instance_key"]
+            .as_str()
+            .expect("instance key")
+            .contains(directory.path().to_str().expect("path"))
+    );
+
+    let exported = command(&database).arg("export").output().expect("export");
+    let exported = String::from_utf8(exported.stdout).expect("UTF-8");
+    assert!(exported.contains("[REDACTED]"));
+    assert!(!exported.contains("abcdefgh12345678"));
+    assert!(!exported.contains("evt_cli_private"));
+
+    let refused = command(&database)
+        .args(["delete", "all", "--confirm", "nope"])
+        .output()
+        .expect("refused delete");
+    assert!(!refused.status.success());
+    assert_eq!(
+        run_json(&database, ["sessions"])["result"]
+            .as_array()
+            .expect("sessions")
+            .len(),
+        1
+    );
+
+    let deleted = run_json(&database, ["delete", "all", "--confirm", "delete-all"]);
+    assert_eq!(deleted["result"]["events_deleted"], 1);
+    assert_eq!(deleted["result"]["sessions_deleted"], 1);
 }
 
 fn run_json<const N: usize>(database: &Path, args: [&str; N]) -> Value {

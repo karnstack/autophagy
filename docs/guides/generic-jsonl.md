@@ -21,8 +21,10 @@ autophagy --output json import sessions.jsonl --dry-run
 
 ## Import a file
 
-Give each persisted input or producer a stable instance key. Reimporting the
-same events is safe and reports duplicates without changing canonical rows.
+Give each persisted input or producer a stable instance key. When omitted, the
+CLI stores an opaque hash of the canonical input path rather than the path
+itself. Reimporting the same events is safe and reports duplicates without
+changing canonical rows.
 
 ```sh
 autophagy import sessions.jsonl \
@@ -38,6 +40,10 @@ autophagy import sessions.jsonl \
   --project /work/service-a \
   --project /work/service-b
 ```
+
+Every selected event passes through default secret redaction before persistence.
+Use repeatable `--exclude-path GLOB` values to drop events whose project or
+artifact path matches. Exclusion happens before SQLite and FTS writes.
 
 Use `-` or omit the file to read standard input:
 
@@ -77,8 +83,8 @@ autophagy --output json search stale
 ```
 
 JSON output is a tagged object with `command` and `result` fields. Import
-results include line, event, insertion, duplicate, conflict, project-skip, and
-rejection counts plus bounded diagnostics.
+results include line, event, insertion, duplicate, conflict, project-skip,
+privacy-skip, redacted-field, and rejection counts plus bounded diagnostics.
 
 ## Exit codes
 
