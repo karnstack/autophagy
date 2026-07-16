@@ -598,6 +598,56 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
 }
 
 #[test]
+fn recovery_motif_is_detected_and_registered_end_to_end() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/recovery-motif.jsonl");
+    let imported = run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+    assert_eq!(imported["result"]["inserted"], 11);
+
+    let patterns = run_json(&database, ["patterns"]);
+    let recovery = patterns["result"]
+        .as_array()
+        .expect("patterns")
+        .iter()
+        .find(|finding| finding["detector"] == "repeated_successful_recovery")
+        .expect("recovery finding");
+    assert_eq!(recovery["score"]["occurrences"], 3);
+    assert_eq!(recovery["evidence"].as_array().expect("evidence").len(), 9);
+    assert_eq!(
+        recovery["counterexamples"]
+            .as_array()
+            .expect("counterexamples")
+            .len(),
+        2
+    );
+
+    let proposed = run_json(&database, ["mutations", "propose"]);
+    let recovery = proposed["result"]["generated"]
+        .as_array()
+        .expect("generated")
+        .iter()
+        .find(|outcome| outcome["package"]["source_detector"] == "repeated_successful_recovery")
+        .expect("recovery candidate");
+    assert_eq!(recovery["status"], "candidate");
+    assert!(
+        recovery["package"]["intervention"]["instruction"]
+            .as_str()
+            .expect("instruction")
+            .contains("mise run codegen")
+    );
+    assert_eq!(recovery["package"]["permissions"]["network"], false);
+    assert!(
+        proposed["result"]["registrations"]
+            .as_array()
+            .expect("registrations")
+            .iter()
+            .any(|registration| registration["status"] == "inserted")
+    );
+}
+
+#[test]
 fn import_redacts_secrets_excludes_paths_and_requires_delete_confirmation() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let database = directory.path().join("autophagy.db");

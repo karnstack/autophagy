@@ -46,6 +46,26 @@ signature and an explicit `followed`, `accepted`, or `complied` outcome is a
 counterexample. Unclassified corrections remain available as evidence but do
 not produce a potentially misleading finding.
 
+## Repeated successful recovery
+
+The recovery detector looks for an exact sequence within one session:
+
+```text
+target command fails -> different command succeeds -> target command succeeds
+```
+
+It groups the same normalized target command, failure exit code, and successful
+recovery command across sessions. The last different successful operation
+before the target recovers is the proposed direct recovery step. A target that
+succeeds on direct retry without an intervening operation is an explicit
+counterexample.
+
+One composite sequence counts as one occurrence for recurrence scoring. Its
+Evidence Packet still cites all three AEP events, so `score.occurrences` can be
+smaller than `evidence.length`. Counterexamples likewise count sequences while
+retaining both failure and success event IDs. This avoids score inflation while
+preserving full lineage.
+
 ## Evaluation corpus
 
 The anonymized corpus at
@@ -53,3 +73,7 @@ The anonymized corpus at
 contains both supported patterns and counterexamples. Contract tests prove that
 it emits exactly two stable packets regardless of input order, while a threshold
 above its recurrence count emits none.
+
+[`evals/fixtures/findings/recovery-motif.jsonl`](../../evals/fixtures/findings/recovery-motif.jsonl)
+contains three independent recovery sequences plus one direct-retry
+counterexample.

@@ -18,6 +18,8 @@ pub enum DetectorKind {
     RepeatedCommandFailure,
     /// The same explicitly classified user correction recurred.
     RepeatedUserCorrection,
+    /// The same successful recovery step recurred between failure and success.
+    RepeatedSuccessfulRecovery,
 }
 
 impl DetectorKind {
@@ -27,6 +29,7 @@ impl DetectorKind {
         match self {
             Self::RepeatedCommandFailure => "repeated_command_failure",
             Self::RepeatedUserCorrection => "repeated_user_correction",
+            Self::RepeatedSuccessfulRecovery => "repeated_successful_recovery",
         }
     }
 }

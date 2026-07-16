@@ -10,6 +10,7 @@ use autophagy_patterns::{DetectorConfig, detect};
 use autophagy_store::EventStore;
 
 const CORPUS: &str = include_str!("../../../evals/fixtures/findings/deterministic.jsonl");
+const RECOVERY_CORPUS: &str = include_str!("../../../evals/fixtures/findings/recovery-motif.jsonl");
 
 #[test]
 fn findings_generate_stable_zero_permission_candidates() {
@@ -74,12 +75,55 @@ fn validation_rejects_permissions_and_non_candidate_packages() {
     assert!(codes.contains(&"excessive"));
 }
 
+#[test]
+fn recovery_motif_generates_a_conservative_preflight_candidate() {
+    let finding = fixture_recovery_findings()
+        .into_iter()
+        .find(|finding| {
+            finding.detector == autophagy_patterns::DetectorKind::RepeatedSuccessfulRecovery
+        })
+        .expect("recovery finding");
+    let GenerationOutcome::Candidate { package } = generate_candidate(&finding) else {
+        panic!("recovery candidate")
+    };
+    package.validate().expect("valid package");
+    assert!(package.title.starts_with("Reuse successful recovery"));
+    assert_eq!(package.hypothesis.supporting_event_ids.len(), 9);
+    assert_eq!(package.hypothesis.counterexample_event_ids.len(), 2);
+    assert!(
+        package
+            .intervention
+            .instruction
+            .contains("mise run codegen")
+    );
+    assert!(package.intervention.instruction.contains("otherwise leave"));
+    assert!(package.permissions.commands.is_empty());
+
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/specs/mutation/0.1/schema.json"))
+            .expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    let instance = serde_json::to_value(package).expect("package JSON");
+    assert!(validator.is_valid(&instance), "schema rejected {instance}");
+}
+
 fn fixture_findings() -> Vec<autophagy_patterns::EvidencePacket> {
+    fixture_findings_from(CORPUS, "fixture:mutations")
+}
+
+fn fixture_recovery_findings() -> Vec<autophagy_patterns::EvidencePacket> {
+    fixture_findings_from(RECOVERY_CORPUS, "fixture:recovery-mutations")
+}
+
+fn fixture_findings_from(
+    corpus: &str,
+    instance_key: &str,
+) -> Vec<autophagy_patterns::EvidencePacket> {
     let mut store = EventStore::open_in_memory().expect("store");
     import_jsonl(
-        Cursor::new(CORPUS),
+        Cursor::new(corpus),
         Some(&mut store),
-        &ImportOptions::new("fixture:mutations"),
+        &ImportOptions::new(instance_key),
     )
     .expect("import");
     detect(

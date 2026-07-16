@@ -20,6 +20,9 @@ uninstall a zero-permission instruction as a repo-scoped Codex skill. No daemon,
 executable replay, autonomous installation, global skill writes, or background
 capture ships yet.
 
+Alpha expansion adds a third deterministic family: repeated successful recovery
+motifs with direct-retry counterexamples and conservative preflight candidates.
+
 ## Principles
 
 - Local-first and offline by default
@@ -112,9 +115,9 @@ the versioned Evidence Packet contract.
 mise run demo
 ```
 
-The demo imports anonymized evidence, emits two deterministic patterns with
+The demo imports anonymized evidence, emits three deterministic patterns with
 exact evidence IDs, produces a digest that confirms no model or network was
-used, registers two zero-permission mutation candidates, challenges one, runs
+used, registers zero-permission mutation candidates, challenges one, runs
 replay and shadow evaluation, installs a repo-scoped Codex skill, uninstalls it,
 and previews retention deletion. Its temporary data is removed on exit.
 

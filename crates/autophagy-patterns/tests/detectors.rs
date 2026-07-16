@@ -3,10 +3,12 @@
 use std::io::Cursor;
 
 use autophagy_core::{ImportOptions, import_jsonl};
+use autophagy_events::SessionId;
 use autophagy_patterns::{DetectorConfig, DetectorKind, detect};
 use autophagy_store::EventStore;
 
 const CORPUS: &str = include_str!("../../../evals/fixtures/findings/deterministic.jsonl");
+const RECOVERY_CORPUS: &str = include_str!("../../../evals/fixtures/findings/recovery-motif.jsonl");
 
 #[test]
 fn demo_corpus_produces_two_stable_evidence_linked_findings() {
@@ -88,5 +90,50 @@ fn exact_project_selection_limits_detector_input() {
             .list_events_for_detection(Some("/workspace/other"))
             .expect("excluded")
             .is_empty()
+    );
+}
+
+#[test]
+fn repeated_successful_recovery_preserves_composite_lineage() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    import_jsonl(
+        Cursor::new(RECOVERY_CORPUS),
+        Some(&mut store),
+        &ImportOptions::new("fixture:recovery-motif"),
+    )
+    .expect("import");
+    let events = store.list_events_for_detection(None).expect("events");
+    let findings = detect(&events, DetectorConfig::default());
+    let recovery = findings
+        .iter()
+        .find(|finding| finding.detector == DetectorKind::RepeatedSuccessfulRecovery)
+        .expect("recovery finding");
+    assert_eq!(recovery.score.occurrences, 3);
+    assert_eq!(recovery.score.distinct_sessions, 3);
+    assert_eq!(recovery.score.counterexamples, 1);
+    assert_eq!(recovery.evidence.len(), 9);
+    assert_eq!(recovery.counterexamples.len(), 2);
+    assert_eq!(
+        recovery.signature,
+        "recovery/v1|shell|mise run check|exit:1|via|shell|mise run codegen"
+    );
+    assert!(
+        recovery
+            .evidence
+            .iter()
+            .any(|reference| reference.event_id == "evt_recovery_a_step")
+    );
+    let mut reversed = events.clone();
+    reversed.reverse();
+    assert_eq!(findings, detect(&reversed, DetectorConfig::default()));
+
+    let mut one_session = events;
+    for event in &mut one_session {
+        event.session_id = SessionId::new("ses_one_recovery_session");
+    }
+    assert!(
+        detect(&one_session, DetectorConfig::default())
+            .iter()
+            .all(|finding| finding.detector != DetectorKind::RepeatedSuccessfulRecovery)
     );
 }
