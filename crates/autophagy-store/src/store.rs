@@ -4,8 +4,8 @@ use autophagy_events::{Event, EventKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
-    DeleteSummary, InsertOutcome, SearchHit, SearchProjection, SessionSummary, SourceIdentity,
-    StoreError, StoreStats, migration, util,
+    DeleteSummary, InsertOutcome, SearchHit, SearchProjection, SessionSummary, SourceCursor,
+    SourceIdentity, StoreError, StoreStats, migration, util,
 };
 
 /// Transactional owner of one local Autophagy `SQLite` database.
@@ -45,6 +45,105 @@ impl EventStore {
             [],
             |row| row.get(0),
         )?)
+    }
+
+    /// Load an adapter's durable cursor for one source origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for invalid source identity, blank origin,
+    /// corrupt persisted state, or a database failure.
+    pub fn get_source_cursor(
+        &self,
+        source: &SourceIdentity,
+        origin: &str,
+    ) -> Result<Option<SourceCursor>, StoreError> {
+        validate_source(source)?;
+        validate_cursor_origin(origin)?;
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT byte_offset, line_number, head_hash, state_json
+                 FROM source_cursors
+                 WHERE adapter = ?1 AND instance_key = ?2 AND origin = ?3",
+                params![source.adapter, source.instance_key, origin],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((byte_offset, line_number, head_hash, state_json)) = stored else {
+            return Ok(None);
+        };
+        let head_hash: [u8; 32] = head_hash
+            .try_into()
+            .map_err(|_| StoreError::CorruptCursor { field: "head_hash" })?;
+        Ok(Some(SourceCursor {
+            byte_offset: u64::try_from(byte_offset).map_err(|_| StoreError::CorruptCursor {
+                field: "byte_offset",
+            })?,
+            line_number: u64::try_from(line_number).map_err(|_| StoreError::CorruptCursor {
+                field: "line_number",
+            })?,
+            head_hash,
+            state: serde_json::from_str(&state_json)?,
+        }))
+    }
+
+    /// Atomically create or replace an adapter's durable cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] for invalid identity or cursor values,
+    /// serialization failure, or a database failure.
+    pub fn save_source_cursor(
+        &self,
+        source: &SourceIdentity,
+        origin: &str,
+        cursor: &SourceCursor,
+    ) -> Result<(), StoreError> {
+        validate_source(source)?;
+        validate_cursor_origin(origin)?;
+        let byte_offset =
+            i64::try_from(cursor.byte_offset).map_err(|_| StoreError::CursorOutOfRange {
+                field: "byte_offset",
+                value: cursor.byte_offset,
+            })?;
+        let line_number =
+            i64::try_from(cursor.line_number).map_err(|_| StoreError::CursorOutOfRange {
+                field: "line_number",
+                value: cursor.line_number,
+            })?;
+        let state_json = serde_json::to_string(&cursor.state)?;
+        let updated_at = util::now_timestamp()?;
+        self.connection.execute(
+            "INSERT INTO source_cursors(
+                adapter, instance_key, origin, byte_offset, line_number,
+                head_hash, state_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(adapter, instance_key, origin) DO UPDATE SET
+                byte_offset = excluded.byte_offset,
+                line_number = excluded.line_number,
+                head_hash = excluded.head_hash,
+                state_json = excluded.state_json,
+                updated_at = excluded.updated_at",
+            params![
+                source.adapter,
+                source.instance_key,
+                origin,
+                byte_offset,
+                line_number,
+                cursor.head_hash.as_slice(),
+                state_json,
+                updated_at,
+            ],
+        )?;
+        Ok(())
     }
 
     /// Atomically validate and persist one normalized event.
@@ -412,6 +511,14 @@ fn validate_source(source: &SourceIdentity) -> Result<(), StoreError> {
         });
     }
     Ok(())
+}
+
+fn validate_cursor_origin(origin: &str) -> Result<(), StoreError> {
+    if origin.trim().is_empty() {
+        Err(StoreError::InvalidCursorOrigin)
+    } else {
+        Ok(())
+    }
 }
 
 fn persisted_tool_input(event: &Event) -> Result<Option<String>, serde_json::Error> {

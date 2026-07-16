@@ -6,8 +6,8 @@ use autophagy_events::{
     Artifact, ArtifactKind, Event, EventId, EventKind, SessionId, SpecVersion, ToolCall,
 };
 use autophagy_store::{
-    DeleteSummary, EventStore, InsertOutcome, SearchProjection, SourceIdentity, StoreError,
-    StoreStats,
+    DeleteSummary, EventStore, InsertOutcome, SearchProjection, SourceCursor, SourceIdentity,
+    StoreError, StoreStats,
 };
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -27,7 +27,7 @@ fn migrations_persist_and_reopen_cleanly() {
 
     {
         let mut store = EventStore::open(&database).expect("store should open");
-        assert_eq!(store.schema_version().expect("schema version"), 1);
+        assert_eq!(store.schema_version().expect("schema version"), 2);
         assert!(matches!(
             store
                 .insert_event(&source, &event, &SearchProjection::default())
@@ -37,13 +37,57 @@ fn migrations_persist_and_reopen_cleanly() {
     }
 
     let reopened = EventStore::open(&database).expect("store should reopen");
-    assert_eq!(reopened.schema_version().expect("schema version"), 1);
+    assert_eq!(reopened.schema_version().expect("schema version"), 2);
     assert_eq!(
         reopened
             .get_event(event.event_id.as_str())
             .expect("event query"),
         Some(event)
     );
+}
+
+#[test]
+fn source_cursors_round_trip_and_update() {
+    let store = EventStore::open_in_memory().expect("store");
+    let source = source("instance-cursor");
+    assert_eq!(
+        store
+            .get_source_cursor(&source, "project/session.jsonl")
+            .expect("missing cursor"),
+        None
+    );
+
+    let mut cursor = SourceCursor {
+        byte_offset: 120,
+        line_number: 3,
+        head_hash: [7; 32],
+        state: json!({"pending": {"tool-1": "bash"}}),
+    };
+    store
+        .save_source_cursor(&source, "project/session.jsonl", &cursor)
+        .expect("save cursor");
+    assert_eq!(
+        store
+            .get_source_cursor(&source, "project/session.jsonl")
+            .expect("load cursor"),
+        Some(cursor.clone())
+    );
+
+    cursor.byte_offset = 240;
+    cursor.line_number = 6;
+    store
+        .save_source_cursor(&source, "project/session.jsonl", &cursor)
+        .expect("update cursor");
+    assert_eq!(
+        store
+            .get_source_cursor(&source, "project/session.jsonl")
+            .expect("load updated cursor"),
+        Some(cursor)
+    );
+    assert!(matches!(
+        store.get_source_cursor(&source, "  "),
+        Err(StoreError::InvalidCursorOrigin)
+    ));
 }
 
 #[test]
