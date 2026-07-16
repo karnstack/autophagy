@@ -45,6 +45,8 @@ prepared; the workspace version is `0.1.0-alpha.1` and nothing is published yet.
 ```text
 adapters/claude-code/      Native transcript discovery and AEP normalization
 adapters/codex/            Schema-tolerant Codex rollout normalization
+adapters/opencode/         Schema-tolerant OpenCode session-storage normalization
+adapters/pi/               Schema-tolerant Pi session transcript normalization
 apps/macos/                Native read-only SwiftUI database inspector
 crates/autophagy-adapter-test-support/  Shared native-adapter conformance checks
 crates/autophagy-cli/      User-facing import, sessions, and search commands

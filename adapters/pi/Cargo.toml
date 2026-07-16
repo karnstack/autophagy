@@ -1,0 +1,27 @@
+[package]
+name = "autophagy-adapter-pi"
+description = "Incremental Pi coding-agent session adapter for Autophagy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+autophagy-events = { path = "../../crates/autophagy-events" }
+autophagy-redaction = { path = "../../crates/autophagy-redaction" }
+autophagy-store = { path = "../../crates/autophagy-store" }
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+autophagy-adapter-test-support = { path = "../../crates/autophagy-adapter-test-support" }
+tempfile = "3.27"
+
+[lints]
+workspace = true

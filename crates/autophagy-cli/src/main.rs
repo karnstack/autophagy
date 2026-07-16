@@ -15,6 +15,12 @@ use autophagy_adapter_claude_code::{
 use autophagy_adapter_codex::{
     CodexImportOptions, CodexImportSummary, default_sessions_root, import_codex,
 };
+use autophagy_adapter_opencode::{
+    OpenCodeImportOptions, OpenCodeImportSummary, default_storage_root, import_opencode,
+};
+use autophagy_adapter_pi::{
+    PiImportOptions, PiImportSummary, default_sessions_root as default_pi_sessions_root, import_pi,
+};
 use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
 use autophagy_events::Event;
 use autophagy_install::{
@@ -78,6 +84,8 @@ enum ImportAdapter {
     GenericJsonl,
     ClaudeCode,
     Codex,
+    Pi,
+    Opencode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -573,6 +581,8 @@ enum ImportReport {
     Generic(ImportSummary),
     ClaudeCode(ClaudeImportSummary),
     Codex(CodexImportSummary),
+    Pi(PiImportSummary),
+    Opencode(OpenCodeImportSummary),
 }
 
 impl ImportReport {
@@ -581,6 +591,8 @@ impl ImportReport {
             Self::Generic(summary) => summary.has_issues(),
             Self::ClaudeCode(summary) => summary.has_issues(),
             Self::Codex(summary) => summary.has_issues(),
+            Self::Pi(summary) => summary.has_issues(),
+            Self::Opencode(summary) => summary.has_issues(),
         }
     }
 }
@@ -627,6 +639,14 @@ enum CliError {
     CodexImport(#[from] autophagy_adapter_codex::CodexImportError),
     #[error(transparent)]
     CodexDiscovery(#[from] autophagy_adapter_codex::CodexDiscoveryError),
+    #[error(transparent)]
+    PiImport(#[from] autophagy_adapter_pi::PiImportError),
+    #[error(transparent)]
+    PiDiscovery(#[from] autophagy_adapter_pi::PiDiscoveryError),
+    #[error(transparent)]
+    OpenCodeImport(#[from] autophagy_adapter_opencode::OpenCodeImportError),
+    #[error(transparent)]
+    OpenCodeDiscovery(#[from] autophagy_adapter_opencode::OpenCodeDiscoveryError),
     #[error("could not serialize command output: {0}")]
     Json(#[from] serde_json::Error),
     #[error("could not determine the platform-local application data directory")]
@@ -763,6 +783,56 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
                     import_codex(Some(&mut store), &options)?
                 };
                 Ok(CommandReport::Import(ImportReport::Codex(summary)))
+            }
+            ImportAdapter::Pi => {
+                let input = if input == Path::new("-") {
+                    default_pi_sessions_root()?
+                } else {
+                    input
+                };
+                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                let mut options = PiImportOptions::new(input, instance_key);
+                options.display_name = display_name;
+                options.projects = projects;
+                options.exclude_paths = exclude_paths;
+                options.include_content = include_content;
+                options.index_tool_input = index_tool_input;
+                options.index_metadata = index_metadata;
+                options.dry_run = dry_run;
+                options.max_diagnostics = max_diagnostics;
+                let summary = if dry_run {
+                    import_pi(None, &options)?
+                } else {
+                    let database = resolve_database_path(cli.database)?;
+                    let mut store = open_store(&database)?;
+                    import_pi(Some(&mut store), &options)?
+                };
+                Ok(CommandReport::Import(ImportReport::Pi(summary)))
+            }
+            ImportAdapter::Opencode => {
+                let input = if input == Path::new("-") {
+                    default_storage_root()?
+                } else {
+                    input
+                };
+                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                let mut options = OpenCodeImportOptions::new(input, instance_key);
+                options.display_name = display_name;
+                options.projects = projects;
+                options.exclude_paths = exclude_paths;
+                options.include_content = include_content;
+                options.index_tool_input = index_tool_input;
+                options.index_metadata = index_metadata;
+                options.dry_run = dry_run;
+                options.max_diagnostics = max_diagnostics;
+                let summary = if dry_run {
+                    import_opencode(None, &options)?
+                } else {
+                    let database = resolve_database_path(cli.database)?;
+                    let mut store = open_store(&database)?;
+                    import_opencode(Some(&mut store), &options)?
+                };
+                Ok(CommandReport::Import(ImportReport::Opencode(summary)))
             }
         },
         Commands::Sessions { limit } => {
@@ -1294,6 +1364,10 @@ fn write_report(
                     write_claude_import_summary(&mut writer, summary)?;
                 }
                 ImportReport::Codex(summary) => write_codex_import_summary(&mut writer, summary)?,
+                ImportReport::Pi(summary) => write_pi_import_summary(&mut writer, summary)?,
+                ImportReport::Opencode(summary) => {
+                    write_opencode_import_summary(&mut writer, summary)?;
+                }
             },
             CommandReport::Sessions(sessions) => {
                 writeln!(writer, "SESSION\tSOURCE\tEVENTS\tLAST EVENT\tPROJECT")?;
@@ -1628,6 +1702,86 @@ fn write_codex_import_summary(
             writer,
             "{}:{} [{}] {}",
             diagnostic.file, diagnostic.line, diagnostic.code, diagnostic.message
+        )?;
+    }
+    if summary.diagnostics_suppressed > 0 {
+        writeln!(
+            writer,
+            "{} additional diagnostics suppressed",
+            summary.diagnostics_suppressed
+        )?;
+    }
+    Ok(())
+}
+
+fn write_pi_import_summary(writer: &mut impl Write, summary: &PiImportSummary) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{} files · {} records · {} events · {} inserted · {} duplicates · {} conflicts · {} unsupported · {} privacy excluded · {} redacted fields · {} rejected{}",
+        summary.discovery.files.len(),
+        summary.records_seen,
+        summary.events_emitted,
+        summary.inserted,
+        summary.duplicates,
+        summary.conflicts,
+        summary.unsupported,
+        summary.privacy_skipped,
+        summary.redacted_fields,
+        summary.rejected,
+        if summary.dry_run { " · dry run" } else { "" }
+    )?;
+    for file in &summary.discovery.files {
+        writeln!(writer, "{}\t{} bytes", file.relative_path, file.size_bytes)?;
+    }
+    for diagnostic in &summary.diagnostics {
+        writeln!(
+            writer,
+            "{}:{} [{}] {}",
+            diagnostic.file, diagnostic.line, diagnostic.code, diagnostic.message
+        )?;
+    }
+    if summary.diagnostics_suppressed > 0 {
+        writeln!(
+            writer,
+            "{} additional diagnostics suppressed",
+            summary.diagnostics_suppressed
+        )?;
+    }
+    Ok(())
+}
+
+fn write_opencode_import_summary(
+    writer: &mut impl Write,
+    summary: &OpenCodeImportSummary,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{} sessions · {} messages · {} parts · {} events · {} inserted · {} duplicates · {} conflicts · {} unsupported · {} privacy excluded · {} redacted fields · {} rejected{}",
+        summary.discovery.sessions.len(),
+        summary.records_seen,
+        summary.parts_seen,
+        summary.events_emitted,
+        summary.inserted,
+        summary.duplicates,
+        summary.conflicts,
+        summary.unsupported,
+        summary.privacy_skipped,
+        summary.redacted_fields,
+        summary.rejected,
+        if summary.dry_run { " · dry run" } else { "" }
+    )?;
+    for session in &summary.discovery.sessions {
+        writeln!(
+            writer,
+            "{}\t{} messages\t{} bytes",
+            session.relative_path, session.message_count, session.size_bytes
+        )?;
+    }
+    for diagnostic in &summary.diagnostics {
+        writeln!(
+            writer,
+            "{} [{}] {}",
+            diagnostic.file, diagnostic.code, diagnostic.message
         )?;
     }
     if summary.diagnostics_suppressed > 0 {
