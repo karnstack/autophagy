@@ -1,0 +1,11 @@
+{
+  "spec_version": "synthesis-manifest/0.1",
+  "name": "deterministic-reference",
+  "format": "deterministic",
+  "path": "builtin://deterministic",
+  "revision": "v1",
+  "capabilities": ["mutation_synthesis"],
+  "resource_hints": {
+    "min_memory_mb": 1
+  }
+}

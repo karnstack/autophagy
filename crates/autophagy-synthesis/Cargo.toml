@@ -1,0 +1,25 @@
+[package]
+name = "autophagy-synthesis"
+description = "Provider-neutral, contract-bound local synthesis boundary for Autophagy mutations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+autophagy-mutations = { path = "../autophagy-mutations" }
+autophagy-patterns = { path = "../autophagy-patterns" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+autophagy-core = { path = "../autophagy-core" }
+autophagy-store = { path = "../autophagy-store" }
+jsonschema = { version = "0.47", default-features = false }
+tempfile = "3.27"
+
+[lints]
+workspace = true

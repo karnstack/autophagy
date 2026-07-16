@@ -1,0 +1,23 @@
+{
+  "title": "Prevent repeated `cargo build` failure",
+  "statement": "The recurring `cargo build` failure is caused or amplified by missing preconditions or unchanged retries.",
+  "expected_result": "Matching `cargo build` attempts avoid repeated exit-code-101 failures without blocking valid executions.",
+  "instruction": "Before running `cargo build`, verify its required preconditions. If it fails with exit code 101, do not retry it unchanged; inspect the failure and change the hypothesis or inputs first.",
+  "failure_cases": [
+    "The command can fail transiently even when all preconditions are satisfied.",
+    "The advisory could interrupt a legitimate immediate retry."
+  ],
+  "exclusions": [
+    "Do not block execution; this candidate is advisory until replay and shadow evaluation pass."
+  ],
+  "supporting_event_ids": ["evt_build_a", "evt_build_b", "evt_build_c"],
+  "counterexample_event_ids": ["evt_build_ok"],
+  "trigger_selectors": ["failure/v1|shell|cargo build|exit:101"],
+  "permissions": {
+    "filesystem_read": [],
+    "filesystem_write": [],
+    "commands": [],
+    "environment": [],
+    "network": false
+  }
+}

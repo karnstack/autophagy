@@ -1,0 +1,19 @@
+{
+  "title": "Prevent repeated `cargo build` failure",
+  "statement": "The recurring `cargo build` failure is caused by missing preconditions.",
+  "expected_result": "Matching attempts avoid repeated failures.",
+  "instruction": "Before running `cargo build`, verify its preconditions.",
+  "failure_cases": ["The command can fail transiently."],
+  "exclusions": [],
+  "supporting_event_ids": ["evt_build_a", "evt_build_b"],
+  "counterexample_event_ids": [],
+  "trigger_selectors": ["failure/v1|shell|cargo build|exit:101"],
+  "confidence": 0.92,
+  "permissions": {
+    "filesystem_read": [],
+    "filesystem_write": [],
+    "commands": [],
+    "environment": [],
+    "network": false
+  }
+}

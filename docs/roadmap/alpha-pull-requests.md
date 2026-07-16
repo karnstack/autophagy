@@ -37,6 +37,8 @@ Exit: evidence and prior recoveries can be recalled predictably without a model.
 
 ## PR 4 — Local synthesis boundary
 
+Status: complete.
+
 - provider-neutral structured synthesis interface
 - local model manifest and explicit insufficient-evidence behavior
 - deterministic validation around all generated package fields

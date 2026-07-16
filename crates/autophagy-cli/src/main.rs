@@ -36,6 +36,10 @@ use autophagy_store::{
     ReplayRegistration, RetrievalHit, RetrievalOutcome, RetrievalQuery, SessionSummary,
     ShadowRegisterOutcome, ShadowRegistration, StoreError,
 };
+use autophagy_synthesis::{
+    DeterministicReferenceProvider, ManifestError, ModelManifest, SynthesisOutcome,
+    SynthesisProvider, synthesize_candidates,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
 use serde::Serialize;
@@ -292,6 +296,27 @@ enum MutationAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Synthesize candidates through a provider-neutral, contract-bound boundary.
+    Synthesize {
+        /// Synthesis provider to consult.
+        #[arg(long, value_enum, default_value_t = SynthesisProviderChoice::Deterministic)]
+        provider: SynthesisProviderChoice,
+
+        /// Local model manifest (synthesis-manifest/0.1) JSON file.
+        #[arg(long, value_name = "PATH")]
+        manifest: PathBuf,
+
+        /// Limit synthesis to one exact project path.
+        #[arg(long, value_name = "PATH")]
+        project: Option<String>,
+
+        #[command(flatten)]
+        thresholds: ThresholdArgs,
+
+        /// Synthesize packages without changing the registry.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// List all registered candidates and their current state.
     List,
     /// Show one immutable package and its complete lifecycle audit.
@@ -380,6 +405,13 @@ enum MutationAction {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum SynthesisProviderChoice {
+    /// Built-in pure, model-free, offline reference provider.
+    Deterministic,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 enum ChallengeCheck {
@@ -412,6 +444,8 @@ enum CommandReport {
     Patterns(Vec<EvidencePacket>),
     #[serde(rename = "mutations_propose")]
     MutationProposal(MutationProposalReport),
+    #[serde(rename = "mutations_synthesize")]
+    MutationSynthesis(MutationSynthesisReport),
     #[serde(rename = "mutations_list")]
     MutationList(Vec<MutationRecord>),
     #[serde(rename = "mutations_show")]
@@ -448,6 +482,18 @@ struct DigestReport {
 struct MutationProposalReport {
     dry_run: bool,
     generated: Vec<GenerationOutcome>,
+    registrations: Vec<MutationRegisterOutcome>,
+}
+
+#[derive(Debug, Serialize)]
+struct MutationSynthesisReport {
+    dry_run: bool,
+    provider: String,
+    model: String,
+    model_used: bool,
+    network_used: bool,
+    manifest_path: String,
+    synthesized: Vec<SynthesisOutcome>,
     registrations: Vec<MutationRegisterOutcome>,
 }
 
@@ -525,6 +571,7 @@ impl CommandReport {
             | Self::Digest(_)
             | Self::Patterns(_)
             | Self::MutationProposal(_)
+            | Self::MutationSynthesis(_)
             | Self::MutationList(_)
             | Self::MutationShow(_)
             | Self::MutationTransition(_)
@@ -573,6 +620,8 @@ enum CliError {
     Shadow(#[from] ShadowEvaluationError),
     #[error(transparent)]
     Install(#[from] InstallError),
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
     #[error("replay scenario cites event '{0}', which is not in the local evidence store")]
     MissingReplayEvidence(String),
     #[error("shadow observation cites event '{0}', which is not in the local evidence store")]
@@ -828,6 +877,56 @@ fn execute_mutation_action(
             Ok(CommandReport::MutationProposal(MutationProposalReport {
                 dry_run,
                 generated,
+                registrations,
+            }))
+        }
+        MutationAction::Synthesize {
+            provider,
+            manifest,
+            project,
+            thresholds,
+            dry_run,
+        } => {
+            let manifest_path = manifest.display().to_string();
+            let model_manifest = ModelManifest::from_path(&manifest)?;
+            let synthesis_provider: Box<dyn SynthesisProvider> = match provider {
+                SynthesisProviderChoice::Deterministic => Box::new(DeterministicReferenceProvider),
+            };
+            let events = store.list_events_for_detection(project.as_deref())?;
+            let findings = detect(&events, thresholds.into());
+            let synthesized =
+                synthesize_candidates(&findings, &model_manifest, synthesis_provider.as_ref());
+            let mut registrations = Vec::new();
+            if !dry_run {
+                for outcome in &synthesized {
+                    let SynthesisOutcome::Candidate { package, .. } = outcome else {
+                        continue;
+                    };
+                    let registration = MutationRegistration {
+                        mutation_id: package.mutation_id.clone(),
+                        source_finding_id: package.source_finding_id.clone(),
+                        source_detector: package.source_detector.as_str().to_owned(),
+                        equivalence_key: equivalence_key(package),
+                        spec_version: package.spec_version.as_str().to_owned(),
+                        semantic_version: package.version.clone(),
+                        package: serde_json::to_value(package)?,
+                        supporting_event_ids: package.hypothesis.supporting_event_ids.clone(),
+                        counterexample_event_ids: package
+                            .hypothesis
+                            .counterexample_event_ids
+                            .clone(),
+                    };
+                    registrations.push(store.register_mutation(&registration)?);
+                }
+            }
+            Ok(CommandReport::MutationSynthesis(MutationSynthesisReport {
+                dry_run,
+                provider: synthesis_provider.name().to_owned(),
+                model: model_manifest.name.clone(),
+                model_used: synthesis_provider.uses_model(),
+                network_used: synthesis_provider.uses_network(),
+                manifest_path,
+                synthesized,
                 registrations,
             }))
         }
@@ -1213,6 +1312,9 @@ fn write_report(
             CommandReport::MutationProposal(report) => {
                 write_mutation_proposal(&mut writer, report)?;
             }
+            CommandReport::MutationSynthesis(report) => {
+                write_mutation_synthesis(&mut writer, report)?;
+            }
             CommandReport::MutationList(mutations) => {
                 if mutations.is_empty() {
                     writeln!(writer, "no registered mutation candidates")?;
@@ -1397,6 +1499,68 @@ fn write_mutation_proposal(
             )?,
             GenerationOutcome::InsufficientEvidence { finding_id, reason } => {
                 writeln!(writer, "{finding_id}\tinsufficient evidence\t{reason}")?;
+            }
+        }
+    }
+    if report.dry_run {
+        writeln!(writer, "dry run · registry unchanged")?;
+    } else if !report.registrations.is_empty() {
+        writeln!(writer, "{} registry outcomes", report.registrations.len())?;
+    }
+    Ok(())
+}
+
+fn write_mutation_synthesis(
+    writer: &mut impl Write,
+    report: &MutationSynthesisReport,
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "provider={} · model={} · model_used={} · network_used={}",
+        report.provider, report.model, report.model_used, report.network_used
+    )?;
+    if report.synthesized.is_empty() {
+        writeln!(writer, "no mutation candidates above evidence threshold")?;
+    }
+    for outcome in &report.synthesized {
+        match outcome {
+            SynthesisOutcome::Candidate { package, .. } => writeln!(
+                writer,
+                "{}\t{}\t{} evidence\tzero permissions\tcandidate",
+                package.mutation_id,
+                package.title,
+                package.hypothesis.supporting_event_ids.len()
+            )?,
+            SynthesisOutcome::InsufficientEvidence { finding_id, reason } => {
+                writeln!(writer, "{finding_id}\tinsufficient evidence\t{reason}")?;
+            }
+            SynthesisOutcome::ProviderDeclined {
+                finding_id,
+                provider,
+                reason,
+            } => {
+                writeln!(
+                    writer,
+                    "{finding_id}\tprovider {provider} declined\t{reason}"
+                )?;
+            }
+            SynthesisOutcome::Rejected {
+                finding_id,
+                provider,
+                diagnostics,
+            } => {
+                writeln!(
+                    writer,
+                    "{finding_id}\tprovider {provider} rejected\t{} violation(s)",
+                    diagnostics.len()
+                )?;
+                for diagnostic in diagnostics {
+                    writeln!(
+                        writer,
+                        "\t{}\t{}\t{}",
+                        diagnostic.path, diagnostic.code, diagnostic.message
+                    )?;
+                }
             }
         }
     }

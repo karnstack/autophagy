@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/synthesis/0.1/response.schema.json",
+  "title": "Autophagy Synthesis Response v0.1",
+  "description": "The structured, schema-constrained response a synthesis provider returns. There is no free-prose passthrough: a provider fills known typed fields, and the boundary validates every one deterministically against the evidence packet before it becomes a mutation candidate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "statement",
+    "expected_result",
+    "instruction",
+    "failure_cases",
+    "exclusions",
+    "supporting_event_ids",
+    "counterexample_event_ids",
+    "trigger_selectors",
+    "permissions"
+  ],
+  "properties": {
+    "title": { "type": "string", "minLength": 1 },
+    "statement": { "type": "string", "minLength": 1 },
+    "expected_result": { "type": "string", "minLength": 1 },
+    "instruction": { "type": "string", "minLength": 1 },
+    "failure_cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "exclusions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "supporting_event_ids": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]{1,127}$" }
+    },
+    "counterexample_event_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]{1,127}$" }
+    },
+    "trigger_selectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "permissions": { "$ref": "#/$defs/permissions" }
+  },
+  "$defs": {
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filesystem_read",
+        "filesystem_write",
+        "commands",
+        "environment",
+        "network"
+      ],
+      "properties": {
+        "filesystem_read": { "type": "array", "maxItems": 0 },
+        "filesystem_write": { "type": "array", "maxItems": 0 },
+        "commands": { "type": "array", "maxItems": 0 },
+        "environment": { "type": "array", "maxItems": 0 },
+        "network": { "const": false }
+      }
+    }
+  }
+}

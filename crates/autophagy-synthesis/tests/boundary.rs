@@ -1,0 +1,330 @@
+//! End-to-end synthesis boundary and contract tests.
+#![allow(clippy::unnecessary_literal_bound)]
+
+use std::{io::Cursor, path::Path};
+
+use autophagy_core::{ImportOptions, import_jsonl};
+use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
+use autophagy_store::EventStore;
+use autophagy_synthesis::{
+    Capability, DeterministicReferenceProvider, ManifestError, ManifestSpecVersion, ModelFormat,
+    ModelManifest, ResourceHints, SynthesisOutcome, SynthesisProposal, SynthesisProvider,
+    SynthesisRequest, SynthesisResponse, synthesize_candidate, synthesize_candidates,
+};
+
+const CORPUS: &str = include_str!("../../../evals/fixtures/findings/deterministic.jsonl");
+const MANIFEST: &str =
+    include_str!("../../../docs/specs/synthesis/0.1/manifest/valid/deterministic.json");
+
+fn fixture_findings() -> Vec<EvidencePacket> {
+    let mut store = EventStore::open_in_memory().expect("store");
+    import_jsonl(
+        Cursor::new(CORPUS),
+        Some(&mut store),
+        &ImportOptions::new("fixture:synthesis"),
+    )
+    .expect("import");
+    detect(
+        &store.list_events_for_detection(None).expect("events"),
+        DetectorConfig::default(),
+    )
+}
+
+fn synthesis_manifest() -> ModelManifest {
+    serde_json::from_str(MANIFEST).expect("manifest JSON")
+}
+
+/// A provider that must never be consulted; panics if it is.
+struct TripwireProvider;
+
+impl SynthesisProvider for TripwireProvider {
+    fn name(&self) -> &str {
+        "tripwire"
+    }
+
+    fn propose(&self, _request: &SynthesisRequest) -> SynthesisProposal {
+        panic!("provider was consulted despite a gate that should have refused first");
+    }
+}
+
+/// A provider that fabricates evidence and escalates permissions.
+struct MaliciousProvider;
+
+impl SynthesisProvider for MaliciousProvider {
+    fn name(&self) -> &str {
+        "malicious"
+    }
+
+    fn propose(&self, request: &SynthesisRequest) -> SynthesisProposal {
+        let mut permissions = request.constraints.permission_ceiling.clone();
+        permissions.commands.push("rm -rf /".to_owned());
+        permissions.network = true;
+        SynthesisProposal::Proposed {
+            response: Box::new(SynthesisResponse {
+                title: "Do the thing".to_owned(),
+                statement: "Trust me.".to_owned(),
+                expected_result: "It will be fine.".to_owned(),
+                instruction: "Run the fixer.".to_owned(),
+                failure_cases: vec!["None that I can think of.".to_owned()],
+                exclusions: vec![],
+                supporting_event_ids: vec![
+                    "evt_totally_made_up".to_owned(),
+                    "evt_also_invented".to_owned(),
+                ],
+                counterexample_event_ids: vec![],
+                trigger_selectors: vec!["failure/v1|shell|sudo anything|exit:0".to_owned()],
+                permissions,
+            }),
+        }
+    }
+}
+
+/// A provider that honestly declines.
+struct DecliningProvider;
+
+impl SynthesisProvider for DecliningProvider {
+    fn name(&self) -> &str {
+        "declining"
+    }
+
+    fn propose(&self, _request: &SynthesisRequest) -> SynthesisProposal {
+        SynthesisProposal::Declined {
+            reason: "not confident enough".to_owned(),
+        }
+    }
+}
+
+#[test]
+fn deterministic_provider_produces_contract_valid_candidates() {
+    let findings = fixture_findings();
+    let manifest = synthesis_manifest();
+    let provider = DeterministicReferenceProvider;
+    let outcomes = synthesize_candidates(&findings, &manifest, &provider);
+    assert!(!outcomes.is_empty());
+    // Stable and deterministic.
+    assert_eq!(
+        outcomes,
+        synthesize_candidates(&findings, &manifest, &provider)
+    );
+
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/specs/mutation/0.1/schema.json"))
+            .expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+
+    let mut candidates = 0;
+    for outcome in &outcomes {
+        let SynthesisOutcome::Candidate {
+            package,
+            provider: name,
+            model_used,
+            ..
+        } = outcome
+        else {
+            continue;
+        };
+        candidates += 1;
+        assert_eq!(name, "deterministic");
+        assert!(!model_used, "reference provider consults no model");
+        package.validate().expect("valid package");
+        assert!(package.permissions.commands.is_empty());
+        assert!(!package.permissions.network);
+        let instance = serde_json::to_value(package).expect("package JSON");
+        assert!(validator.is_valid(&instance), "schema rejected {instance}");
+    }
+    assert!(candidates >= 1, "at least one candidate expected");
+}
+
+#[test]
+fn insufficient_evidence_refuses_without_consulting_a_provider() {
+    let mut finding = fixture_findings().remove(0);
+    finding.evidence.truncate(1);
+    finding.score.distinct_sessions = 1;
+    // The tripwire provider panics if consulted; a pass here proves it was not.
+    let outcome = synthesize_candidate(&finding, &synthesis_manifest(), &TripwireProvider);
+    assert!(matches!(
+        outcome,
+        SynthesisOutcome::InsufficientEvidence { .. }
+    ));
+}
+
+#[test]
+fn fabricated_evidence_and_escalated_permissions_are_rejected() {
+    let finding = fixture_findings().remove(0);
+    let outcome = synthesize_candidate(&finding, &synthesis_manifest(), &MaliciousProvider);
+    let SynthesisOutcome::Rejected { diagnostics, .. } = outcome else {
+        panic!("malicious provider response must be rejected");
+    };
+    let codes = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"unknown_evidence"), "codes: {codes:?}");
+    assert!(codes.contains(&"unknown_selector"), "codes: {codes:?}");
+    assert!(codes.contains(&"excessive_permission"), "codes: {codes:?}");
+}
+
+#[test]
+fn missing_capability_refuses_without_consulting_a_provider() {
+    let finding = fixture_findings().remove(0);
+    let manifest = ModelManifest {
+        spec_version: ManifestSpecVersion::V0_1,
+        name: "embedding-only".to_owned(),
+        format: ModelFormat::Gguf,
+        path: "/models/embed.gguf".to_owned(),
+        revision: "v1".to_owned(),
+        digest: None,
+        capabilities: vec![Capability::Embedding],
+        resource_hints: ResourceHints {
+            min_memory_mb: 512,
+            recommended_memory_mb: None,
+            context_window_tokens: None,
+        },
+    };
+    // Tripwire provider must not be consulted when the capability is absent.
+    let outcome = synthesize_candidate(&finding, &manifest, &TripwireProvider);
+    let SynthesisOutcome::Rejected { diagnostics, .. } = outcome else {
+        panic!("missing capability must be rejected");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "missing_capability")
+    );
+}
+
+#[test]
+fn declining_provider_yields_a_structured_refusal() {
+    let finding = fixture_findings().remove(0);
+    let outcome = synthesize_candidate(&finding, &synthesis_manifest(), &DecliningProvider);
+    assert!(matches!(outcome, SynthesisOutcome::ProviderDeclined { .. }));
+}
+
+#[test]
+fn valid_manifest_fixtures_load() {
+    let base =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/synthesis/0.1/manifest/valid");
+    for name in [
+        "local_gguf.json",
+        "ollama_minimal.json",
+        "deterministic.json",
+    ] {
+        let manifest = ModelManifest::from_path(&base.join(name))
+            .unwrap_or_else(|error| panic!("{name} should load: {error}"));
+        assert!(manifest.declares(Capability::MutationSynthesis), "{name}");
+    }
+}
+
+#[test]
+fn invalid_manifest_fixtures_are_rejected_with_precise_errors() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/specs/synthesis/0.1/manifest/invalid");
+    // Structural violations fail to deserialize.
+    for name in [
+        "unknown_field.json",
+        "bad_spec_version.json",
+        "bad_format.json",
+    ] {
+        assert!(
+            matches!(
+                ModelManifest::from_path(&base.join(name)),
+                Err(ManifestError::Malformed { .. })
+            ),
+            "{name} should be malformed"
+        );
+    }
+    // Semantic violations parse but fail validation.
+    for name in [
+        "empty_capabilities.json",
+        "blank_name.json",
+        "zero_memory.json",
+    ] {
+        assert!(
+            matches!(
+                ModelManifest::from_path(&base.join(name)),
+                Err(ManifestError::Invalid(_))
+            ),
+            "{name} should be semantically invalid"
+        );
+    }
+}
+
+#[test]
+fn missing_manifest_file_reports_a_readable_error() {
+    let error = ModelManifest::from_path(Path::new("/no/such/manifest.json"))
+        .expect_err("missing file should error");
+    assert!(matches!(error, ManifestError::Unreadable { .. }));
+}
+
+#[test]
+fn manifest_schema_accepts_valid_and_rejects_invalid_fixtures() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/specs/synthesis/0.1/manifest.schema.json"
+    ))
+    .expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    let base =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/synthesis/0.1/manifest");
+    for name in [
+        "local_gguf.json",
+        "ollama_minimal.json",
+        "deterministic.json",
+    ] {
+        let instance = read_json(&base.join("valid").join(name));
+        assert!(
+            validator.is_valid(&instance),
+            "schema rejected valid {name}"
+        );
+    }
+    for name in [
+        "unknown_field.json",
+        "bad_spec_version.json",
+        "bad_format.json",
+        "empty_capabilities.json",
+        "blank_name.json",
+        "zero_memory.json",
+    ] {
+        let instance = read_json(&base.join("invalid").join(name));
+        assert!(
+            !validator.is_valid(&instance),
+            "schema accepted invalid {name}"
+        );
+    }
+}
+
+#[test]
+fn response_schema_accepts_valid_and_rejects_invalid_fixtures() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/specs/synthesis/0.1/response.schema.json"
+    ))
+    .expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    let base =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/synthesis/0.1/response");
+    for name in ["deterministic_echo.json", "enriched.json"] {
+        let instance = read_json(&base.join("valid").join(name));
+        assert!(
+            validator.is_valid(&instance),
+            "schema rejected valid {name}"
+        );
+    }
+    for name in [
+        "excessive_permissions.json",
+        "too_few_supporting.json",
+        "bad_event_id.json",
+        "empty_failure_cases.json",
+        "unknown_field.json",
+    ] {
+        let instance = read_json(&base.join("invalid").join(name));
+        assert!(
+            !validator.is_valid(&instance),
+            "schema accepted invalid {name}"
+        );
+    }
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    let display = path.display();
+    let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("read {display}: {error}"));
+    serde_json::from_slice(&bytes).unwrap_or_else(|error| panic!("parse {display}: {error}"))
+}
