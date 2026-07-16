@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/mutation/0.1/schema.json",
+  "title": "Autophagy Mutation Package v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version", "mutation_id", "version", "state", "generated_by",
+    "source_finding_id", "source_detector", "title", "hypothesis",
+    "triggers", "exclusions", "intervention", "permissions", "promotion"
+  ],
+  "properties": {
+    "spec_version": { "const": "mutation/0.1" },
+    "mutation_id": { "type": "string", "pattern": "^mut_[A-Za-z0-9._:-]{1,127}$" },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+    "state": { "const": "candidate" },
+    "generated_by": { "const": "deterministic_template_v1" },
+    "source_finding_id": { "type": "string", "pattern": "^fnd_[A-Za-z0-9._:-]{1,127}$" },
+    "source_detector": { "enum": ["repeated_command_failure", "repeated_user_correction"] },
+    "title": { "type": "string", "minLength": 1 },
+    "hypothesis": { "$ref": "#/$defs/hypothesis" },
+    "triggers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/trigger" }
+    },
+    "exclusions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "intervention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "instruction"],
+      "properties": {
+        "type": { "const": "agent_instruction" },
+        "instruction": { "type": "string", "minLength": 1 }
+      }
+    },
+    "permissions": { "$ref": "#/$defs/permissions" },
+    "promotion": { "$ref": "#/$defs/promotion" }
+  },
+  "$defs": {
+    "hypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statement", "expected_result", "supporting_event_ids", "counterexample_event_ids", "failure_cases"],
+      "properties": {
+        "statement": { "type": "string", "minLength": 1 },
+        "expected_result": { "type": "string", "minLength": 1 },
+        "supporting_event_ids": {
+          "type": "array", "minItems": 2, "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]{1,127}$" }
+        },
+        "counterexample_event_ids": {
+          "type": "array", "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]{1,127}$" }
+        },
+        "failure_cases": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "selector"],
+      "properties": {
+        "type": { "enum": ["tool_call", "agent_decision"] },
+        "selector": { "type": "string", "minLength": 1 }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filesystem_read", "filesystem_write", "commands", "environment", "network"],
+      "properties": {
+        "filesystem_read": { "type": "array", "maxItems": 0 },
+        "filesystem_write": { "type": "array", "maxItems": 0 },
+        "commands": { "type": "array", "maxItems": 0 },
+        "environment": { "type": "array", "maxItems": 0 },
+        "network": { "const": false }
+      }
+    },
+    "promotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_replays", "minimum_success_rate_bps", "maximum_false_positive_rate_bps"],
+      "properties": {
+        "minimum_replays": { "type": "integer", "minimum": 1 },
+        "minimum_success_rate_bps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "maximum_false_positive_rate_bps": { "type": "integer", "minimum": 0, "maximum": 10000 }
+      }
+    }
+  }
+}
