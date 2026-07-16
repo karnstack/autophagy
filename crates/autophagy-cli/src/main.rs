@@ -156,7 +156,8 @@ enum Commands {
 
     /// Recall evidence by exact signature and/or full text with ranked explanations.
     Search {
-        /// FTS5 query expression. Optional when `--signature` is supplied.
+        /// FTS5 query expression. Required unless `--signature` is supplied.
+        #[arg(required_unless_present = "signature")]
         query: Option<String>,
 
         /// Exact normalized operation signature, such as

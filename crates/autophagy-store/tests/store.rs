@@ -1066,6 +1066,73 @@ fn exact_signature_matches_outrank_full_text_only_matches() {
 }
 
 #[test]
+fn dual_source_match_classified_when_outside_a_source_top_n() {
+    // Three events share the signature; only the oldest also matches the text
+    // query. With `limit` smaller than the signature candidate count, the
+    // dual-matching event falls outside the newest-first signature top-`limit`,
+    // so an independent per-source `LIMIT` would misclassify it as a full-text
+    // only match (and even truncate it away). Union classification over the full
+    // candidate sets must still label it `SignatureAndFullText` and rank it first.
+    let mut store = EventStore::open_in_memory().expect("store");
+    let source = source("instance-dual");
+    let seeds = [
+        (
+            "evt_new1",
+            "2026-07-15T00:00:00Z",
+            0_u64,
+            "alpha compile output",
+        ),
+        ("evt_new2", "2026-07-14T00:00:00Z", 1, "beta compile output"),
+        (
+            "evt_old",
+            "2026-07-01T00:00:00Z",
+            2,
+            "widget assembled cleanly",
+        ),
+    ];
+    for (event_id, timestamp, sequence, searchable) in seeds {
+        store
+            .insert_event(
+                &source,
+                &retrieval_event(
+                    event_id,
+                    "ses_dual",
+                    EventKind::ToolCompleted,
+                    "cargo build",
+                    Some(0),
+                    "/repo/dual",
+                    timestamp,
+                    sequence,
+                ),
+                &retrieval_projection(searchable, BUILD_SIG),
+            )
+            .expect("insert dual-source event");
+    }
+
+    let hits = store
+        .retrieve(&RetrievalQuery {
+            text: Some("widget".to_owned()),
+            signature: Some(BUILD_SIG.to_owned()),
+            limit: 2,
+            ..RetrievalQuery::default()
+        })
+        .expect("dual-source retrieval");
+
+    // The dual-matching event ranks first regardless of its recency position in
+    // the signature source, and survives truncation to `limit`.
+    assert_eq!(hit_ids(&hits), ["evt_old", "evt_new1"]);
+    assert_eq!(
+        hits[0].explanation.match_kind,
+        RetrievalMatchKind::SignatureAndFullText
+    );
+    assert_eq!(hits[0].explanation.rank_score_bps, 15_000);
+    assert_eq!(
+        hits[1].explanation.match_kind,
+        RetrievalMatchKind::ExactSignature
+    );
+}
+
+#[test]
 fn filters_include_and_exclude_deterministically() {
     let store = seed_retrieval_store();
 

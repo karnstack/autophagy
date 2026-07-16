@@ -467,6 +467,13 @@ impl EventStore {
     /// carries its exact event identifier and a versioned, deterministic ranking
     /// explanation stating why it ranked where it did. No model is consulted.
     ///
+    /// Each source's full filtered candidate set is fetched before the two are
+    /// merged, so an event matching both the signature and the full-text query
+    /// is always classified as [`RetrievalMatchKind::SignatureAndFullText`] even
+    /// when it would fall outside one source's top-`limit` rows in isolation.
+    /// Truncation to `limit` happens only after union classification and final
+    /// ranking, so `match_kind` never depends on `limit`.
+    ///
     /// # Errors
     ///
     /// Returns [`StoreError::EmptyRetrievalQuery`] when neither a full-text query
@@ -487,12 +494,16 @@ impl EventStore {
         }
 
         let filters = retrieval_filters(query)?;
+        // Both sources are fetched in full (no per-source `LIMIT`) so that an
+        // event matching both is never misclassified by falling outside one
+        // source's top-`limit` rows. The merged result is ranked and truncated
+        // to `limit` below.
         let signature_rows = match signature {
-            Some(signature) => self.signature_matches(signature, &filters, query.limit)?,
+            Some(signature) => self.signature_matches(signature, &filters)?,
             None => Vec::new(),
         };
         let text_rows = match text {
-            Some(text) => self.text_matches(text, &filters, query.limit)?,
+            Some(text) => self.text_matches(text, &filters)?,
             None => Vec::new(),
         };
 
@@ -563,7 +574,6 @@ impl EventStore {
         &self,
         signature: &str,
         filters: &RetrievalFilters,
-        limit: u32,
     ) -> Result<Vec<RetrievalRow>, StoreError> {
         let sql = format!(
             "SELECT e.event_id, e.session_id, e.event_type, e.occurred_at,
@@ -571,14 +581,12 @@ impl EventStore {
              FROM event_signatures s
              JOIN events e ON e.row_id = s.event_row_id
              WHERE s.signature = ?{filters}
-             ORDER BY e.occurred_at DESC, e.event_id ASC
-             LIMIT ?",
+             ORDER BY e.occurred_at DESC, e.event_id ASC",
             filters = filters.sql
         );
-        let mut binds = Vec::with_capacity(filters.params.len() + 2);
+        let mut binds = Vec::with_capacity(filters.params.len() + 1);
         binds.push(SqlValue::Text(signature.to_owned()));
         binds.extend(filters.params.iter().cloned());
-        binds.push(SqlValue::Integer(i64::from(limit)));
         let mut statement = self.connection.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(binds), |row| {
             Ok(RetrievalRow {
@@ -597,7 +605,6 @@ impl EventStore {
         &self,
         text: &str,
         filters: &RetrievalFilters,
-        limit: u32,
     ) -> Result<Vec<TextMatch>, StoreError> {
         let sql = format!(
             "SELECT e.event_id, e.session_id, e.event_type, e.occurred_at,
@@ -608,14 +615,12 @@ impl EventStore {
              JOIN events e ON e.row_id = events_fts.rowid
              LEFT JOIN event_signatures sig ON sig.event_row_id = e.row_id
              WHERE events_fts MATCH ?{filters}
-             ORDER BY bm25(events_fts), e.occurred_at DESC, e.event_id ASC
-             LIMIT ?",
+             ORDER BY bm25(events_fts), e.occurred_at DESC, e.event_id ASC",
             filters = filters.sql
         );
-        let mut binds = Vec::with_capacity(filters.params.len() + 2);
+        let mut binds = Vec::with_capacity(filters.params.len() + 1);
         binds.push(SqlValue::Text(text.to_owned()));
         binds.extend(filters.params.iter().cloned());
-        binds.push(SqlValue::Integer(i64::from(limit)));
         let mut statement = self.connection.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(binds), |row| {
             Ok(TextMatch {
