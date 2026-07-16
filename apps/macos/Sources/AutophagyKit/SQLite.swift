@@ -57,8 +57,11 @@ public final class Database {
         sqlite3_close_v2(handle)
     }
 
-    /// Run a statement for its side effects (used only for `PRAGMA` here).
-    public func execute(_ sql: String) throws {
+    /// Run a statement for its side effects. Private on purpose: the only
+    /// side-effecting SQL this type ever runs is the `PRAGMA` set in `init`.
+    /// Keeping it private means the no-write-path guarantee is enforced by the
+    /// API surface, not only by the connection's read-only + query-only flags.
+    private func execute(_ sql: String) throws {
         var error: UnsafeMutablePointer<CChar>?
         if sqlite3_exec(handle, sql, nil, nil, &error) != SQLITE_OK {
             let message = error.map { String(cString: $0) } ?? lastErrorMessage()

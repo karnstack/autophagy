@@ -16,9 +16,10 @@ cascading deletion, and an active-mutation deletion guard all enforced inside
 `autophagy-store`. A UI that wrote the database directly would duplicate — and
 inevitably drift from — those invariants.
 
-Second, the available toolchain is Swift 6.3 with the macOS SDK via the Command
-Line Tools. Full Xcode (and therefore `xcodebuild`, `.xcodeproj`, and the
-XCTest framework) is not available in the build environment.
+Second, the available toolchain is the Swift 6 compiler with the macOS SDK via
+the Command Line Tools; the package pins `swift-tools-version:6.0`. Full Xcode
+(and therefore `xcodebuild`, `.xcodeproj`, and the XCTest framework) is not
+available in the build environment.
 
 ## Decision
 

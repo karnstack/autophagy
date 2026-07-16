@@ -88,11 +88,7 @@ enum FixtureDatabase {
     // The subset of tables the app reads. Column definitions mirror the
     // authoritative migrations; unrelated constraints are relaxed for brevity.
     static func createSchema(_ db: OpaquePointer) {
-        exec(db, "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, description TEXT, checksum BLOB, applied_at TEXT);")
-        exec(db, "CREATE TABLE sources(source_id INTEGER PRIMARY KEY, adapter TEXT, instance_key TEXT, display_name TEXT, first_seen_at TEXT, last_seen_at TEXT);")
-        exec(db, "CREATE TABLE sessions(session_id TEXT PRIMARY KEY, source_id INTEGER, project_path TEXT, started_at TEXT, ended_at TEXT, first_event_at TEXT, last_event_at TEXT, event_count INTEGER, metadata_json TEXT DEFAULT '{}');")
-        exec(db, "CREATE TABLE events(row_id INTEGER PRIMARY KEY, event_id TEXT UNIQUE, spec_version TEXT, session_id TEXT, occurred_at TEXT, sequence INTEGER, event_type TEXT, project_path TEXT, parent_event_id TEXT, tool_name TEXT, tool_input_text TEXT, exit_code INTEGER, event_json TEXT, content_hash BLOB, imported_at TEXT);")
-        exec(db, "CREATE TABLE events_search(event_row_id INTEGER PRIMARY KEY, project_path TEXT, tool_name TEXT, tool_input_text TEXT, searchable_text TEXT DEFAULT '');")
+        createFoundationSchema(db)
         exec(db, "CREATE TABLE event_conflicts(conflict_id INTEGER PRIMARY KEY, event_id TEXT);")
         exec(db, "CREATE TABLE event_signatures(event_row_id INTEGER PRIMARY KEY, signature TEXT);")
         exec(db, "CREATE TABLE mutation_candidates(mutation_id TEXT PRIMARY KEY, source_finding_id TEXT, source_detector TEXT, equivalence_key TEXT, spec_version TEXT, semantic_version TEXT, state TEXT, package_json TEXT, content_hash BLOB, challenge_json TEXT, rejection_reason TEXT, created_at TEXT, updated_at TEXT);")
@@ -101,6 +97,51 @@ enum FixtureDatabase {
         exec(db, "CREATE TABLE mutation_replays(replay_id TEXT PRIMARY KEY, mutation_id TEXT, scenario_set_hash TEXT, report_json TEXT, content_hash BLOB, passed INTEGER, created_at TEXT);")
         exec(db, "CREATE TABLE mutation_shadows(shadow_id TEXT PRIMARY KEY, mutation_id TEXT, observation_set_hash TEXT, report_json TEXT, content_hash BLOB, passed INTEGER, created_at TEXT);")
         exec(db, "CREATE TABLE mutation_installations(installation_id TEXT PRIMARY KEY, mutation_id TEXT, target TEXT, repository_root TEXT, relative_path TEXT, content_hash TEXT, permission_review_json TEXT, state TEXT, installed_at TEXT, uninstalled_at TEXT);")
+    }
+
+    /// Only the tables that existed in the earliest migrations (sources,
+    /// sessions, events, and their search projection). Deliberately omits the
+    /// mutation registry, conflict, and signature tables added by later
+    /// migrations, so the reader's later-table guards can be exercised.
+    static func createFoundationSchema(_ db: OpaquePointer) {
+        exec(db, "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, description TEXT, checksum BLOB, applied_at TEXT);")
+        exec(db, "CREATE TABLE sources(source_id INTEGER PRIMARY KEY, adapter TEXT, instance_key TEXT, display_name TEXT, first_seen_at TEXT, last_seen_at TEXT);")
+        exec(db, "CREATE TABLE sessions(session_id TEXT PRIMARY KEY, source_id INTEGER, project_path TEXT, started_at TEXT, ended_at TEXT, first_event_at TEXT, last_event_at TEXT, event_count INTEGER, metadata_json TEXT DEFAULT '{}');")
+        exec(db, "CREATE TABLE events(row_id INTEGER PRIMARY KEY, event_id TEXT UNIQUE, spec_version TEXT, session_id TEXT, occurred_at TEXT, sequence INTEGER, event_type TEXT, project_path TEXT, parent_event_id TEXT, tool_name TEXT, tool_input_text TEXT, exit_code INTEGER, event_json TEXT, content_hash BLOB, imported_at TEXT);")
+        exec(db, "CREATE TABLE events_search(event_row_id INTEGER PRIMARY KEY, project_path TEXT, tool_name TEXT, tool_input_text TEXT, searchable_text TEXT DEFAULT '');")
+    }
+
+    /// A foundation-only (v2-era) database with one source, one session, and
+    /// two events — but none of the later mutation/conflict/signature tables.
+    static func foundationOnly() -> String {
+        make(schemaVersion: 2) { db in
+            createFoundationSchema(db)
+            exec(db, """
+            INSERT INTO schema_migrations(version, description, checksum, applied_at)
+            VALUES (2,'source_cursors',zeroblob(32),'2026-07-16T00:00:00Z');
+            """)
+            exec(db, """
+            INSERT INTO sources(source_id, adapter, instance_key, display_name,
+                                first_seen_at, last_seen_at)
+            VALUES (1,'generic-jsonl','demo','Demo',
+                    '2026-07-16T10:00:00Z','2026-07-16T10:02:00Z');
+            """)
+            exec(db, """
+            INSERT INTO sessions(session_id, source_id, project_path, first_event_at,
+                                 last_event_at, event_count)
+            VALUES ('ses_a',1,'/workspace/a','2026-07-16T10:00:00Z','2026-07-16T10:02:00Z',2);
+            """)
+            exec(db, """
+            INSERT INTO events(row_id, event_id, spec_version, session_id, occurred_at,
+                               sequence, event_type, tool_name, exit_code, event_json,
+                               content_hash, imported_at)
+            VALUES
+              (1,'evt_a1','aep/1','ses_a','2026-07-16T10:00:00Z',0,'tool.failed','shell',1,
+               '{}',zeroblob(32),'2026-07-16T10:00:00Z'),
+              (2,'evt_a2','aep/1','ses_a','2026-07-16T10:02:00Z',1,'tool.completed','shell',0,
+               '{}',zeroblob(32),'2026-07-16T10:02:00Z');
+            """)
+        }
     }
 
     static func exec(_ db: OpaquePointer, _ sql: String) {

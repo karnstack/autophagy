@@ -120,24 +120,40 @@ struct DestructiveActionSheet: View {
 
     private func run() {
         isRunning = true
-        let outcome = CLIExecutor.run(command)
-        isRunning = false
-        result = outcome
-        if outcome.exitCode == 0 {
-            onCompleted()
+        result = nil
+        let command = command
+        // The subprocess is launched and awaited off the main actor so the
+        // spinner renders and a slow/hung CLI never freezes the UI. The state
+        // updates below run back on the main actor (this method is
+        // @MainActor-isolated, and the awaiting Task inherits that context).
+        Task {
+            let outcome = await CLIExecutor.run(command)
+            isRunning = false
+            result = outcome
+            if outcome.exitCode == 0 {
+                onCompleted()
+            }
         }
     }
 }
 
 /// The captured result of a CLI invocation.
-struct RunResult {
+struct RunResult: Sendable {
     let exitCode: Int32
     let output: String
 }
 
 /// Runs a resolved ``CLICommand`` and captures its combined output.
 enum CLIExecutor {
-    static func run(_ command: CLICommand) -> RunResult {
+    /// Launch the command and await its exit off the main actor.
+    static func run(_ command: CLICommand) async -> RunResult {
+        await Task.detached(priority: .userInitiated) {
+            runBlocking(command)
+        }.value
+    }
+
+    /// The blocking implementation. Never call this on the main actor.
+    private static func runBlocking(_ command: CLICommand) -> RunResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command.executable)
         process.arguments = Array(command.arguments.dropFirst())

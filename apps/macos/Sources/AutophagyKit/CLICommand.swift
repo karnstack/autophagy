@@ -6,7 +6,7 @@ import Foundation
 /// exact `autophagy` command that is shown to the user before it runs, and is
 /// executed via `Process` only after explicit multi-step confirmation. If the
 /// CLI binary cannot be found, the command is displayed for the user to run.
-public enum DestructiveAction: Equatable {
+public enum DestructiveAction: Equatable, Sendable {
     /// Delete a single session and everything that cascades from it.
     case deleteSession(sessionID: String)
     /// Delete all local data.
@@ -43,7 +43,7 @@ public enum DestructiveAction: Equatable {
 }
 
 /// Builds and (optionally) runs CLI commands for destructive actions.
-public struct CLICommand: Equatable {
+public struct CLICommand: Equatable, Sendable {
     /// The resolved executable name or path (`autophagy` when only on `PATH`).
     public let executable: String
     /// The full argument vector, executable first — the exact command shown.

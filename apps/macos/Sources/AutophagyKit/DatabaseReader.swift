@@ -83,6 +83,10 @@ public final class DatabaseReader {
     }
 
     private func count(_ table: String) -> Int {
+        // `table` is always a hardcoded string literal supplied by `overview()`
+        // (never user input), so interpolating it into the SQL is safe. SQLite
+        // cannot bind an identifier as a parameter. If a caller from outside
+        // this file is ever added, gate `table` behind a fixed allow-list first.
         guard db.objectExists(table) else { return 0 }
         return (try? db.queryScalarInt("SELECT count(*) FROM \(table);")) ?? 0
     }

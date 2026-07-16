@@ -33,6 +33,54 @@ struct SchemaAndReadonlyTests {
             == .newerThanKnown(version: 99, known: knownSchemaVersion))
     }
 
+    @Test func missingLaterMigrationTablesDegradeToEmpty() throws {
+        // A v2-era database has sessions and events but none of the mutation,
+        // conflict, or signature tables added by later migrations. The reader
+        // must return those as empty rather than throwing.
+        let temp = TempPath(FixtureDatabase.foundationOnly())
+        let reader = try DatabaseReader(path: temp.path)
+
+        #expect(reader.isAutophagyDatabase())
+        #expect(reader.schemaInfo().compatibility
+            == .olderReadable(version: 2, known: knownSchemaVersion))
+
+        // Foundational reads still work.
+        #expect(reader.sessions().map(\.id) == ["ses_a"])
+        #expect(reader.events(inSession: "ses_a").count == 2)
+
+        // Later-migration reads degrade to empty, not a throw.
+        #expect(reader.mutations().isEmpty)
+        #expect(reader.evidencePackets().isEmpty)
+        #expect(reader.mutationDetail(id: "mut_1") == nil)
+
+        // Overview tolerates the absent tables.
+        let overview = reader.overview()
+        #expect(overview.sessionCount == 1)
+        #expect(overview.eventCount == 2)
+        #expect(overview.mutationCount == 0)
+        #expect(overview.conflictCount == 0)
+        #expect(!overview.hasSignatureIndex)
+    }
+
+    @Test func missingColumnInExistingTableDegradesToEmpty() throws {
+        // mutation_candidates exists but predates the semantic_version column
+        // the reader selects. The query fails internally and the reader yields
+        // an empty registry rather than propagating the error.
+        let temp = TempPath(FixtureDatabase.make(schemaVersion: 3) { db in
+            FixtureDatabase.createFoundationSchema(db)
+            FixtureDatabase.exec(db, """
+            INSERT INTO schema_migrations(version, description, checksum, applied_at)
+            VALUES (3,'mutation_registry',zeroblob(32),'2026-07-16T00:00:00Z');
+            """)
+            // Note: no semantic_version / created_at / package_json columns.
+            FixtureDatabase.exec(db, "CREATE TABLE mutation_candidates(mutation_id TEXT PRIMARY KEY, state TEXT);")
+            FixtureDatabase.exec(db, "INSERT INTO mutation_candidates(mutation_id, state) VALUES ('mut_1','candidate');")
+        })
+        let reader = try DatabaseReader(path: temp.path)
+        #expect(reader.mutations().isEmpty)
+        #expect(reader.mutationDetail(id: "mut_1") == nil)
+    }
+
     @Test func nonAutophagyDatabaseIsRejectedNotCrashed() throws {
         let temp = TempPath(FixtureDatabase.make(schemaVersion: 0) { db in
             FixtureDatabase.exec(db, "CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);")
@@ -53,9 +101,11 @@ struct SchemaAndReadonlyTests {
     @Test func connectionIsQueryOnly() throws {
         let temp = TempPath(FixtureDatabase.populated())
         let db = try Database(readonlyPath: temp.path)
-        // A read-only + query_only connection must refuse writes.
+        // The only public SQL path is `query`; a write attempted through it must
+        // be refused by the read-only + query_only connection. (`execute` is
+        // private, so no write API is reachable at all.)
         #expect(throws: SQLiteError.self) {
-            try db.execute("DELETE FROM sessions;")
+            _ = try db.query("DELETE FROM sessions;") { _ in 0 }
         }
     }
 }
