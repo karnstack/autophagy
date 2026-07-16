@@ -84,6 +84,14 @@ enum FixtureDatabase {
               (2,'mut_1','candidate','challenged','challenge checklist completed',
                '{"note":"ok"}','2026-07-16T11:05:00Z');
             """)
+            exec(db, """
+            INSERT INTO mutation_installations(installation_id, mutation_id, target,
+                repository_root, relative_path, content_hash, permission_review_json,
+                state, installed_at, uninstalled_at) VALUES
+              ('ins_1','mut_1','claude_code_repo_skill','/workspace/a',
+               '.claude/skills/prevent-repeated-command-failure/SKILL.md','abc','{}',
+               'installed','2026-07-16T11:20:00Z',NULL);
+            """)
         }
     }
 
@@ -176,6 +184,26 @@ enum FixtureDatabase {
     static let fixturePackageJSON: String = unescapedFixturePackageJSON
         .replacingOccurrences(of: "\n", with: " ")
         .replacingOccurrences(of: "'", with: "''")
+
+    /// A model-synthesised Mutation Package v0.2 payload carrying the optional
+    /// `provenance` block (mirrors `docs/specs/mutation/0.2/valid/`).
+    static let modelSynthesizedPackageJSON: String = """
+    {"mutation_id":"mut_model_1","title":"Refresh the stale lockfile before cargo build",
+     "version":"0.1.0","spec_version":"mutation/0.2",
+     "source_detector":"repeated_command_failure","source_finding_id":"fnd_model_1",
+     "hypothesis":{"statement":"stale lockfile causes the failure",
+       "expected_result":"build succeeds once refreshed",
+       "supporting_event_ids":["evt_a1"],"counterexample_event_ids":[]},
+     "intervention":{"type":"agent_instruction","instruction":"Run cargo update first."},
+     "triggers":[{"type":"tool_call","selector":"failure/v1|shell|cargo build|exit:101"}],
+     "exclusions":[],
+     "permissions":{"filesystem_read":[],"filesystem_write":[],"commands":[],
+       "environment":[],"network":false},
+     "provenance":{"provider":"ollama","model_name":"qwen3-coder:30b",
+       "model_revision":"30b-a3b",
+       "model_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000",
+       "manifest_spec_version":"synthesis-manifest/0.2"}}
+    """
 }
 
 /// Deletes a fixture database (and its WAL/SHM siblings) when it goes out of use.

@@ -37,6 +37,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var patterns: [EvidencePacket] = []
     @Published private(set) var mutations: [MutationSummary] = []
 
+    /// The always-available menu-bar summary, refreshed alongside content.
+    @Published private(set) var menuBar: MenuBarSnapshot = .disconnected
+
     private let selection = DatabaseSelection()
 
     /// The path that should be opened on launch, if any.
@@ -82,6 +85,13 @@ final class AppModel: ObservableObject {
         sessions = reader.sessions()
         patterns = reader.evidencePackets()
         mutations = reader.mutations()
+        menuBar = reader.menuBarSnapshot()
+    }
+
+    /// Refresh only the menu-bar summary. Cheap enough to call on menu open
+    /// without reloading every view's content.
+    func refreshMenuBar() {
+        menuBar = reader?.menuBarSnapshot() ?? .disconnected
     }
 
     /// Return to onboarding and forget the remembered choice.
@@ -92,6 +102,7 @@ final class AppModel: ObservableObject {
         sessions = []
         patterns = []
         mutations = []
+        menuBar = .disconnected
     }
 
     /// Load the ordered event timeline for a session.

@@ -7,7 +7,7 @@ import Foundation
 public let knownSchemaVersion = 8
 
 /// How the opened database's schema relates to what this app understands.
-public enum SchemaCompatibility: Equatable {
+public enum SchemaCompatibility: Equatable, Sendable {
     /// Exactly the schema version this build targets.
     case supported(version: Int)
     /// An older-but-readable schema; newer tables will simply be absent.
@@ -100,7 +100,7 @@ public struct EvidencePacket: Equatable, Identifiable {
 }
 
 /// A mutation candidate summarised for the registry list.
-public struct MutationSummary: Equatable, Identifiable {
+public struct MutationSummary: Equatable, Identifiable, Sendable {
     public let id: String
     public let title: String
     public let state: String
@@ -156,6 +156,36 @@ public struct InstallationRecord: Equatable, Identifiable {
     public let state: String
     public let installedAt: String
     public let uninstalledAt: String?
+
+    public init(
+        id: String,
+        target: String,
+        repositoryRoot: String,
+        relativePath: String,
+        state: String,
+        installedAt: String,
+        uninstalledAt: String?
+    ) {
+        self.id = id
+        self.target = target
+        self.repositoryRoot = repositoryRoot
+        self.relativePath = relativePath
+        self.state = state
+        self.installedAt = installedAt
+        self.uninstalledAt = uninstalledAt
+    }
+
+    /// A friendly name for the install target: the stored value is one of
+    /// `codex_repo_skill` (`.agents/skills/…`) or `claude_code_repo_skill`
+    /// (`.claude/skills/…`). Unknown values pass through verbatim so a newer
+    /// target added by the engine still displays honestly.
+    public var targetDisplayName: String {
+        switch target {
+        case "codex_repo_skill": "Codex repo skill"
+        case "claude_code_repo_skill": "Claude Code repo skill"
+        default: target
+        }
+    }
 }
 
 /// The full detail for one mutation candidate.
@@ -169,6 +199,79 @@ public struct MutationDetail: Equatable {
     public let shadows: [ShadowRecord]
     public let installation: InstallationRecord?
     public let rejectionReason: String?
+}
+
+/// A count of mutation candidates in one lifecycle state.
+public struct MutationStateCount: Equatable, Identifiable, Sendable {
+    public let state: String
+    public let count: Int
+
+    public var id: String { state }
+
+    public init(state: String, count: Int) {
+        self.state = state
+        self.count = count
+    }
+}
+
+/// The always-available menu-bar summary of a database.
+///
+/// This is a pure value assembled from cheap read-only queries. It is computed
+/// off the reader (or `disconnected` when no database is open) so the menu-bar
+/// UI stays a thin projection and the state-assembly logic is unit-testable
+/// without a UI.
+public struct MenuBarSnapshot: Equatable, Sendable {
+    /// Whether a database is currently open.
+    public let isConnected: Bool
+    /// The open database's file name, for a compact menu label.
+    public let databaseFileName: String?
+    /// The open database's absolute path.
+    public let databasePath: String?
+    /// The schema compatibility verdict, when connected.
+    public let schema: SchemaCompatibility?
+    public let sessionCount: Int
+    public let eventCount: Int
+    /// Total registered mutation candidates.
+    public let candidateCount: Int
+    /// Candidate counts broken down by lifecycle state, state-ascending.
+    public let stateCounts: [MutationStateCount]
+    /// The most recent candidates (newest first), capped to a small limit.
+    public let recentCandidates: [MutationSummary]
+
+    public init(
+        isConnected: Bool,
+        databaseFileName: String?,
+        databasePath: String?,
+        schema: SchemaCompatibility?,
+        sessionCount: Int,
+        eventCount: Int,
+        candidateCount: Int,
+        stateCounts: [MutationStateCount],
+        recentCandidates: [MutationSummary]
+    ) {
+        self.isConnected = isConnected
+        self.databaseFileName = databaseFileName
+        self.databasePath = databasePath
+        self.schema = schema
+        self.sessionCount = sessionCount
+        self.eventCount = eventCount
+        self.candidateCount = candidateCount
+        self.stateCounts = stateCounts
+        self.recentCandidates = recentCandidates
+    }
+
+    /// The state shown before any database is open.
+    public static let disconnected = MenuBarSnapshot(
+        isConnected: false,
+        databaseFileName: nil,
+        databasePath: nil,
+        schema: nil,
+        sessionCount: 0,
+        eventCount: 0,
+        candidateCount: 0,
+        stateCounts: [],
+        recentCandidates: []
+    )
 }
 
 /// High-level counts and posture for the privacy view.

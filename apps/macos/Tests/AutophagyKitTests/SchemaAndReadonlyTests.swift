@@ -81,6 +81,25 @@ struct SchemaAndReadonlyTests {
         #expect(reader.mutationDetail(id: "mut_1") == nil)
     }
 
+    @Test func checkpointedWALWithoutSidecarsIsReadable() throws {
+        // The engine leaves the database in WAL mode but removes the -wal and
+        // -shm sidecars on a clean close. A read-only connection cannot create
+        // the shared-memory index WAL needs, so without a fallback every query
+        // fails and the file looks empty. The reader must still read it.
+        let path = FixtureDatabase.populated()
+        let temp = TempPath(path)
+        for suffix in ["-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: path + suffix)
+        }
+        #expect(!FileManager.default.fileExists(atPath: path + "-wal"))
+
+        let reader = try DatabaseReader(path: temp.path)
+        #expect(reader.isAutophagyDatabase())
+        #expect(reader.schemaInfo().compatibility == .supported(version: 8))
+        #expect(reader.sessions().count == 2)
+        #expect(reader.mutations().count == 2)
+    }
+
     @Test func nonAutophagyDatabaseIsRejectedNotCrashed() throws {
         let temp = TempPath(FixtureDatabase.make(schemaVersion: 0) { db in
             FixtureDatabase.exec(db, "CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);")

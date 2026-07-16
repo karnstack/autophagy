@@ -51,6 +51,11 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$BUILT_EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
+# The app is intentionally a normal Dock application by default: no LSUIElement
+# key is written. The menu-bar extra is always present regardless, and the
+# menu-bar-only (accessory, no Dock icon) mode is an opt-in runtime preference
+# applied via NSApplication.setActivationPolicy — not a static Info.plist flag —
+# so the default bundle keeps a Dock icon and a normal main window.
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"

@@ -205,6 +205,45 @@ public final class DatabaseReader {
         }) ?? []
     }
 
+    /// Candidate counts grouped by lifecycle state, state-ascending. A cheap
+    /// aggregate for the menu-bar summary; empty when the registry is absent.
+    public func mutationStateCounts() -> [MutationStateCount] {
+        guard db.objectExists("mutation_candidates") else { return [] }
+        let sql = """
+        SELECT state, count(*)
+        FROM mutation_candidates
+        GROUP BY state
+        ORDER BY state ASC;
+        """
+        return (try? db.query(sql) { row in
+            MutationStateCount(state: row.string(0) ?? "", count: row.int(1) ?? 0)
+        }) ?? []
+    }
+
+    /// The most recent candidates, newest first, capped at `limit`.
+    public func recentMutations(limit: Int) -> [MutationSummary] {
+        guard limit > 0 else { return [] }
+        return Array(mutations().prefix(limit))
+    }
+
+    /// Assemble the always-available menu-bar summary from cheap read-only
+    /// queries. Connection state, quick counts, per-state candidate counts, and
+    /// the N most recent candidates — nothing here writes or leaves the machine.
+    public func menuBarSnapshot(recentLimit: Int = 5) -> MenuBarSnapshot {
+        let overview = overview()
+        return MenuBarSnapshot(
+            isConnected: true,
+            databaseFileName: URL(fileURLWithPath: path).lastPathComponent,
+            databasePath: path,
+            schema: overview.schema.compatibility,
+            sessionCount: overview.sessionCount,
+            eventCount: overview.eventCount,
+            candidateCount: overview.mutationCount,
+            stateCounts: mutationStateCounts(),
+            recentCandidates: recentMutations(limit: recentLimit)
+        )
+    }
+
     /// Full detail for one candidate: package, evidence lineage, audit log, and
     /// any replay/shadow/installation records.
     public func mutationDetail(id: String) -> MutationDetail? {

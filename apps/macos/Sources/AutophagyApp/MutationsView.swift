@@ -55,6 +55,9 @@ private struct MutationDetailView: View {
                 if let package = detail.package {
                     interventionSection(package)
                     permissionsSection(package)
+                    if let provenance = package.provenance {
+                        provenanceSection(provenance)
+                    }
                 }
                 evidenceSection
                 auditSection
@@ -122,6 +125,24 @@ private struct MutationDetailView: View {
         }
     }
 
+    private func provenanceSection(_ provenance: MutationPackage.Provenance) -> some View {
+        SectionCard(title: "Model provenance", systemImage: "cpu") {
+            Text("This candidate's reviewable content was enriched by a local model "
+                + "provider. Provenance records model identity only — no endpoint, "
+                + "key, prompt, or payload.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            LabeledText(label: "Provider", text: provenance.provider)
+            LabeledText(label: "Model", text: provenance.modelName)
+            LabeledText(label: "Revision", text: provenance.modelRevision)
+            if let digest = provenance.modelDigest, !digest.isEmpty {
+                LabeledText(label: "Digest", text: digest)
+            }
+            LabeledText(label: "Manifest spec", text: provenance.manifestSpecVersion)
+        }
+    }
+
     private var evidenceSection: some View {
         SectionCard(title: "Evidence lineage", systemImage: "link") {
             let support = detail.evidence.filter { $0.role == "support" }
@@ -178,6 +199,7 @@ private struct MutationDetailView: View {
     private var installationSection: some View {
         if let install = detail.installation {
             SectionCard(title: "Installation", systemImage: "square.and.arrow.down") {
+                LabeledText(label: "Target", text: install.targetDisplayName)
                 LabeledText(label: "State", text: install.state)
                 LabeledText(label: "Repository root", text: install.repositoryRoot)
                 LabeledText(label: "Relative path", text: install.relativePath)

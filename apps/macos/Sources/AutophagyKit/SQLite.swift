@@ -35,8 +35,8 @@ public final class Database {
     ///   not a SQLite database.
     public init(readonlyPath path: String) throws {
         var handle: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
-        let status = sqlite3_open_v2(path, &handle, flags, nil)
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI
+        let status = sqlite3_open_v2(Self.readonlyDSN(for: path), &handle, flags, nil)
         guard status == SQLITE_OK, let handle else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             if let handle { sqlite3_close_v2(handle) }
@@ -56,6 +56,46 @@ public final class Database {
     deinit {
         sqlite3_close_v2(handle)
     }
+
+    /// Build the read-only connection string for `path`.
+    ///
+    /// A database left in WAL mode but cleanly checkpointed — the state the
+    /// engine leaves after a normal run, with its `-wal`/`-shm` sidecars
+    /// removed — cannot be read through a plain read-only connection: a
+    /// read-only connection may not create the shared-memory index that WAL
+    /// requires, so every query fails and the file looks empty. Opening such a
+    /// file with `immutable=1` reads the fully checkpointed main database
+    /// directly, which is exactly correct for a point-in-time viewer.
+    ///
+    /// When a non-empty `-wal` sidecar is present a writer is (or recently was)
+    /// active and WAL-resident rows may not yet be in the main file, so we open
+    /// normally to see them and to avoid `immutable`'s no-change assumption.
+    static func readonlyDSN(for path: String) -> String {
+        let encoded = path.addingPercentEncoding(
+            withAllowedCharacters: Self.uriPathAllowed
+        ) ?? path
+        return liveWALSidecarExists(for: path)
+            ? "file:\(encoded)"
+            : "file:\(encoded)?immutable=1"
+    }
+
+    /// Whether a non-empty `-wal` sidecar sits next to `path`.
+    private static func liveWALSidecarExists(for path: String) -> Bool {
+        let walPath = path + "-wal"
+        guard let size = try? FileManager.default
+            .attributesOfItem(atPath: walPath)[.size] as? Int
+        else { return false }
+        return size > 0
+    }
+
+    /// Characters that need no percent-encoding inside a SQLite `file:` URI
+    /// path. Everything else (spaces, `?`, `#`, `%`, …) is encoded so paths with
+    /// reserved characters open correctly.
+    private static let uriPathAllowed: CharacterSet = {
+        var set = CharacterSet.alphanumerics
+        set.insert(charactersIn: "/-._~")
+        return set
+    }()
 
     /// Run a statement for its side effects. Private on purpose: the only
     /// side-effecting SQL this type ever runs is the `PRAGMA` set in `init`.

@@ -6,6 +6,11 @@ mutation candidates, and their lifecycle audit — inspectable without JSON outp
 or a raw SQLite browser. It never writes the database; deletion is delegated to
 the `autophagy` CLI.
 
+It runs as a normal Dock application with an always-available menu-bar extra, so
+a live summary of the open database is one click away even when the main window
+is closed. Everything the menu bar shows is read from the same local database;
+nothing new leaves the machine.
+
 The app lives in [`apps/macos`](../../apps/macos) as a Swift Package. Full Xcode
 is not required: it builds, tests, and bundles with the Swift toolchain from the
 macOS Command Line Tools.
@@ -84,7 +89,12 @@ mise exec -- cargo run -p autophagy-cli -- \
   state, intervention and permissions, evidence lineage (exact supporting and
   counterexample event IDs, flagged if an event is no longer present), the full
   lifecycle audit log, any replay and shadow evaluation records, and any
-  filesystem installation record. All of this is read-only.
+  filesystem installation record. When a package was enriched by a local model
+  provider (a Mutation Package v0.2 with a `provenance` block) the detail view
+  shows a **Model provenance** card with the provider, model name, revision, and
+  optional digest — model identity only, never an endpoint, key, prompt, or
+  payload. Installation records name their target (Codex vs Claude Code repo
+  skill). All of this is read-only.
 - **Privacy** — where the database lives on disk, its schema version and
   compatibility, and honest counts of what it contains (sources, sessions,
   events, mutations, conflicts, and how many events opted into the search
@@ -92,13 +102,48 @@ mise exec -- cargo run -p autophagy-cli -- \
   the redaction-approved full-text projection, local-first operation, and
   retention.
 
+## Menu bar
+
+The app installs a menu-bar extra that is always available, including while the
+main window is closed. Clicking it opens a small read-only panel:
+
+- **Connection state** — whether a database is open, its file name, and its
+  schema compatibility (a coloured dot mirrors the sidebar's schema badge).
+- **Quick stats** — session, event, and candidate counts, plus a breakdown of
+  candidates by lifecycle state. These are cheap `COUNT` queries against the
+  existing read-only reader.
+- **Recent candidates** — the most recent mutation candidates with their state
+  and detector.
+- **Actions** — "Open Autophagy" brings up (and activates) the main window,
+  "Refresh" re-reads the database, and "Quit Autophagy" exits.
+
+The panel refreshes when it opens and when you press Refresh; there is no daemon
+and no background polling. Because a menu-bar extra keeps the process alive, the
+app keeps running in the menu bar after the main window is closed.
+
+## Preferences
+
+Open Autophagy's Settings (⌘,) to toggle **Run as a menu-bar-only app (hide the
+Dock icon)**. When enabled the app runs as an accessory — no Dock icon — while
+the menu-bar extra stays available; reopen the main window from the menu bar's
+"Open Autophagy". The default is a normal Dock application. The preference is
+stored in `UserDefaults` only and is applied at runtime via the app's activation
+policy (no `LSUIElement` key is baked into the bundle), so the default bundle is
+always a normal Dock app unless you opt in.
+
 ## Schema-version tolerance
 
-The app is written to read schema version 6. On open it reads `user_version`
+The app is written to read schema version 8. On open it reads `user_version`
 and the `schema_migrations` ledger and reports whether the database is fully
 supported, older but readable, or newer than the app understands. A newer or
 older schema is read safely — unknown tables are skipped and missing tables
 yield empty views — rather than crashing or misreading.
+
+A database that the engine left in WAL mode but cleanly checkpointed (its
+`-wal`/`-shm` sidecars removed) is opened read-only via SQLite's `immutable`
+mode, so the fully checkpointed main file reads correctly as a point-in-time
+snapshot. When a live `-wal` sidecar is present the app opens normally so
+WAL-resident rows are still visible.
 
 ## Read-only guarantee and deletion
 

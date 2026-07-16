@@ -77,6 +77,50 @@ struct SupportingTypesTests {
         #expect(MutationPackage.decode(from: "{ not json") == nil)
     }
 
+    @Test func v01PackageHasNoProvenance() throws {
+        let package = try #require(
+            MutationPackage.decode(from: FixtureDatabase.unescapedFixturePackageJSON)
+        )
+        #expect(package.provenance == nil)
+    }
+
+    @Test func v02PackageDecodesProvenance() throws {
+        let package = try #require(
+            MutationPackage.decode(from: FixtureDatabase.modelSynthesizedPackageJSON)
+        )
+        let provenance = try #require(package.provenance)
+        #expect(provenance.provider == "ollama")
+        #expect(provenance.modelName == "qwen3-coder:30b")
+        #expect(provenance.modelRevision == "30b-a3b")
+        #expect(provenance.manifestSpecVersion == "synthesis-manifest/0.2")
+        #expect(provenance.modelDigest?.hasPrefix("sha256:") == true)
+    }
+
+    // MARK: - InstallationRecord target display
+
+    @Test func installationTargetDisplayNames() {
+        func record(_ target: String) -> InstallationRecord {
+            InstallationRecord(
+                id: "ins", target: target, repositoryRoot: "/r", relativePath: "p",
+                state: "installed", installedAt: "t", uninstalledAt: nil
+            )
+        }
+        #expect(record("codex_repo_skill").targetDisplayName == "Codex repo skill")
+        #expect(record("claude_code_repo_skill").targetDisplayName == "Claude Code repo skill")
+        // Unknown targets pass through verbatim.
+        #expect(record("future_target").targetDisplayName == "future_target")
+    }
+
+    // MARK: - AppSettings
+
+    @Test func appSettingsMenuBarOnlyDefaultsFalseAndPersists() throws {
+        let defaults = try ephemeralDefaults()
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.menuBarOnly == false)
+        settings.menuBarOnly = true
+        #expect(AppSettings(defaults: defaults).menuBarOnly == true)
+    }
+
     // MARK: - DatabaseSelection
 
     @Test func startupPathPrefersRememberedExistingFile() throws {

@@ -37,6 +37,29 @@ public struct MutationPackage: Equatable, Codable {
         public let instruction: String
     }
 
+    /// The v0.2 model-synthesis provenance block.
+    ///
+    /// Present only when a package was enriched by a local model provider. It
+    /// records model identity — never an endpoint, API key, prompt, or raw
+    /// payload — so surfacing it here leaks nothing beyond who produced the
+    /// reviewable content. A package that omits provenance is a plain v0.1
+    /// package; its presence is exactly what distinguishes v0.2.
+    public struct Provenance: Equatable, Codable {
+        public let provider: String
+        public let modelName: String
+        public let modelRevision: String
+        public let modelDigest: String?
+        public let manifestSpecVersion: String
+
+        enum CodingKeys: String, CodingKey {
+            case provider
+            case modelName = "model_name"
+            case modelRevision = "model_revision"
+            case modelDigest = "model_digest"
+            case manifestSpecVersion = "manifest_spec_version"
+        }
+    }
+
     public struct Trigger: Equatable, Codable {
         public let type: String
         public let selector: String
@@ -86,6 +109,9 @@ public struct MutationPackage: Equatable, Codable {
     public let triggers: [Trigger]
     public let exclusions: [String]
     public let permissions: Permissions
+    /// The model-synthesis provenance block, present only for v0.2 packages
+    /// that were enriched by a local model provider.
+    public let provenance: Provenance?
 
     enum CodingKeys: String, CodingKey {
         case mutationID = "mutation_id"
@@ -99,6 +125,7 @@ public struct MutationPackage: Equatable, Codable {
         case triggers
         case exclusions
         case permissions
+        case provenance
     }
 
     public init(from decoder: Decoder) throws {
@@ -114,6 +141,7 @@ public struct MutationPackage: Equatable, Codable {
         triggers = try container.decodeIfPresent([Trigger].self, forKey: .triggers) ?? []
         exclusions = try container.decodeIfPresent([String].self, forKey: .exclusions) ?? []
         permissions = try container.decode(Permissions.self, forKey: .permissions)
+        provenance = try container.decodeIfPresent(Provenance.self, forKey: .provenance)
     }
 
     /// Decode a package from its stored JSON text, or `nil` if it cannot be
