@@ -1,0 +1,10 @@
+{
+  "spec_version": "aep/0.1",
+  "event_id": "evt_native-session-42:0",
+  "session_id": "ses_native-session-42",
+  "timestamp": "2026-07-16T01:20:00+00:00",
+  "sequence": 0,
+  "source": "claude-code",
+  "type": "session.started",
+  "project": "/Users/example/project"
+}

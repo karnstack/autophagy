@@ -1,0 +1,30 @@
+{
+  "spec_version": "aep/0.1",
+  "event_id": "evt_01J2Z3Y4X5W6V7T8S9R0Q1P2N3",
+  "session_id": "ses_01J2Z3Y4X5W6V7T8S9R0Q1P2N3",
+  "timestamp": "2026-07-16T01:22:31Z",
+  "sequence": 7,
+  "source": "codex",
+  "type": "tool.failed",
+  "project": "/Users/example/project",
+  "parent_event_id": "evt_01J2Z3Y4X5W6V7T8S9R0Q1P2N2",
+  "tool": {
+    "name": "bash",
+    "input": "pytest tests/translation",
+    "exit_code": 1,
+    "duration_ms": 843
+  },
+  "artifacts": [
+    {
+      "type": "file",
+      "path": "src/translation/memory.py"
+    },
+    {
+      "type": "command.output",
+      "digest": "sha256:8a7d3f4c"
+    }
+  ],
+  "metadata": {
+    "adapter.native_event_index": 19
+  }
+}

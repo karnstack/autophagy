@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.dev/specs/aep/0.1/schema.json",
+  "title": "Agent Event Protocol event",
+  "description": "The normative serialized event envelope for AEP v0.1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version",
+    "event_id",
+    "session_id",
+    "timestamp",
+    "source",
+    "type"
+  ],
+  "properties": {
+    "spec_version": { "const": "aep/0.1" },
+    "event_id": { "$ref": "#/$defs/eventId" },
+    "session_id": { "$ref": "#/$defs/sessionId" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "source": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "type": { "$ref": "#/$defs/eventType" },
+    "project": { "type": "string", "minLength": 1 },
+    "parent_event_id": { "$ref": "#/$defs/eventId" },
+    "tool": { "$ref": "#/$defs/tool" },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "metadata": { "$ref": "#/$defs/metadata" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "enum": ["tool.called", "tool.completed", "tool.failed"]
+          }
+        },
+        "required": ["type"]
+      },
+      "then": { "required": ["tool"] }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "tool.called" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "tool": { "not": { "required": ["exit_code"] } }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "tool.completed" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "tool": {
+            "properties": { "exit_code": { "const": 0 } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "tool.failed" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "tool": {
+            "required": ["exit_code"],
+            "properties": { "exit_code": { "not": { "const": 0 } } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "eventId": {
+      "type": "string",
+      "pattern": "^evt_[A-Za-z0-9][A-Za-z0-9._:-]{0,126}$"
+    },
+    "sessionId": {
+      "type": "string",
+      "pattern": "^ses_[A-Za-z0-9][A-Za-z0-9._:-]{0,126}$"
+    },
+    "eventType": {
+      "type": "string",
+      "enum": [
+        "session.started",
+        "session.ended",
+        "prompt.submitted",
+        "decision.recorded",
+        "tool.called",
+        "tool.completed",
+        "tool.failed",
+        "file.read",
+        "file.changed",
+        "test.failed",
+        "test.passed",
+        "user.corrected_agent",
+        "user.rejected_action",
+        "context.compacted"
+      ]
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "input": true,
+        "exit_code": { "type": "integer" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "metadata": { "$ref": "#/$defs/metadata" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "file",
+            "git.commit",
+            "git.diff",
+            "test",
+            "command.output",
+            "other"
+          ]
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "minLength": 1 },
+        "metadata": { "$ref": "#/$defs/metadata" }
+      },
+      "anyOf": [
+        { "required": ["path"] },
+        { "required": ["uri"] },
+        { "required": ["digest"] }
+      ]
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

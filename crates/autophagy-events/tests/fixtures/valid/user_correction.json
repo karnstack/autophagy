@@ -1,0 +1,12 @@
+{
+  "spec_version": "aep/0.1",
+  "event_id": "evt_correction-9",
+  "session_id": "ses_native-session-42",
+  "timestamp": "2026-07-16T01:29:03.241Z",
+  "source": "claude-code",
+  "type": "user.corrected_agent",
+  "metadata": {
+    "correction": "Run the schema generator before the build",
+    "redaction.applied": true
+  }
+}
