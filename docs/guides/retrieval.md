@@ -44,6 +44,11 @@ then bm25 ascending among full-text matches, then `occurred_at` descending, then
 `event_id` ascending. For a fixed database the same query returns the same
 ordered event IDs every time.
 
+An event that matches both the signature and the text query is always scored as
+a combined `signature_and_full_text` match (15000 bps). Classification considers
+the full candidate set of each source, so `--limit` only truncates the final
+ranked output — it never changes an event's `match_kind`.
+
 ## Filters
 
 Each filter narrows both the exact and full-text match sources identically:
