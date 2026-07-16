@@ -14,7 +14,9 @@ change because of what happened?”
 The local-only Milestone 1 engine is implemented: AEP v0.1, transactional
 SQLite storage, generic JSONL plus Claude Code and Codex adapters, deterministic
 evidence-linked findings, ingestion redaction, retention, export, and deletion.
-No daemon, mutation generation, replay, or background capture ships yet.
+Phase 2 now generates review-only, zero-permission mutation candidates. No
+daemon, replay, installation, autonomous execution, or background capture ships
+yet.
 
 ## Principles
 
@@ -33,6 +35,7 @@ crates/autophagy-adapter-test-support/  Shared native-adapter conformance checks
 crates/autophagy-cli/      User-facing import, sessions, and search commands
 crates/autophagy-core/     Reusable streaming import application services
 crates/autophagy-events/   AEP Rust types, parsing, and validation
+crates/autophagy-mutations/ Versioned review-only mutation candidates
 crates/autophagy-patterns/ Model-free recurrence detectors and evidence packets
 crates/autophagy-redaction/ Secret rules and project/artifact path policy
 crates/autophagy-store/    SQLite migrations, idempotency, FTS, and deletion
@@ -42,6 +45,7 @@ docs/decisions/           Architecture decision records
 docs/roadmap/              Small pull-request delivery sequence
 docs/specs/aep/0.1/       Versioned AEP JSON Schema and examples
 docs/specs/evidence/0.1/  Versioned deterministic finding contract
+docs/specs/mutation/0.1/  Versioned mutation package contract
 ```
 
 The intended repository structure is documented in
@@ -95,7 +99,7 @@ The [deterministic findings guide](docs/guides/deterministic-findings.md)
 documents recurrence thresholds, signature normalization, counterexamples, and
 the versioned Evidence Packet contract.
 
-## Run the offline milestone demo
+## Run the offline demo
 
 ```sh
 mise run demo
@@ -103,8 +107,8 @@ mise run demo
 
 The demo imports anonymized evidence, emits two deterministic patterns with
 exact evidence IDs, produces a digest that confirms no model or network was
-used, and previews retention deletion. Its temporary database is removed on
-exit.
+used, generates two zero-permission mutation candidates, and previews retention
+deletion. Its temporary database is removed on exit.
 
 Useful privacy and lifecycle commands:
 
@@ -119,6 +123,16 @@ autophagy delete all --confirm delete-all
 
 See the [privacy and lifecycle guide](docs/guides/privacy-and-lifecycle.md) and
 [threat model](docs/security/threat-model.md) for guarantees and limitations.
+
+Inspect candidate packages directly:
+
+```sh
+autophagy mutations
+autophagy --output json mutations --project /workspace/example
+```
+
+See the [mutation candidate guide](docs/guides/mutation-candidates.md) for the
+contract, refusal behavior, and deliberately unavailable lifecycle actions.
 
 ## Try the contract
 

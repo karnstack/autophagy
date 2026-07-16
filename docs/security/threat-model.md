@@ -40,6 +40,7 @@ boundaries.
 | Unverifiable retention effect | Prune dry-run executes and rolls back the real transaction |
 | Dangling deleted evidence | Foreign-key cascades and orphan-artifact cleanup |
 | Silent ID overwrite | Conflicting immutable event bodies are quarantined |
+| Candidate gains execution authority | Mutation Package v0.1 permits only zero-permission instructions |
 
 ## Residual risks
 
@@ -60,6 +61,8 @@ boundaries.
 3. Every finding cites exact immutable event IDs.
 4. No finding is emitted below configured recurrence and independence thresholds.
 5. Destructive operations are explicit, scoped, and report their effect.
+6. Candidate generation cannot install content, execute commands, write files,
+   read environment variables, or access the network.
 
 Report failures of these invariants privately using the process in
 [`SECURITY.md`](../../SECURITY.md).

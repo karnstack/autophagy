@@ -207,6 +207,21 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
         2
     );
 
+    let mutations = run_json(&database, ["mutations"]);
+    let candidates = mutations["result"].as_array().expect("candidates");
+    assert_eq!(candidates.len(), 2);
+    for outcome in candidates {
+        assert_eq!(outcome["status"], "candidate");
+        assert_eq!(outcome["package"]["state"], "candidate");
+        assert_eq!(outcome["package"]["permissions"]["network"], false);
+        assert!(
+            outcome["package"]["permissions"]["commands"]
+                .as_array()
+                .expect("commands")
+                .is_empty()
+        );
+    }
+
     let exported = command(&database).arg("export").output().expect("export");
     assert!(exported.status.success());
     let lines = String::from_utf8(exported.stdout).expect("UTF-8 export");

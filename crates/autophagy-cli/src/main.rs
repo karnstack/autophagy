@@ -16,6 +16,7 @@ use autophagy_adapter_codex::{
 };
 use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
 use autophagy_events::Event;
+use autophagy_mutations::{GenerationOutcome, generate_candidates};
 use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
 use autophagy_store::{
     DeleteAllSummary, DeleteSummary, EventStore, PruneSummary, SearchHit, SessionSummary,
@@ -150,6 +151,16 @@ enum Commands {
         thresholds: ThresholdArgs,
     },
 
+    /// Propose review-only, zero-permission mutation candidates from findings.
+    Mutations {
+        /// Limit candidate generation to one exact project path.
+        #[arg(long, value_name = "PATH")]
+        project: Option<String>,
+
+        #[command(flatten)]
+        thresholds: ThresholdArgs,
+    },
+
     /// Export redacted canonical AEP events as JSONL to standard output.
     Export {
         /// Limit export to one exact project path.
@@ -228,6 +239,7 @@ enum CommandReport {
     Search(Vec<SearchHit>),
     Digest(DigestReport),
     Patterns(Vec<EvidencePacket>),
+    Mutations(Vec<GenerationOutcome>),
     Export(Vec<Event>),
     Prune(PruneSummary),
     DeleteSession(DeleteSummary),
@@ -270,6 +282,7 @@ impl CommandReport {
             | Self::Search(_)
             | Self::Digest(_)
             | Self::Patterns(_)
+            | Self::Mutations(_)
             | Self::Export(_)
             | Self::Prune(_)
             | Self::DeleteSession(_)
@@ -446,6 +459,16 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let events = store.list_events_for_detection(project.as_deref())?;
             Ok(CommandReport::Patterns(detect(&events, thresholds.into())))
         }
+        Commands::Mutations {
+            project,
+            thresholds,
+        } => {
+            let database = resolve_database_path(cli.database)?;
+            let store = open_store(&database)?;
+            let events = store.list_events_for_detection(project.as_deref())?;
+            let findings = detect(&events, thresholds.into());
+            Ok(CommandReport::Mutations(generate_candidates(&findings)))
+        }
         Commands::Export { project } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
@@ -580,6 +603,7 @@ fn write_report(
                 write_findings(&mut writer, &report.findings)?;
             }
             CommandReport::Patterns(findings) => write_findings(&mut writer, findings)?,
+            CommandReport::Mutations(outcomes) => write_mutations(&mut writer, outcomes)?,
             CommandReport::Prune(summary) => writeln!(
                 writer,
                 "{} sessions · {} events · {} artifacts{}",
@@ -627,6 +651,27 @@ fn write_findings(writer: &mut impl Write, findings: &[EvidencePacket]) -> io::R
             finding.evidence.len(),
             finding.counterexamples.len()
         )?;
+    }
+    Ok(())
+}
+
+fn write_mutations(writer: &mut impl Write, outcomes: &[GenerationOutcome]) -> io::Result<()> {
+    if outcomes.is_empty() {
+        writeln!(writer, "no mutation candidates above evidence threshold")?;
+    }
+    for outcome in outcomes {
+        match outcome {
+            GenerationOutcome::Candidate { package } => writeln!(
+                writer,
+                "{}\t{}\t{} evidence\tzero permissions\tcandidate",
+                package.mutation_id,
+                package.title,
+                package.hypothesis.supporting_event_ids.len()
+            )?,
+            GenerationOutcome::InsufficientEvidence { finding_id, reason } => {
+                writeln!(writer, "{finding_id}\tinsufficient evidence\t{reason}")?;
+            }
+        }
     }
     Ok(())
 }
