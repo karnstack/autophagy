@@ -33,8 +33,8 @@ use autophagy_store::{
     DeleteAllSummary, DeleteSummary, EventStore, InstallationRegistration,
     InstallationTransitionOutcome, MutationDetails, MutationRecord, MutationRegisterOutcome,
     MutationRegistration, MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome,
-    ReplayRegistration, SearchHit, SessionSummary, ShadowRegisterOutcome, ShadowRegistration,
-    StoreError,
+    ReplayRegistration, RetrievalHit, RetrievalOutcome, RetrievalQuery, SessionSummary,
+    ShadowRegisterOutcome, ShadowRegistration, StoreError,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
@@ -73,6 +73,21 @@ enum ImportAdapter {
     GenericJsonl,
     ClaudeCode,
     Codex,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum OutcomeArg {
+    Success,
+    Failure,
+}
+
+impl From<OutcomeArg> for RetrievalOutcome {
+    fn from(value: OutcomeArg) -> Self {
+        match value {
+            OutcomeArg::Success => Self::Success,
+            OutcomeArg::Failure => Self::Failure,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -135,10 +150,31 @@ enum Commands {
         limit: u32,
     },
 
-    /// Search the redaction-approved FTS5 event projection.
+    /// Recall evidence by exact signature and/or full text with ranked explanations.
     Search {
-        /// FTS5 query expression.
-        query: String,
+        /// FTS5 query expression. Optional when `--signature` is supplied.
+        query: Option<String>,
+
+        /// Exact normalized operation signature, such as
+        /// `operation/v1|shell|cargo test`.
+        #[arg(long, value_name = "SIGNATURE")]
+        signature: Option<String>,
+
+        /// Restrict to one exact project path (repository filter).
+        #[arg(long, value_name = "PATH")]
+        project: Option<String>,
+
+        /// Restrict to events within the last N days (recency filter).
+        #[arg(long, value_name = "DAYS")]
+        since_days: Option<u32>,
+
+        /// Restrict to an exact AEP event type. Repeatable (event-kind filter).
+        #[arg(long = "event-kind", value_name = "TYPE")]
+        event_kinds: Vec<String>,
+
+        /// Restrict to a success or failure outcome polarity.
+        #[arg(long, value_enum, value_name = "OUTCOME")]
+        outcome: Option<OutcomeArg>,
 
         /// Maximum number of matches to return.
         #[arg(long, default_value_t = 20, value_name = "COUNT")]
@@ -371,7 +407,7 @@ impl ChallengeCheck {
 enum CommandReport {
     Import(ImportReport),
     Sessions(Vec<SessionSummary>),
-    Search(Vec<SearchHit>),
+    Search(Vec<RetrievalHit>),
     Digest(DigestReport),
     Patterns(Vec<EvidencePacket>),
     #[serde(rename = "mutations_propose")]
@@ -660,10 +696,29 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let store = open_store(&database)?;
             Ok(CommandReport::Sessions(store.list_sessions(limit)?))
         }
-        Commands::Search { query, limit } => {
+        Commands::Search {
+            query,
+            signature,
+            project,
+            since_days,
+            event_kinds,
+            outcome,
+            limit,
+        } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
-            Ok(CommandReport::Search(store.search(&query, limit)?))
+            let since =
+                since_days.map(|days| OffsetDateTime::now_utc() - Duration::days(i64::from(days)));
+            let retrieval = RetrievalQuery {
+                text: query,
+                signature,
+                project,
+                since,
+                event_kinds,
+                outcome: outcome.map(RetrievalOutcome::from),
+                limit,
+            };
+            Ok(CommandReport::Search(store.retrieve(&retrieval)?))
         }
         Commands::Digest {
             project,
@@ -1128,8 +1183,21 @@ fn write_report(
                 }
             }
             CommandReport::Search(hits) => {
+                if hits.is_empty() {
+                    writeln!(writer, "no retrieval matches")?;
+                }
                 for hit in hits {
-                    writeln!(writer, "{}\t{}", hit.event_id, hit.snippet)?;
+                    writeln!(
+                        writer,
+                        "{}\t{}\t{} bps\t{}",
+                        hit.event_id,
+                        hit.explanation.match_kind.as_str(),
+                        hit.explanation.rank_score_bps,
+                        hit.snippet
+                            .as_deref()
+                            .or(hit.signature.as_deref())
+                            .unwrap_or("-")
+                    )?;
                 }
             }
             CommandReport::Digest(report) => {

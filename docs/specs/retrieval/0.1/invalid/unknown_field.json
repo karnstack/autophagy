@@ -1,0 +1,15 @@
+{
+  "spec_version": "retrieval/0.1",
+  "match_kind": "exact_signature",
+  "rank_score_bps": 10000,
+  "signals": [
+    {
+      "kind": "exact_signature",
+      "contribution_bps": 10000,
+      "detail": "exact match on signature operation/v1|shell|cargo build"
+    }
+  ],
+  "applied_filters": [],
+  "tie_break": "documented rule",
+  "confidence": 0.9
+}

@@ -18,6 +18,7 @@ thiserror.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+jsonschema = { version = "0.47", default-features = false }
 tempfile = "3.27"
 
 [lints]

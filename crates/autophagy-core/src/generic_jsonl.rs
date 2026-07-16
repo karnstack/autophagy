@@ -299,7 +299,21 @@ fn search_projection(event: &Event, options: &ImportOptions) -> SearchProjection
     SearchProjection {
         tool_input_text,
         searchable_text: (!searchable_text.is_empty()).then_some(searchable_text),
+        signature: signature_projection(event, options.index_tool_input),
     }
+}
+
+/// Derive the redaction-approved normalized signature for the retrieval index.
+///
+/// The command text a signature embeds originates from tool input, so a
+/// signature is indexed only when the source's tool input is already
+/// redaction-approved for indexing. This keeps the exact-signature index built
+/// exclusively from redaction-approved projections.
+fn signature_projection(event: &Event, index_tool_input: bool) -> Option<String> {
+    index_tool_input
+        .then(|| autophagy_events::signature::normalize_operation(event))
+        .flatten()
+        .map(|operation| operation.operation_key())
 }
 
 fn value_as_text(value: &serde_json::Value) -> String {

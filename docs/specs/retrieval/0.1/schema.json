@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/retrieval/0.1/schema.json",
+  "title": "Autophagy Retrieval Ranking Explanation v0.1",
+  "description": "Deterministic, model-free explanation of why one retrieval hit ranked where it did.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version",
+    "match_kind",
+    "rank_score_bps",
+    "signals",
+    "applied_filters",
+    "tie_break"
+  ],
+  "properties": {
+    "spec_version": { "const": "retrieval/0.1" },
+    "match_kind": {
+      "enum": ["exact_signature", "full_text", "signature_and_full_text"]
+    },
+    "rank_score_bps": { "type": "integer", "minimum": 0, "maximum": 15000 },
+    "signals": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/signal" }
+    },
+    "applied_filters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/filter" }
+    },
+    "tie_break": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "contribution_bps", "detail"],
+      "properties": {
+        "kind": { "enum": ["exact_signature", "full_text", "recency"] },
+        "contribution_bps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "detail": { "type": "string", "minLength": 1 }
+      }
+    },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "value"],
+      "properties": {
+        "field": { "enum": ["project", "since", "event_kind", "outcome"] },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

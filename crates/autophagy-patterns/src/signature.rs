@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use autophagy_events::Event;
+use autophagy_events::{Event, signature::normalize_operation};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -11,23 +11,17 @@ pub(crate) struct FailureOperation {
 }
 
 pub(crate) fn failure_operation(event: &Event, include_exit: bool) -> Option<FailureOperation> {
-    let tool = event.tool.as_ref()?;
-    let tool_name = normalize_tool(&tool.name);
-    let command = command(tool.input.as_ref()?)?;
-    let command = normalize_command(&command, event.project.as_deref());
-    if command.is_empty() {
-        return None;
-    }
-    let success_key = format!("operation/v1|{tool_name}|{command}");
+    let operation = normalize_operation(event)?;
+    let success_key = operation.operation_key();
     let signature = if include_exit {
-        format!("failure/v1|{tool_name}|{command}|exit:{}", tool.exit_code?)
+        operation.failure_signature(event.tool.as_ref()?.exit_code?)
     } else {
         success_key.clone()
     };
     Some(FailureOperation {
         signature,
         success_key,
-        label: format!("{tool_name}: {command}"),
+        label: operation.label(),
     })
 }
 
@@ -61,33 +55,6 @@ pub(crate) fn finding_id(detector: &str, signature: &str) -> String {
         write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
     }
     format!("fnd_{encoded}")
-}
-
-fn normalize_tool(tool: &str) -> String {
-    match tool.trim().to_ascii_lowercase().as_str() {
-        "bash" | "exec" | "exec_command" | "shell" | "terminal" => "shell".to_owned(),
-        other => other.to_owned(),
-    }
-}
-
-fn command(input: &Value) -> Option<String> {
-    match input {
-        Value::String(value) => Some(value.clone()),
-        Value::Object(object) => object
-            .get("command")
-            .or_else(|| object.get("cmd"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        _ => None,
-    }
-}
-
-fn normalize_command(command: &str, project: Option<&str>) -> String {
-    let command = project.map_or_else(
-        || command.to_owned(),
-        |project| command.replace(project, "$PROJECT"),
-    );
-    command.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn normalize_label(label: &str) -> String {

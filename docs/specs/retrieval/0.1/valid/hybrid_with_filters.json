@@ -1,0 +1,27 @@
+{
+  "spec_version": "retrieval/0.1",
+  "match_kind": "signature_and_full_text",
+  "rank_score_bps": 15000,
+  "signals": [
+    {
+      "kind": "exact_signature",
+      "contribution_bps": 10000,
+      "detail": "exact match on signature operation/v1|shell|cargo build"
+    },
+    {
+      "kind": "full_text",
+      "contribution_bps": 5000,
+      "detail": "full-text match (bm25 -1.2453)"
+    },
+    {
+      "kind": "recency",
+      "contribution_bps": 0,
+      "detail": "occurred_at 2026-07-11T00:00:00Z breaks ties within a tier (newer first)"
+    }
+  ],
+  "applied_filters": [
+    { "field": "project", "value": "/repo/alpha" },
+    { "field": "outcome", "value": "success" }
+  ],
+  "tie_break": "rank_score_bps descending (exact-signature matches outrank full-text-only matches); within full-text matches, bm25 ascending; then occurred_at descending (recency); then event_id ascending"
+}

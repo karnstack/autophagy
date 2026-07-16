@@ -1,6 +1,6 @@
 # Local database schema
 
-Status: implemented through Phase 2 reversible installation (2026-07-16)
+Status: implemented through exact and hybrid retrieval (2026-07-17)
 
 SQLite is the single-user source of truth. Foreign keys and WAL mode are enabled
 per connection. Timestamps are canonical RFC 3339 UTC strings so exports remain
@@ -244,6 +244,14 @@ CREATE VIRTUAL TABLE events_fts USING fts5(
   content_rowid='event_row_id',
   tokenize='unicode61 remove_diacritics 2'
 );
+
+CREATE TABLE event_signatures (
+  event_row_id  INTEGER PRIMARY KEY REFERENCES events(row_id) ON DELETE CASCADE,
+  signature     TEXT NOT NULL CHECK (length(signature) > 0)
+) STRICT;
+
+CREATE INDEX event_signatures_lookup
+  ON event_signatures(signature, event_row_id);
 ```
 
 Insert, update, and delete triggers keep the external-content FTS5 table aligned
@@ -252,6 +260,15 @@ in the same transaction as `events`. Project paths and tool names come from the
 already policy-processed AEP envelope; tool input and free text require an
 explicit redaction-approved search projection. Raw event JSON and raw tool input
 are never indexed blindly.
+
+`event_signatures` is the exact normalized-signature index behind hybrid
+retrieval. A row holds one event's normalized operation signature (for example
+`operation/v1|shell|cargo build`), supplied through the same redaction-approved
+search projection that gates free-text tool input, and written in the same
+transaction as the event. Because a signature embeds command text, it is indexed
+only when the source's tool input is approved for indexing. Rows cascade on event
+deletion, so quarantine, prune, and delete-all keep the index consistent without
+a separate deletion path.
 
 ## Idempotency
 

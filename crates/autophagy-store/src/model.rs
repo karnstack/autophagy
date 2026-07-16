@@ -1,5 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
+use time::OffsetDateTime;
 
 /// Stable provenance for one adapter installation or history directory.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -54,6 +55,13 @@ pub struct SearchProjection {
     pub tool_input_text: Option<String>,
     /// Sanitized free text extracted by an adapter or digester.
     pub searchable_text: Option<String>,
+    /// Redaction-approved normalized operation signature for exact lookup.
+    ///
+    /// Populated by the caller (never derived from raw JSON inside the store)
+    /// only when the source's tool input is already redaction-approved for
+    /// indexing. When absent, the event is simply not recalled by exact
+    /// signature.
+    pub signature: Option<String>,
 }
 
 /// Result of attempting to persist one event.
@@ -111,6 +119,198 @@ pub struct SearchHit {
     pub rank: f64,
     /// Context with matching terms surrounded by brackets.
     pub snippet: String,
+}
+
+/// Outcome polarity for the retrieval outcome filter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalOutcome {
+    /// Successful tool or test events (`tool.completed`, `test.passed`).
+    Success,
+    /// Failed tool or test events (`tool.failed`, `test.failed`).
+    Failure,
+}
+
+impl RetrievalOutcome {
+    /// Event types selected by this outcome, in stable order.
+    #[must_use]
+    pub const fn event_types(self) -> [&'static str; 2] {
+        match self {
+            Self::Success => ["tool.completed", "test.passed"],
+            Self::Failure => ["tool.failed", "test.failed"],
+        }
+    }
+
+    /// Stable serialized name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+/// A deterministic exact-and-hybrid retrieval request.
+///
+/// At least one of [`text`](Self::text) or [`signature`](Self::signature) must
+/// be present. Every other field is an inclusive filter that narrows both the
+/// exact-signature and full-text match sources identically.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RetrievalQuery {
+    /// Optional FTS5 query over the redaction-approved projection.
+    pub text: Option<String>,
+    /// Optional exact normalized operation signature.
+    pub signature: Option<String>,
+    /// Restrict to one exact project path (repository filter).
+    pub project: Option<String>,
+    /// Restrict to events at or after this instant (recency filter).
+    pub since: Option<OffsetDateTime>,
+    /// Restrict to these exact AEP event types (event-kind filter).
+    pub event_kinds: Vec<String>,
+    /// Restrict to a success or failure outcome polarity.
+    pub outcome: Option<RetrievalOutcome>,
+    /// Maximum number of ranked results to return.
+    pub limit: u32,
+}
+
+/// Which match sources produced a retrieval hit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalMatchKind {
+    /// The event's stored signature equals the query signature.
+    ExactSignature,
+    /// The event matched the full-text query only.
+    FullText,
+    /// The event matched both the exact signature and the full-text query.
+    SignatureAndFullText,
+}
+
+impl RetrievalMatchKind {
+    /// Stable serialized name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactSignature => "exact_signature",
+            Self::FullText => "full_text",
+            Self::SignatureAndFullText => "signature_and_full_text",
+        }
+    }
+}
+
+/// A single named contribution to a hit's ranking.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankingSignalKind {
+    /// The exact-signature tier contribution.
+    ExactSignature,
+    /// The full-text relevance tier contribution.
+    FullText,
+    /// The recency ordering signal (a within-tier tie-break only).
+    Recency,
+}
+
+impl RankingSignalKind {
+    /// Stable serialized name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactSignature => "exact_signature",
+            Self::FullText => "full_text",
+            Self::Recency => "recency",
+        }
+    }
+}
+
+/// One inspectable contribution to a hit's deterministic rank.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RankingSignal {
+    /// Which signal contributed.
+    pub kind: RankingSignalKind,
+    /// Integer score contribution in basis points.
+    ///
+    /// Recency is a within-tier ordering tie-break with a deliberate zero
+    /// score weight, so it can never move a full-text hit above an
+    /// exact-signature hit.
+    pub contribution_bps: u32,
+    /// Human-readable justification, such as the matched signature or bm25.
+    pub detail: String,
+}
+
+/// Which filter field narrowed a retrieval and to what value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalFilterField {
+    /// Exact project-path (repository) filter.
+    Project,
+    /// Recency lower-bound filter.
+    Since,
+    /// Event-kind filter.
+    EventKind,
+    /// Outcome-polarity filter.
+    Outcome,
+}
+
+impl RetrievalFilterField {
+    /// Stable serialized name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Since => "since",
+            Self::EventKind => "event_kind",
+            Self::Outcome => "outcome",
+        }
+    }
+}
+
+/// One applied retrieval filter, echoed into every hit's explanation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RetrievalFilter {
+    /// Which filter field was applied.
+    pub field: RetrievalFilterField,
+    /// The exact value the filter required.
+    pub value: String,
+}
+
+/// Versioned, deterministic explanation of why a hit ranked where it did.
+///
+/// The normative structure lives at `docs/specs/retrieval/0.1/schema.json`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RankingExplanation {
+    /// Ranking-explanation contract version (`retrieval/0.1`).
+    pub spec_version: &'static str,
+    /// Which match sources produced this hit.
+    pub match_kind: RetrievalMatchKind,
+    /// Sum of the scored signal contributions in basis points.
+    pub rank_score_bps: u32,
+    /// Ordered contributing signals.
+    pub signals: Vec<RankingSignal>,
+    /// Filters applied to this retrieval, in stable order.
+    pub applied_filters: Vec<RetrievalFilter>,
+    /// Stable statement of the total ordering and tie-break rule.
+    pub tie_break: &'static str,
+}
+
+/// One ranked retrieval result with its exact evidence identity.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RetrievalHit {
+    /// Exact AEP evidence identifier.
+    pub event_id: String,
+    /// Session containing the event.
+    pub session_id: String,
+    /// AEP event type.
+    pub event_type: String,
+    /// Canonical occurrence timestamp.
+    pub occurred_at: String,
+    /// Policy-processed project path, when available.
+    pub project: Option<String>,
+    /// Stored normalized signature, when the event carries one.
+    pub signature: Option<String>,
+    /// Full-text snippet with matched terms bracketed, when text matched.
+    pub snippet: Option<String>,
+    /// Deterministic, versioned ranking explanation.
+    pub explanation: RankingExplanation,
 }
 
 /// Row counts useful for diagnostics and idempotency assertions.
