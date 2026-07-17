@@ -26,6 +26,7 @@
 //! model-free, I/O-free provider that lets the whole boundary be exercised
 //! offline today. It is the executable vertical slice that justifies the crate.
 
+mod agent_cli;
 mod deterministic;
 mod manifest;
 mod prompt;
@@ -34,6 +35,7 @@ mod remote;
 mod synthesize;
 mod validate;
 
+pub use agent_cli::{AgentCliKind, AgentCliProvider};
 pub use deterministic::DeterministicReferenceProvider;
 pub use manifest::{
     Capability, ManifestError, ManifestSpecVersion, ManifestTimeouts, ModelFormat, ModelManifest,

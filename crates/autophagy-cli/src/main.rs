@@ -56,9 +56,9 @@ use autophagy_store::{
     ShadowRegisterOutcome, ShadowRegistration, StoreError,
 };
 use autophagy_synthesis::{
-    DeterministicReferenceProvider, EndpointLocality, ManifestError, ModelFormat, ModelManifest,
-    OllamaProvider, OpenAiCompatibleProvider, SynthesisOutcome, SynthesisProvider, TokenUsage,
-    classify_endpoint, synthesize_candidates,
+    AgentCliProvider, DeterministicReferenceProvider, EndpointLocality, ManifestError, ModelFormat,
+    ModelManifest, OllamaProvider, OpenAiCompatibleProvider, SynthesisOutcome, SynthesisProvider,
+    TokenUsage, classify_endpoint, synthesize_candidates,
 };
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
@@ -498,7 +498,7 @@ enum MutationAction {
         #[arg(long, value_enum, default_value_t = SynthesisProviderChoice::Deterministic)]
         provider: SynthesisProviderChoice,
 
-        /// Local model manifest (synthesis-manifest/0.1 or 0.2) JSON file.
+        /// Local model manifest (synthesis-manifest/0.1, 0.2, or 0.3) JSON file.
         /// Defaults to `synthesis.manifest_path` in config when omitted.
         #[arg(long, value_name = "PATH")]
         manifest: Option<PathBuf>,
@@ -639,6 +639,10 @@ enum SynthesisProviderChoice {
     Ollama,
     /// Local OpenAI-compatible server (`/v1/chat/completions` with `json_schema`).
     OpenaiCompatible,
+    /// The authenticated Claude Code CLI, run as a subprocess.
+    ClaudeCli,
+    /// The authenticated Codex CLI, run as a subprocess.
+    CodexCli,
 }
 
 impl SynthesisProviderChoice {
@@ -648,6 +652,8 @@ impl SynthesisProviderChoice {
             Self::Deterministic => ModelFormat::Deterministic,
             Self::Ollama => ModelFormat::Ollama,
             Self::OpenaiCompatible => ModelFormat::OpenAiCompatible,
+            Self::ClaudeCli => ModelFormat::ClaudeCli,
+            Self::CodexCli => ModelFormat::CodexCli,
         }
     }
 
@@ -656,6 +662,18 @@ impl SynthesisProviderChoice {
             Self::Deterministic => "deterministic",
             Self::Ollama => "ollama",
             Self::OpenaiCompatible => "openai-compatible",
+            Self::ClaudeCli => "claude-cli",
+            Self::CodexCli => "codex-cli",
+        }
+    }
+
+    /// The cloud vendor an agent-CLI provider reaches through the user's
+    /// logged-in CLI, or `None` for local/offline providers.
+    const fn cloud_vendor(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCli => Some("Anthropic"),
+            Self::CodexCli => Some("OpenAI"),
+            Self::Deterministic | Self::Ollama | Self::OpenaiCompatible => None,
         }
     }
 }
@@ -967,6 +985,13 @@ enum CliError {
         "synthesis endpoint host '{host}' is not loopback; pass --allow-remote-endpoint to send evidence off this machine"
     )]
     RemoteEndpointRefused { host: String },
+    #[error(
+        "provider '{provider}' sends the structured synthesis prompt to {vendor}'s cloud through your logged-in CLI; pass --allow-remote-endpoint to allow it to leave this machine"
+    )]
+    AgentCliConsentRequired {
+        provider: &'static str,
+        vendor: &'static str,
+    },
     #[error("replay scenario cites event '{0}', which is not in the local evidence store")]
     MissingReplayEvidence(String),
     #[error("shadow observation cites event '{0}', which is not in the local evidence store")]
@@ -1510,6 +1535,8 @@ fn execute_mutation_action(
                 match config.synthesis_provider.as_deref() {
                     Some("ollama") => SynthesisProviderChoice::Ollama,
                     Some("openai-compatible") => SynthesisProviderChoice::OpenaiCompatible,
+                    Some("claude-cli") => SynthesisProviderChoice::ClaudeCli,
+                    Some("codex-cli") => SynthesisProviderChoice::CodexCli,
                     _ => provider,
                 }
             };
@@ -1540,12 +1567,33 @@ fn execute_mutation_action(
                 SynthesisProviderChoice::OpenaiCompatible => Box::new(
                     OpenAiCompatibleProvider::from_manifest(&model_manifest, allow_remote_endpoint),
                 ),
+                SynthesisProviderChoice::ClaudeCli => {
+                    Box::new(AgentCliProvider::claude_from_manifest(&model_manifest))
+                }
+                SynthesisProviderChoice::CodexCli => {
+                    Box::new(AgentCliProvider::codex_from_manifest(&model_manifest))
+                }
             };
-            // Enforce the loopback default up front for HTTP providers: refuse a
-            // non-loopback endpoint unless the operator opted in, and warn
-            // clearly when they did.
+            // Consent gate. Agent-CLI providers always reach a vendor cloud
+            // through the user's logged-in CLI, so they require the explicit
+            // remote opt-in unconditionally. HTTP providers only require it when
+            // their endpoint host is non-loopback. Either way, evidence never
+            // leaves the machine without the flag, and the flag prints one clear
+            // egress line.
             let mut warnings = Vec::new();
-            if synthesis_provider.uses_network() {
+            if let Some(vendor) = provider.cloud_vendor() {
+                if allow_remote_endpoint {
+                    warnings.push(format!(
+                        "the structured synthesis prompt (baseline text, constraints, and cited event IDs) will be sent to {vendor} via your logged-in `{}` CLI because --allow-remote-endpoint is set; usage is billed to your existing {vendor} plan",
+                        model_manifest.path
+                    ));
+                } else {
+                    return Err(CliError::AgentCliConsentRequired {
+                        provider: provider.as_str(),
+                        vendor,
+                    });
+                }
+            } else if synthesis_provider.uses_network() {
                 if let Ok(EndpointLocality::Remote { host }) =
                     classify_endpoint(&model_manifest.path)
                 {

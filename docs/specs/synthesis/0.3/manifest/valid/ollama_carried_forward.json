@@ -1,0 +1,10 @@
+{
+  "spec_version": "synthesis-manifest/0.3",
+  "name": "qwen3-coder:30b",
+  "format": "ollama",
+  "path": "http://localhost:11434",
+  "revision": "30b-a3b",
+  "capabilities": ["mutation_synthesis"],
+  "resource_hints": { "min_memory_mb": 24576 },
+  "timeouts": { "connect_ms": 2000, "request_ms": 90000 }
+}

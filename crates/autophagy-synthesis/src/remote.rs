@@ -214,7 +214,7 @@ fn transport_error(config: &HttpConfig, error: &ureq::Error) -> ProviderError {
 
 /// Parse model output into a proposal, treating unparseable output as an honest
 /// decline rather than an error.
-fn parse_proposal(content: &str, usage: TokenUsage) -> ProviderResponse {
+pub(crate) fn parse_proposal(content: &str, usage: TokenUsage) -> ProviderResponse {
     match serde_json::from_str::<SynthesisResponse>(content.trim()) {
         Ok(response) => ProviderResponse {
             proposal: SynthesisProposal::Proposed {

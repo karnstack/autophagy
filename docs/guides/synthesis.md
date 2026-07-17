@@ -8,8 +8,10 @@ to a provider, validates every field the provider returns, and registers the
 survivors as ordinary review-only candidates.
 
 A built-in deterministic reference provider makes the whole boundary
-exercisable offline today, with no model at all. Two model-backed providers can
-enrich candidates against a local inference runtime when you want them.
+exercisable offline today, with no model at all. Model-backed providers can
+enrich candidates against a local inference runtime, or — if you already have an
+authenticated coding-agent CLI — against `claude` or `codex` with no API key and
+no server to run.
 
 ```sh
 # Offline, no model — the default path.
@@ -23,18 +25,29 @@ autophagy mutations synthesize --provider ollama \
 # Local OpenAI-compatible server (llama.cpp, LM Studio, vLLM).
 autophagy mutations synthesize --provider openai-compatible \
   --manifest ~/.autophagy/models/local-llama.json --dry-run
+
+# Your authenticated Claude Code CLI (reaches Anthropic's cloud; opt-in required).
+autophagy mutations synthesize --provider claude-cli \
+  --manifest ~/.autophagy/models/claude-cli.json --allow-remote-endpoint
+
+# Your authenticated Codex CLI (reaches OpenAI's cloud; opt-in required).
+autophagy mutations synthesize --provider codex-cli \
+  --manifest ~/.autophagy/models/codex-cli.json --allow-remote-endpoint
 ```
 
 The `--provider` choice must match the manifest `format`
 (`deterministic` ↔ `deterministic`, `ollama` ↔ `ollama`,
-`openai-compatible` ↔ `openai_compatible`); a mismatch is a precise error.
+`openai-compatible` ↔ `openai_compatible`, `claude-cli` ↔ `claude_cli`,
+`codex-cli` ↔ `codex_cli`); a mismatch is a precise error.
 
 The normative contracts are
-[`docs/specs/synthesis/0.1/`](../specs/synthesis/0.1/README.md) (response) and
-[`docs/specs/synthesis/0.2/`](../specs/synthesis/0.2/README.md) (manifest). The
-design rationale and privacy stance are in
-[ADR 0004](../decisions/0004-local-synthesis-boundary.md) and
-[ADR 0007](../decisions/0007-model-synthesis-providers.md).
+[`docs/specs/synthesis/0.1/`](../specs/synthesis/0.1/README.md) (response),
+[`docs/specs/synthesis/0.2/`](../specs/synthesis/0.2/README.md) (HTTP-provider
+manifest), and [`docs/specs/synthesis/0.3/`](../specs/synthesis/0.3/README.md)
+(agent-CLI manifest). The design rationale and privacy stance are in
+[ADR 0004](../decisions/0004-local-synthesis-boundary.md),
+[ADR 0007](../decisions/0007-model-synthesis-providers.md), and
+[ADR 0011](../decisions/0011-agent-cli-synthesis-providers.md).
 
 ## With and without a model
 
@@ -105,6 +118,52 @@ By default the endpoint host must be loopback (`localhost`, `127.0.0.0/8`, or
 the machine. This keeps the default path local-only. Timeouts are always
 enforced (defaults: 3 s connect, 60 s total).
 
+### Agent-CLI provider manifests
+
+If you already have an authenticated coding-agent CLI, you can use it as a
+synthesis backend with no API key and no local inference server. The
+`claude_cli` and `codex_cli` formats (`synthesis-manifest/0.3`) point at the CLI
+binary and reuse your existing login:
+
+```json
+{
+  "spec_version": "synthesis-manifest/0.3",
+  "name": "codex-cli-login",
+  "format": "codex_cli",
+  "path": "/opt/homebrew/bin/codex",
+  "revision": "cli-0.x",
+  "capabilities": ["mutation_synthesis"],
+  "resource_hints": { "min_memory_mb": 512 },
+  "timeouts": { "request_ms": 180000 },
+  "model": "gpt-5-codex"
+}
+```
+
+- `path` is the CLI **binary** — an absolute path, or a bare name (`claude`,
+  `codex`) resolved via your `PATH`. A binary that cannot be launched is a clean,
+  actionable error, never a crash.
+- `model` is optional and passed to the CLI's `--model` flag; omit it to use the
+  CLI's own configured default model. `name` stays a human-readable label.
+- `timeouts.request_ms` overrides the wall-clock timeout (default 120 s). A hung
+  CLI is killed at the deadline and reported as a structured provider error.
+
+Autophagy spawns the CLI as a subprocess, hands it the same deterministic prompt
+the HTTP providers use, disables tool and command execution for the run
+(`--disallowed-tools …` for Claude Code, `--sandbox read-only` for Codex), and
+requests JSON-only output. Unparseable output is an honest decline; a non-zero
+exit, timeout, or missing binary is a clean provider error carrying only a
+bounded, sanitized stderr snippet — never the prompt or a secret.
+
+Because these CLIs reach their **vendor's cloud** through your login, an
+agent-CLI provider always requires `--allow-remote-endpoint`; without it,
+synthesis refuses before spawning anything. When you pass it, the run prints one
+clear line naming the vendor the structured prompt is sent to. Costs are your
+existing plan, billed through your CLI login — Autophagy stores no API key for
+these providers.
+
+Setup-wizard integration for these providers lands separately; today you point
+`--manifest` at a `claude_cli`/`codex_cli` manifest by hand.
+
 ## What the boundary guarantees
 
 - **Insufficient evidence refuses silently.** The deterministic evidence gate
@@ -153,10 +212,12 @@ and `network_used: false`.
 ## Token accounting and cost expectations
 
 The prompt is built only from the deterministic template's structured fields —
-the baseline text, the hard constraints, and the cited event **identifiers**. It
+the baseline text, the hard constraints, and the cited event **identifiers** —
+plus a fixed system prompt that spells out the exact response shape (including
+the literal permissions object) so a model emits a schema-valid candidate. It
 never includes session transcripts or raw event payloads. Measured against the
-deterministic fixture corpus, that is roughly **700 prompt tokens per candidate**
-(693 at the maximum), and the response is capped at **1024 tokens**. When a
+deterministic fixture corpus, that is roughly **900 prompt tokens per candidate**
+(899 at the maximum), and the response is capped at **1024 tokens**. When a
 runtime reports usage, Autophagy surfaces the exact `prompt_tokens` and
 `completion_tokens` per candidate; when it does not, usage is reported as
 unavailable and never estimated.
@@ -167,9 +228,13 @@ Cost then follows directly, in tokens (Autophagy quotes no invented prices):
   cost** — you already run the hardware.
 - **Hosted endpoints** (only reachable with `--allow-remote-endpoint`) cost
   roughly `candidates × (prompt_tokens + completion_tokens) × provider_rate`.
-  With ~700 prompt tokens plus up to 1024 completion tokens per candidate, that
-  is on the order of ~1.7k tokens per candidate; multiply by your provider's
+  With ~900 prompt tokens plus up to 1024 completion tokens per candidate, that
+  is on the order of ~1.9k tokens per candidate; multiply by your provider's
   current per-token price from its own pricing page.
+- **Agent CLIs** (`claude-cli`, `codex-cli`) have **no separate Autophagy cost**:
+  the request goes through your existing CLI login and is billed to your existing
+  vendor plan. Both CLIs report per-candidate `prompt_tokens` and
+  `completion_tokens`, which Autophagy surfaces unchanged.
 
 ## Privacy
 
@@ -186,3 +251,13 @@ Reaching a **non-loopback** endpoint requires the explicit
 request then leaves the machine to the endpoint you named. An API key, when
 configured via `api_key_env`, travels only as an outbound `Authorization: Bearer`
 header and never appears in the manifest, database, logs, output, or errors.
+
+The **agent-CLI** providers (`claude-cli`, `codex-cli`) reach their vendor's
+cloud through your own logged-in CLI, so they always require
+`--allow-remote-endpoint`. When enabled, exactly the same structured request —
+the template fields and the cited event **identifiers**, nothing more — is what
+that CLI sends to Anthropic or OpenAI on your behalf. Autophagy stores no API key
+or credential for these providers; the CLI uses your existing login and your
+usage is billed to your existing plan. The spawned CLI cannot execute tools or
+shell commands, and its stderr is only ever surfaced as a bounded, sanitized
+snippet.

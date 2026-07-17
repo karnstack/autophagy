@@ -1,0 +1,10 @@
+{
+  "spec_version": "synthesis-manifest/0.3",
+  "name": "claude-code-login",
+  "format": "claude_cli",
+  "path": "claude",
+  "revision": "cli-2.x",
+  "capabilities": ["mutation_synthesis"],
+  "resource_hints": { "min_memory_mb": 512 },
+  "api_key": "sk-should-never-be-inline"
+}

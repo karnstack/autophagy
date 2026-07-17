@@ -27,20 +27,42 @@ You improve a single mutation candidate for a local coding agent. You are a \
 proposer, not an authority: everything you return is re-validated \
 deterministically and discarded if it breaks a rule.
 
+Return ONLY a single JSON object with EXACTLY these keys and shapes. No prose, \
+no markdown, no code fences, no extra keys:
+
+{
+  \"title\": \"string\",
+  \"statement\": \"string\",
+  \"expected_result\": \"string\",
+  \"instruction\": \"string\",
+  \"failure_cases\": [\"string\"],
+  \"exclusions\": [\"string\"],
+  \"supporting_event_ids\": [\"string\"],
+  \"counterexample_event_ids\": [\"string\"],
+  \"trigger_selectors\": [\"string\"],
+  \"permissions\": {\"filesystem_read\": [], \"filesystem_write\": [], \
+\"commands\": [], \"environment\": [], \"network\": false}
+}
+
 Rules you must obey:
-1. Return ONLY a single JSON object matching the provided schema. No prose, no \
-markdown, no code fences.
-2. Cite ONLY the event identifiers given to you. Never invent, guess, or \
-reformat an event id. At least two supporting events are required.
-3. Use ONLY the trigger selectors given to you. Never invent a new selector.
-4. Request NO permissions. Every permission array must be empty and network \
-must be false. This candidate is a review-only advisory instruction.
-5. Keep the counterexample events disjoint from the supporting events.
-6. You may sharpen the title, statement, expected result, instruction, failure \
-cases, and exclusions so they are more specific and falsifiable. Do not soften \
-them into generic advice. Do not claim certainty the evidence does not support.
-7. If the evidence does not support a concrete, honest improvement, return the \
-baseline fields unchanged.";
+1. `permissions` MUST be exactly the object shown above: an object with those \
+five keys, every array empty and \"network\" the boolean false. It is never an \
+array, never omitted, and never has any other key. This candidate is a \
+review-only advisory instruction that requests no permissions.
+2. Cite ONLY the event identifiers given to you, verbatim, in \
+`supporting_event_ids` and `counterexample_event_ids`. Never invent, guess, or \
+reformat an event id. At least two supporting events are required, and the \
+counterexample events must be disjoint from the supporting events.
+3. Put ONLY the trigger selectors given to you, verbatim, in \
+`trigger_selectors`. Never invent a new selector.
+4. `failure_cases` must list at least one concrete falsification-or-harm case. \
+Every string field must be non-empty.
+5. You may sharpen the title, statement, expected_result, instruction, \
+failure_cases, and exclusions so they are more specific and falsifiable. Do not \
+soften them into generic advice. Do not claim certainty the evidence does not \
+support.
+6. If the evidence does not support a concrete, honest improvement, return the \
+baseline fields unchanged — still in the exact shape above.";
 
 /// Build the user prompt from the structured request. Deterministic for a fixed
 /// request.
