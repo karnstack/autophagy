@@ -5,10 +5,12 @@
 //! model.
 
 mod evaluate;
+mod extract;
 mod model;
 mod validate;
 
 pub use evaluate::{ShadowEvaluationError, evaluate};
+pub use extract::{ShadowDraftError, extract_observation_draft};
 pub use model::{
     ShadowDisposition, ShadowObservation, ShadowObservationSpecVersion, ShadowPolicy, ShadowReport,
     ShadowResult, ShadowResultSpecVersion, ShadowSuite, ShadowSuiteSpecVersion, ShadowSummary,

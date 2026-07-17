@@ -4,12 +4,41 @@ Shadow is the final measurement gate before a user may install an instruction
 mutation. It observes where the immutable trigger would fire but never changes
 agent context or behavior.
 
+## Drafting a Shadow Suite
+
+You do not have to hand-author the Shadow Suite JSON. `mutations shadow-draft`
+exports an evidence-linked draft from the mutation's own supporting evidence and
+counterexamples, mirroring `replay-draft`:
+
 ```sh
-autophagy mutations shadow mut_example \
-  --observations evals/fixtures/shadow/example.json
+autophagy mutations shadow-draft mut_example \
+  --suite shadow-review.json \
+  --context-events 1
 ```
 
-Each Shadow Suite v0.1 observation cites independent local AEP event IDs,
+Supporting evidence becomes an observation drafted `intervention_would_help:
+true`; counterexample evidence becomes one drafted `false`. Each observation
+carries a human-readable `note` describing what to confirm against the real
+outcome, the exact source event IDs, and the observed trigger selectors.
+Observation IDs (`shd_…`) are derived deterministically from their inputs — no
+clock, no randomness — so re-running produces byte-for-byte identical output.
+Every observation's source event IDs are unique across the suite, as the
+contract requires. Drafting only reads the database and writes the one file you
+name; it performs no state transition. `--force` overwrites an existing file.
+
+Review each drafted `intervention_would_help` against the real session outcome
+before evaluating; the draft is a starting point, not a verdict.
+
+## Evaluating a Shadow Suite
+
+```sh
+autophagy mutations shadow mut_example \
+  --suite shadow-review.json
+```
+
+The canonical flag is `--suite`; the former `--observations` name still works as
+a hidden alias. Each Shadow Suite v0.1 observation cites independent local AEP
+event IDs,
 records selectors visible before the outcome, and annotates whether intervention
 would have helped. Exact selector matching produces true positives, true
 negatives, false positives, and false negatives. Passing requires five

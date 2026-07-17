@@ -46,7 +46,8 @@ use autophagy_replay::{
     ReplaySuite, evaluate, extract_review_draft,
 };
 use autophagy_shadow::{
-    ShadowEvaluationError, ShadowReport, ShadowSuite, evaluate as evaluate_shadow,
+    ShadowDraftError, ShadowEvaluationError, ShadowReport, ShadowSuite,
+    evaluate as evaluate_shadow, extract_observation_draft,
 };
 use autophagy_store::{
     DeleteAllSummary, DeleteSummary, EventStore, InstallationRegistration,
@@ -56,9 +57,10 @@ use autophagy_store::{
     ShadowRegisterOutcome, ShadowRegistration, StoreError,
 };
 use autophagy_synthesis::{
-    AgentCliProvider, DeterministicReferenceProvider, EndpointLocality, ManifestError, ModelFormat,
-    ModelManifest, OllamaProvider, OpenAiCompatibleProvider, SynthesisOutcome, SynthesisProvider,
-    TokenUsage, classify_endpoint, synthesize_candidates,
+    AgentCliProvider, Capability, DeterministicReferenceProvider, EndpointLocality, ManifestError,
+    ManifestSpecVersion, ModelFormat, ModelManifest, OllamaProvider, OpenAiCompatibleProvider,
+    ResourceHints, SynthesisOutcome, SynthesisProvider, TokenUsage, classify_endpoint,
+    synthesize_candidates,
 };
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
@@ -566,9 +568,10 @@ enum MutationAction {
         /// Stable mutation identity.
         mutation_id: String,
 
-        /// Replay Suite v0.1 JSON file.
-        #[arg(long, value_name = "PATH")]
-        scenarios: PathBuf,
+        /// Annotated Replay Suite v0.1 JSON file (as written by `replay-draft`).
+        /// The former `--scenarios` name stays accepted as a hidden alias.
+        #[arg(long, alias = "scenarios", value_name = "PATH")]
+        suite: PathBuf,
     },
     /// Export an evidence-linked Replay Suite draft for human annotation.
     ReplayDraft {
@@ -587,14 +590,31 @@ enum MutationAction {
         #[arg(long)]
         force: bool,
     },
+    /// Export an evidence-linked Shadow Suite draft for human annotation.
+    ShadowDraft {
+        /// Stable mutation identity.
+        mutation_id: String,
+
+        /// Destination for the Shadow Suite v0.1 JSON draft.
+        #[arg(long, value_name = "PATH")]
+        suite: PathBuf,
+
+        /// Nearby events retained on either side of each exact evidence event.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(0..=20), value_name = "COUNT")]
+        context_events: u8,
+
+        /// Replace an existing destination file.
+        #[arg(long)]
+        force: bool,
+    },
     /// Measure would-be trigger precision without applying the mutation.
     Shadow {
         /// Stable mutation identity.
         mutation_id: String,
 
-        /// Shadow Suite v0.1 JSON file.
-        #[arg(long, value_name = "PATH")]
-        observations: PathBuf,
+        /// Annotated Shadow Suite v0.1 JSON file (as written by `shadow-draft`).
+        #[arg(long, alias = "observations", value_name = "PATH")]
+        suite: PathBuf,
     },
     /// Install one shadow-passed mutation as a repo-scoped coding-agent skill.
     Install {
@@ -735,6 +755,8 @@ enum CommandReport {
     MutationReplay(MutationReplayReport),
     #[serde(rename = "mutations_replay_draft")]
     MutationReplayDraft(MutationReplayDraftReport),
+    #[serde(rename = "mutations_shadow_draft")]
+    MutationShadowDraft(MutationShadowDraftReport),
     #[serde(rename = "mutations_shadow")]
     MutationShadow(MutationShadowReport),
     #[serde(rename = "mutations_install")]
@@ -877,6 +899,16 @@ struct MutationReplayDraftReport {
 }
 
 #[derive(Debug, Serialize)]
+struct MutationShadowDraftReport {
+    path: String,
+    context_events: u8,
+    observations: usize,
+    intervention_observations: usize,
+    no_op_observations: usize,
+    draft: ShadowSuite,
+}
+
+#[derive(Debug, Serialize)]
 struct MutationShadowReport {
     evaluation: ShadowReport,
     registration: ShadowRegisterOutcome,
@@ -935,6 +967,7 @@ impl CommandReport {
             | Self::MutationShow(_)
             | Self::MutationTransition(_)
             | Self::MutationReplayDraft(_)
+            | Self::MutationShadowDraft(_)
             | Self::MutationInstall(_)
             | Self::MutationUninstall(_)
             | Self::Export(_)
@@ -947,6 +980,57 @@ impl CommandReport {
             | Self::Status(_)
             | Self::Config(_) => false,
         }
+    }
+
+    /// A single copy-pasteable next command for the mutation lifecycle, printed
+    /// to stderr in text mode only. Uses real ids and paths from the outcome so
+    /// the user never has to guess the next impassable step. Returns `None` when
+    /// there is no unambiguous next action (dry runs, rejections, failed gates).
+    fn next_step_hint(&self) -> Option<String> {
+        match self {
+            Self::MutationProposal(report) => {
+                let mutation_id = register_outcome_id(report.registrations.first()?);
+                Some(format!(
+                    "next: autophagy mutations challenge {mutation_id} \
+                     --check coincidence-considered --check sessions-comparable \
+                     --check trigger-observable --check legitimate-uses-bounded \
+                     --check equivalent-searched --check counterexamples-reviewed"
+                ))
+            }
+            Self::MutationTransition(outcome) if outcome.to_state == "challenged" => Some(format!(
+                "next: autophagy mutations replay-draft {} --suite replay-suite.json",
+                outcome.mutation_id
+            )),
+            Self::MutationReplayDraft(report) => Some(format!(
+                "next: autophagy mutations replay {} --suite {} \
+                 (after setting counterfactual_outcome for each intervention scenario)",
+                report.draft.mutation_id, report.path
+            )),
+            Self::MutationReplay(report) if report.evaluation.passed => Some(format!(
+                "next: autophagy mutations shadow-draft {} --suite shadow-suite.json",
+                report.evaluation.mutation_id
+            )),
+            Self::MutationShadowDraft(report) => Some(format!(
+                "next: autophagy mutations shadow {} --suite {} \
+                 (after confirming intervention_would_help for each observation)",
+                report.draft.mutation_id, report.path
+            )),
+            Self::MutationShadow(report) if report.evaluation.passed => Some(format!(
+                "next: autophagy mutations install {} --repository <repo> \
+                 --target claude-code --confirm-permissions repo-skill-write",
+                report.evaluation.mutation_id
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// The stored mutation identity behind any registration outcome.
+fn register_outcome_id(outcome: &MutationRegisterOutcome) -> &str {
+    match outcome {
+        MutationRegisterOutcome::Inserted { mutation_id }
+        | MutationRegisterOutcome::Duplicate { mutation_id }
+        | MutationRegisterOutcome::EquivalentExisting { mutation_id, .. } => mutation_id,
     }
 }
 
@@ -988,6 +1072,8 @@ enum CliError {
     Replay(#[from] ReplayEvaluationError),
     #[error(transparent)]
     ReplayDraft(#[from] ReplayDraftError),
+    #[error(transparent)]
+    ShadowDraft(#[from] ShadowDraftError),
     #[error(transparent)]
     Shadow(#[from] ShadowEvaluationError),
     #[error(transparent)]
@@ -1044,9 +1130,62 @@ enum CliError {
     #[error("configuration error: {0}")]
     Config(String),
     #[error(
-        "mutations synthesize needs a manifest; pass --manifest <PATH> or set synthesis.manifest_path in config"
+        "provider '{provider}' needs a manifest; pass --manifest <PATH> or set synthesis.manifest_path in config. \
+         For a complete example see docs/specs/synthesis/0.3/manifest/valid/claude_cli.json. \
+         (The built-in `deterministic` provider needs no manifest.)"
     )]
-    MissingManifest,
+    MissingManifest { provider: &'static str },
+    #[error(
+        "replay suite has {count} unreviewed scenario(s) ({ids}); \
+         edit {suite_path} and set counterfactual_outcome to \"expected_result\" or \"contradiction\" for each listed scenario"
+    )]
+    UnreviewedReplayScenarios {
+        count: usize,
+        ids: String,
+        suite_path: String,
+    },
+}
+
+/// The built-in reference manifest for the offline `deterministic` provider.
+///
+/// It mirrors `docs/specs/synthesis/0.1/manifest/valid/deterministic.json` so
+/// the model-free reference path needs no hand-written manifest: the provider
+/// loads no model and performs no I/O, so these fields are pure descriptive
+/// metadata. An explicit `--manifest` still overrides this and is validated
+/// strictly.
+fn builtin_deterministic_manifest() -> ModelManifest {
+    ModelManifest {
+        spec_version: ManifestSpecVersion::V0_1,
+        name: "deterministic-reference".to_owned(),
+        format: ModelFormat::Deterministic,
+        path: "builtin://deterministic".to_owned(),
+        revision: "v1".to_owned(),
+        digest: None,
+        capabilities: vec![Capability::MutationSynthesis],
+        resource_hints: ResourceHints {
+            min_memory_mb: 1,
+            recommended_memory_mb: None,
+            context_window_tokens: None,
+        },
+        timeouts: None,
+        api_key_env: None,
+        model: None,
+    }
+}
+
+/// Render at most the first three IDs, then summarize the remainder, keeping a
+/// long unreviewed list actionable without flooding the terminal.
+fn truncate_ids(ids: &[String]) -> String {
+    const SHOWN: usize = 3;
+    if ids.len() <= SHOWN {
+        ids.join(", ")
+    } else {
+        format!(
+            "{}, and {} more",
+            ids[..SHOWN].join(", "),
+            ids.len() - SHOWN
+        )
+    }
 }
 
 fn main() -> ExitCode {
@@ -1061,6 +1200,13 @@ fn main() -> ExitCode {
     match dispatch(cli, &matches).and_then(|report| {
         let has_issues = report.has_issues();
         write_report(io::stdout().lock(), output, &report)?;
+        // Next-step hints guide the user through the mutation lifecycle. They go
+        // to stderr and only in text mode, so JSON stdout stays a clean report.
+        if output == OutputFormat::Text {
+            if let Some(hint) = report.next_step_hint() {
+                eprintln!("{hint}");
+            }
+        }
         Ok(has_issues)
     }) {
         Ok(true) => ExitCode::from(2),
@@ -1587,16 +1733,29 @@ fn execute_mutation_action(
                     _ => provider,
                 }
             };
+            // Resolve the manifest under flag < config. An explicit manifest
+            // always wins and is validated strictly. When none is given, the
+            // built-in `deterministic` provider falls back to its reference
+            // manifest; every other provider still requires one.
             let manifest = match manifest {
-                Some(path) => path,
-                None => config
-                    .synthesis_manifest_path
-                    .as_ref()
-                    .map(PathBuf::from)
-                    .ok_or(CliError::MissingManifest)?,
+                Some(path) => Some(path),
+                None => config.synthesis_manifest_path.as_ref().map(PathBuf::from),
             };
-            let manifest_path = manifest.display().to_string();
-            let model_manifest = ModelManifest::from_path(&manifest)?;
+            let (manifest_path, model_manifest) = match manifest {
+                Some(path) => {
+                    let manifest_path = path.display().to_string();
+                    (manifest_path, ModelManifest::from_path(&path)?)
+                }
+                None if provider == SynthesisProviderChoice::Deterministic => {
+                    let model_manifest = builtin_deterministic_manifest();
+                    (model_manifest.path.clone(), model_manifest)
+                }
+                None => {
+                    return Err(CliError::MissingManifest {
+                        provider: provider.as_str(),
+                    });
+                }
+            };
             // The provider choice must match what the manifest declares.
             if model_manifest.format != provider.required_format() {
                 return Err(CliError::ProviderFormatMismatch {
@@ -1744,14 +1903,30 @@ fn execute_mutation_action(
         } => Ok(CommandReport::MutationTransition(
             store.reject_mutation(&mutation_id, &reason)?,
         )),
-        MutationAction::Replay {
-            mutation_id,
-            scenarios,
-        } => {
-            let suite: ReplaySuite = serde_json::from_slice(&fs::read(scenarios)?)?;
+        MutationAction::Replay { mutation_id, suite } => {
+            let suite_path = suite.to_string_lossy().into_owned();
+            let suite: ReplaySuite = serde_json::from_slice(&fs::read(&suite)?)?;
             let details = store.get_mutation(&mutation_id)?;
             let package = serde_json::from_value(details.mutation.package)?;
-            let evaluation = evaluate(&package, &suite)?;
+            let evaluation = match evaluate(&package, &suite) {
+                Ok(evaluation) => evaluation,
+                Err(ReplayEvaluationError::UnreviewedScenarios { .. }) => {
+                    let ids = suite
+                        .scenarios
+                        .iter()
+                        .filter(|scenario| {
+                            scenario.counterfactual_outcome == Some(CounterfactualOutcome::Unknown)
+                        })
+                        .map(|scenario| scenario.scenario_id.clone())
+                        .collect::<Vec<_>>();
+                    return Err(CliError::UnreviewedReplayScenarios {
+                        count: ids.len(),
+                        ids: truncate_ids(&ids),
+                        suite_path,
+                    });
+                }
+                Err(other) => return Err(other.into()),
+            };
             for event_id in suite
                 .scenarios
                 .iter()
@@ -1823,11 +1998,45 @@ fn execute_mutation_action(
                 },
             ))
         }
-        MutationAction::Shadow {
+        MutationAction::ShadowDraft {
             mutation_id,
-            observations,
+            suite,
+            context_events,
+            force,
         } => {
-            let suite: ShadowSuite = serde_json::from_slice(&fs::read(observations)?)?;
+            let details = store.get_mutation(&mutation_id)?;
+            let package = serde_json::from_value(details.mutation.package)?;
+            let events = store.list_events_for_detection(None)?;
+            let draft = extract_observation_draft(&package, &events, usize::from(context_events))?;
+            let intervention_observations = draft
+                .observations
+                .iter()
+                .filter(|observation| observation.intervention_would_help)
+                .count();
+            let no_op_observations = draft.observations.len() - intervention_observations;
+            let mut options = fs::OpenOptions::new();
+            options.write(true);
+            if force {
+                options.create(true).truncate(true);
+            } else {
+                options.create_new(true);
+            }
+            let mut destination = options.open(&suite)?;
+            serde_json::to_writer_pretty(&mut destination, &draft)?;
+            writeln!(destination)?;
+            Ok(CommandReport::MutationShadowDraft(
+                MutationShadowDraftReport {
+                    path: suite.to_string_lossy().into_owned(),
+                    context_events,
+                    observations: draft.observations.len(),
+                    intervention_observations,
+                    no_op_observations,
+                    draft,
+                },
+            ))
+        }
+        MutationAction::Shadow { mutation_id, suite } => {
+            let suite: ShadowSuite = serde_json::from_slice(&fs::read(&suite)?)?;
             let details = store.get_mutation(&mutation_id)?;
             let package = serde_json::from_value(details.mutation.package)?;
             let evaluation = evaluate_shadow(&package, &suite)?;
@@ -2199,6 +2408,15 @@ fn write_report(
                 report.intervention_scenarios,
                 report.no_op_scenarios,
                 report.unreviewed_scenarios,
+                report.path
+            )?,
+            CommandReport::MutationShadowDraft(report) => writeln!(
+                writer,
+                "{}\t{} observations · {} intervention · {} no-op\t{}",
+                report.draft.mutation_id,
+                report.observations,
+                report.intervention_observations,
+                report.no_op_observations,
                 report.path
             )?,
             CommandReport::MutationShadow(report) => writeln!(

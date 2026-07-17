@@ -25,13 +25,19 @@ omits nearby context that would duplicate event provenance between them.
 
 ```sh
 autophagy mutations replay mut_example \
-  --scenarios evals/fixtures/replay/example.json
+  --suite replay-review.json
 ```
 
-The command evaluates the suite, persists the immutable report, and returns
-exit code `2` when thresholds do not pass. A failed report leaves the mutation
-`challenged`. A passing report creates one audited `challenged -> replay_passed`
-transition. Repeating the identical replay is a storage no-op.
+The canonical flag is `--suite` — the same name `replay-draft` writes to — so the
+draft and its evaluation refer to one file by one name. The former `--scenarios`
+name still works as a hidden alias. The command evaluates the suite, persists the
+immutable report, and returns exit code `2` when thresholds do not pass. If any
+scenario still carries `counterfactual_outcome: unknown`, replay refuses to run
+and names the unreviewed scenarios plus the exact remedy: edit the suite file and
+set each one to `expected_result` or `contradiction`. A failed report leaves the
+mutation `challenged`. A passing report creates one audited
+`challenged -> replay_passed` transition. Repeating the identical replay is a
+storage no-op.
 
 ## Scenario annotations
 
