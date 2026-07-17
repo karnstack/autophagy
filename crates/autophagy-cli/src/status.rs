@@ -26,8 +26,11 @@ pub struct StatusReport {
     pub adapters: Vec<AdapterStatus>,
     /// Detector thresholds in effect (config or built-in defaults).
     pub detector: DetectorStatus,
-    /// Deterministic findings at the effective thresholds.
-    pub findings: usize,
+    /// Deterministic findings at the effective thresholds. `None` unless
+    /// `--with-findings` was passed: computing it is a full detection pass, not
+    /// a COUNT query, so it is opt-in to keep `status` fast on large stores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings: Option<usize>,
     /// Mutation candidates grouped by lifecycle state.
     pub candidates: BTreeMap<String, i64>,
     /// Background daemon state.
@@ -104,12 +107,19 @@ pub struct DaemonStatus {
 /// # Errors
 ///
 /// Returns [`CliError`] for database, config, or daemon-probe failures.
-pub fn run(database: Option<PathBuf>, config: &Config) -> Result<StatusReport, CliError> {
+pub fn run(
+    database: Option<PathBuf>,
+    config: &Config,
+    with_findings: bool,
+) -> Result<StatusReport, CliError> {
     let db_path = resolve_database_path(database.clone())?;
-    let size_bytes = std::fs::metadata(&db_path).ok().map(|meta| meta.len());
-    let exists = db_path.exists();
+    // Record whether the database pre-existed *before* opening it, since
+    // `open_store` creates and migrates the file. Size is read afterwards so it
+    // reflects the actual on-disk database rather than a missing file.
+    let existed_before = db_path.exists();
 
     let store = open_store(&db_path)?;
+    let size_bytes = std::fs::metadata(&db_path).ok().map(|meta| meta.len());
     let stats = store.stats()?;
     let signatures = store.signature_count()?;
     let activity = store.adapter_activity()?;
@@ -132,11 +142,17 @@ pub fn run(database: Option<PathBuf>, config: &Config) -> Result<StatusReport, C
         })
         .collect();
 
-    // Findings at the effective (config or default) thresholds. This is the one
-    // computed metric; every other field is a COUNT query.
+    // Thresholds are cheap (config or defaults). Findings are opt-in: computing
+    // them means loading and deserializing every event and running a full
+    // detection pass — digest-cost on a large store — so `status` stays fast by
+    // default and only pays that cost when `--with-findings` is passed.
     let detector = config.detector_config();
-    let events = store.list_events_for_detection(None)?;
-    let findings = detect(&events, detector).len();
+    let findings = if with_findings {
+        let events = store.list_events_for_detection(None)?;
+        Some(detect(&events, detector).len())
+    } else {
+        None
+    };
 
     // Probe the daemon through the same lifecycle seam `daemon status` uses.
     let daemon_report = daemon::status(database)?;
@@ -144,7 +160,7 @@ pub fn run(database: Option<PathBuf>, config: &Config) -> Result<StatusReport, C
     Ok(StatusReport {
         database: DatabaseStatus {
             path: db_path.display().to_string(),
-            exists,
+            exists: existed_before,
             size_bytes,
             schema_version,
             sources: stats.sources,
@@ -255,7 +271,13 @@ pub fn write_text(report: &StatusReport, writer: &mut impl Write) -> std::io::Re
         report.detector.min_sessions,
         report.detector.min_support_ratio_bps
     )?;
-    writeln!(writer, "findings: {}", report.findings)?;
+    match report.findings {
+        Some(count) => writeln!(writer, "findings: {count}")?,
+        None => writeln!(
+            writer,
+            "findings: not computed (run `status --with-findings`)"
+        )?,
+    }
 
     if report.candidates.is_empty() {
         writeln!(writer, "candidates: none")?;

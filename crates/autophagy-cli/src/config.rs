@@ -363,13 +363,16 @@ fn read_bool(table: &toml::Table, dotted: &str) -> Result<Option<bool>, CliError
 }
 
 fn read_u32(table: &toml::Table, dotted: &str) -> Result<Option<u32>, CliError> {
+    // Both u32 keys (`detect.min_occurrences`, `detect.min_sessions`) are
+    // recurrence gates, so zero is meaningless and rejected.
     match nested(table, dotted) {
         None => Ok(None),
         Some(value) => value
             .as_integer()
             .and_then(|integer| u32::try_from(integer).ok())
+            .filter(|count| *count >= 1)
             .map(Some)
-            .ok_or_else(|| type_error(dotted, "a non-negative integer")),
+            .ok_or_else(|| type_error(dotted, "a positive integer (>= 1)")),
     }
 }
 
@@ -829,8 +832,10 @@ fn parse_value(spec: &KeySpec, value: &str) -> Result<toml::Value, CliError> {
         },
         KeyType::U32 => value
             .parse::<u32>()
+            .ok()
+            .filter(|count| *count >= 1)
             .map(|v| toml::Value::Integer(i64::from(v)))
-            .map_err(|_| type_error(spec.dotted, "a non-negative integer")),
+            .ok_or_else(|| type_error(spec.dotted, "a positive integer (>= 1)")),
         KeyType::U16Bps => {
             let parsed = value
                 .parse::<u16>()
@@ -895,10 +900,20 @@ fn read_table(path: &Path) -> Result<toml::Table, CliError> {
 
 fn write_table(path: &Path, table: &toml::Table) -> Result<(), CliError> {
     let mut stamped = table.clone();
-    stamped.insert(
-        "config_version".to_owned(),
-        toml::Value::Integer(i64::from(CONFIG_VERSION)),
-    );
+    // Stamp our version, but never downgrade a file already written by a newer
+    // build: an older binary editing one value must not rewrite a higher
+    // config_version, which would break the forward compatibility the loader
+    // promises for such files.
+    let keep_existing = stamped
+        .get("config_version")
+        .and_then(toml::Value::as_integer)
+        .is_some_and(|version| version >= i64::from(CONFIG_VERSION));
+    if !keep_existing {
+        stamped.insert(
+            "config_version".to_owned(),
+            toml::Value::Integer(i64::from(CONFIG_VERSION)),
+        );
+    }
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1160,6 +1175,38 @@ mod tests {
         write_table(&path, &table).expect("write");
         let text = fs::read_to_string(&path).expect("read text");
         assert!(!text.contains("[detect]"), "empty section removed: {text}");
+    }
+
+    #[test]
+    fn write_does_not_downgrade_a_newer_config_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "config_version = 999\n[detect]\nmin_sessions = 3\n").expect("seed");
+        let mut table = read_table(&path).expect("read");
+        let key = spec("detect.min_sessions").expect("spec");
+        set_nested(
+            &mut table,
+            key.section,
+            key.leaf,
+            parse_value(key, "4").expect("value"),
+        );
+        write_table(&path, &table).expect("write");
+        let text = fs::read_to_string(&path).expect("read text");
+        assert!(
+            text.contains("config_version = 999"),
+            "newer version preserved: {text}"
+        );
+    }
+
+    #[test]
+    fn zero_recurrence_gates_are_rejected_on_set_and_load() {
+        assert!(parse_value(spec("detect.min_occurrences").expect("spec"), "0").is_err());
+        assert!(parse_value(spec("detect.min_sessions").expect("spec"), "0").is_err());
+        let mut warnings = Vec::new();
+        let parsed: toml::Table = "[detect]\nmin_occurrences = 0\n"
+            .parse()
+            .expect("valid toml");
+        assert!(Config::from_table(&parsed, &mut warnings).is_err());
     }
 
     #[test]

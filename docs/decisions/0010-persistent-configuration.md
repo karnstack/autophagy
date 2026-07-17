@@ -55,7 +55,7 @@ counts as an override, and the mechanism is not a heuristic. The single set of
 built-in default constants is shared by clap's `default_value_t` and the config
 resolver, so `config list` and the commands can never disagree about what
 "default" means. Precedence is applied by `import`, `digest`, `patterns`,
-`search` (where applicable), `watch`, `daemon install`, `reindex`, `setup`, and
+`watch`, `daemon install`, `reindex`, `setup`, and
 `mutations propose`/`synthesize`.
 
 Because a bare boolean flag (`--index-tool-input`) can only express "on", config
@@ -78,9 +78,10 @@ Two commands make the state legible and mutable:
 
 - `autophagy status` is a fast, read-only snapshot: database path/size/schema
   version, row counts, per-adapter import freshness, index and daemon state, the
-  detector thresholds in effect, findings and candidates-by-state, and the config
-  path. It is COUNT-style queries plus one deterministic detection pass, and
-  works against an empty database and with no config file.
+  detector thresholds in effect, candidates-by-state, and the config path. It is
+  COUNT-style queries only by default; the finding count is opt-in behind
+  `--with-findings` because it requires a full detection pass (digest-cost on a
+  large store). It works against an empty database and with no config file.
 - `autophagy setup` is now rerunnable: when a config exists it pre-fills the
   current values as prompt defaults, writes the chosen values back to config on
   completion, and applies consequences — a newly enabled `index_tool_input`

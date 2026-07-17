@@ -366,7 +366,13 @@ enum Commands {
     ///
     /// A fast, read-only snapshot that works against an empty database and with
     /// no config file. Honours `--output json`.
-    Status,
+    Status {
+        /// Also count deterministic findings at the effective thresholds. This
+        /// runs a full detection pass over every event (digest-cost on a large
+        /// store), so it is off by default to keep `status` fast.
+        #[arg(long)]
+        with_findings: bool,
+    },
 
     /// Read and write the persistent configuration file.
     ///
@@ -429,11 +435,11 @@ enum DaemonCommand {
 #[derive(Clone, Copy, Debug, clap::Args)]
 pub struct ThresholdArgs {
     /// Minimum supporting events.
-    #[arg(long, default_value_t = config::DEFAULT_MIN_OCCURRENCES, value_name = "COUNT")]
+    #[arg(long, default_value_t = config::DEFAULT_MIN_OCCURRENCES, value_parser = clap::value_parser!(u32).range(1..), value_name = "COUNT")]
     min_occurrences: u32,
 
     /// Minimum distinct supporting sessions.
-    #[arg(long, default_value_t = config::DEFAULT_MIN_SESSIONS, value_name = "COUNT")]
+    #[arg(long, default_value_t = config::DEFAULT_MIN_SESSIONS, value_parser = clap::value_parser!(u32).range(1..), value_name = "COUNT")]
     min_sessions: u32,
 
     /// Optional anti-noise floor on support share in basis points (0-10000).
@@ -1429,9 +1435,10 @@ fn execute(
             )?;
             Ok(CommandReport::Setup(report))
         }
-        Commands::Status => Ok(CommandReport::Status(Box::new(status::run(
+        Commands::Status { with_findings } => Ok(CommandReport::Status(Box::new(status::run(
             cli.database,
             config,
+            with_findings,
         )?))),
         // Handled in `dispatch` before config is loaded.
         Commands::Config { .. } => unreachable!("config handled in dispatch"),

@@ -85,6 +85,11 @@ Unknown sections/keys and a `config_version` from a newer build produce a
 warning, not an error. Only genuinely malformed TOML (or a wrong-typed value) is
 an error, and it names the offending key.
 
+`config set`, `config unset`, and `config edit` rewrite the file through the
+TOML value model, so **comments and key ordering are not preserved** — the file
+is re-serialized in a normalized layout. Unknown keys and your values survive;
+hand-written comments do not.
+
 ## `autophagy status`
 
 A fast, read-only snapshot of local state — safe against an empty database and
@@ -92,6 +97,7 @@ with no config file:
 
 ```sh
 autophagy status
+autophagy status --with-findings   # also count findings (slower on large stores)
 autophagy status --output json
 ```
 
@@ -102,10 +108,14 @@ It reports:
 - the search index state (signatures, whether commands are searchable);
 - whether the background daemon unit is present and loaded, and its configured
   interval;
-- the detector thresholds in effect;
-- how many findings the current thresholds produce and how many mutation
-  candidates exist in each state;
+- the detector thresholds in effect and how many mutation candidates exist in
+  each state;
 - the config file path and whether a file is present.
+
+By default `status` uses only fast COUNT-style queries. Counting deterministic
+findings requires loading every event and running a full detection pass — the
+same cost as `digest` — so it is opt-in with `--with-findings` and omitted
+otherwise.
 
 ## Changing things later with `setup`
 

@@ -1476,9 +1476,14 @@ fn status_works_against_an_empty_database_and_no_config() {
     let status = run_json(&database, ["status"]);
     let result = &status["result"];
     assert_eq!(result["database"]["events"], 0);
-    assert_eq!(result["findings"], 0);
     assert_eq!(result["config_present"], false);
     assert!(result["adapters"].as_array().expect("adapters").is_empty());
+    // Findings are opt-in and omitted by default (a full detection pass).
+    assert!(result["findings"].is_null(), "findings omitted by default");
+
+    // `--with-findings` runs the detection pass and reports the count.
+    let with = run_json(&database, ["status", "--with-findings"]);
+    assert_eq!(with["result"]["findings"], 0);
 }
 
 #[test]
