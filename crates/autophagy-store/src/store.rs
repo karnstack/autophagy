@@ -8,7 +8,7 @@ use rusqlite::{
 use time::OffsetDateTime;
 
 use crate::{
-    DeleteAllSummary, DeleteSummary, InsertOutcome, InstallationRegistration,
+    AdapterActivity, DeleteAllSummary, DeleteSummary, InsertOutcome, InstallationRegistration,
     InstallationTransitionOutcome, MutationDetails, MutationInstallationRecord, MutationRecord,
     MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
     MutationTransition, MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal,
@@ -777,6 +777,64 @@ impl EventStore {
                 })
             },
         )?)
+    }
+
+    /// Per-adapter import activity: session and event counts, the most recent
+    /// event timestamp, and the most recent incremental-import cursor update.
+    ///
+    /// One row per known source adapter, ordered by adapter identifier. Adapters
+    /// with sources but no sessions still appear (zero counts). Read-only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn adapter_activity(&self) -> Result<Vec<AdapterActivity>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                sources.adapter,
+                count(DISTINCT sessions.session_id),
+                coalesce(sum(sessions.event_count), 0),
+                max(sessions.last_event_at),
+                (SELECT max(source_cursors.updated_at)
+                   FROM source_cursors
+                  WHERE source_cursors.adapter = sources.adapter)
+             FROM sources
+             LEFT JOIN sessions USING (source_id)
+             GROUP BY sources.adapter
+             ORDER BY sources.adapter",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AdapterActivity {
+                adapter: row.get(0)?,
+                sessions: row.get(1)?,
+                events: row.get(2)?,
+                last_event_at: row.get(3)?,
+                last_import_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Count registered mutation candidates grouped by lifecycle state.
+    ///
+    /// Read-only COUNT aggregation; states with no candidates are absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn mutation_state_counts(&self) -> Result<BTreeMap<String, i64>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT state, count(*) FROM mutation_candidates GROUP BY state ORDER BY state",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut counts = BTreeMap::new();
+        for row in rows {
+            let (state, count) = row?;
+            counts.insert(state, count);
+        }
+        Ok(counts)
     }
 
     /// Register one immutable candidate and its exact evidence links.

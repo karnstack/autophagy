@@ -1,7 +1,9 @@
 //! Command-line entry point for importing and querying local agent activity.
 
+mod config;
 mod daemon;
 mod setup;
+mod status;
 mod watch;
 
 use std::{
@@ -58,7 +60,7 @@ use autophagy_synthesis::{
     OllamaProvider, OpenAiCompatibleProvider, SynthesisOutcome, SynthesisProvider, TokenUsage,
     classify_endpoint, synthesize_candidates,
 };
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -270,7 +272,7 @@ enum Commands {
         adapters: Vec<watch::NativeAdapter>,
 
         /// Seconds to wait between discovery cycles.
-        #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+        #[arg(long, default_value_t = config::DEFAULT_INTERVAL_SECONDS, value_name = "SECONDS")]
         interval: u64,
 
         /// Run one cycle and exit (useful for launchd/systemd and tests).
@@ -352,13 +354,56 @@ enum Commands {
         monitor: bool,
 
         /// Seconds between discovery cycles for installed monitoring.
-        #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+        #[arg(long, default_value_t = config::DEFAULT_INTERVAL_SECONDS, value_name = "SECONDS")]
         interval: u64,
 
         /// Assume yes and run non-interactively without prompting.
         #[arg(long)]
         yes: bool,
     },
+
+    /// Show local state: database, imports, index, daemon, and thresholds.
+    ///
+    /// A fast, read-only snapshot that works against an empty database and with
+    /// no config file. Honours `--output json`.
+    Status,
+
+    /// Read and write the persistent configuration file.
+    ///
+    /// Config sets your defaults so you do not repeat flags. Precedence is
+    /// built-in defaults, then this file, then any explicit flag on a command.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// Subcommands of `autophagy config`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Show every effective value and whether it comes from config or default.
+    List,
+    /// Print one effective value.
+    Get {
+        /// Dotted key, e.g. `detect.min_occurrences`.
+        key: String,
+    },
+    /// Set one value (validated and typed) in the config file.
+    Set {
+        /// Dotted key, e.g. `watch.interval_seconds`.
+        key: String,
+        /// New value. Lists are comma-separated, e.g. `claude-code,codex`.
+        value: String,
+    },
+    /// Remove one value, reverting it to the built-in default.
+    Unset {
+        /// Dotted key to remove.
+        key: String,
+    },
+    /// Print the config file path.
+    Path,
+    /// Open the config file in `$EDITOR`, then validate the result.
+    Edit,
 }
 
 #[derive(Debug, Subcommand)]
@@ -370,7 +415,7 @@ enum DaemonCommand {
         adapters: Vec<watch::NativeAdapter>,
 
         /// Seconds to wait between discovery cycles.
-        #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+        #[arg(long, default_value_t = config::DEFAULT_INTERVAL_SECONDS, value_name = "SECONDS")]
         interval: u64,
     },
     /// Unload and remove the supervisor unit, leaving nothing behind.
@@ -379,15 +424,16 @@ enum DaemonCommand {
     Status,
 }
 
+/// Detector threshold flags shared by every detection-bearing command.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, clap::Args)]
-struct ThresholdArgs {
+pub struct ThresholdArgs {
     /// Minimum supporting events.
-    #[arg(long, default_value_t = 3, value_name = "COUNT")]
+    #[arg(long, default_value_t = config::DEFAULT_MIN_OCCURRENCES, value_name = "COUNT")]
     min_occurrences: u32,
 
     /// Minimum distinct supporting sessions.
-    #[arg(long, default_value_t = 2, value_name = "COUNT")]
+    #[arg(long, default_value_t = config::DEFAULT_MIN_SESSIONS, value_name = "COUNT")]
     min_sessions: u32,
 
     /// Optional anti-noise floor on support share in basis points (0-10000).
@@ -395,7 +441,7 @@ struct ThresholdArgs {
     /// Qualification is decided by recurrence, not failure share; this floor
     /// defaults to 0 (disabled) and only suppresses candidates whose failure
     /// share is vanishingly small.
-    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=10_000), value_name = "BPS")]
+    #[arg(long, default_value_t = config::DEFAULT_MIN_SUPPORT_RATIO_BPS, value_parser = clap::value_parser!(u16).range(0..=10_000), value_name = "BPS")]
     min_support_ratio_bps: u16,
 }
 
@@ -442,12 +488,14 @@ enum MutationAction {
     /// Synthesize candidates through a provider-neutral, contract-bound boundary.
     Synthesize {
         /// Synthesis provider to consult. Must match the manifest `format`.
+        /// Defaults to `synthesis.provider` in config, else `deterministic`.
         #[arg(long, value_enum, default_value_t = SynthesisProviderChoice::Deterministic)]
         provider: SynthesisProviderChoice,
 
         /// Local model manifest (synthesis-manifest/0.1 or 0.2) JSON file.
+        /// Defaults to `synthesis.manifest_path` in config when omitted.
         #[arg(long, value_name = "PATH")]
-        manifest: PathBuf,
+        manifest: Option<PathBuf>,
 
         /// Allow an HTTP provider endpoint whose host is not loopback. Evidence
         /// then leaves this machine; a warning is emitted. Off by default.
@@ -664,6 +712,8 @@ enum CommandReport {
     Daemon(daemon::DaemonReport),
     Reindex(ReindexReport),
     Setup(setup::SetupReport),
+    Status(Box<status::StatusReport>),
+    Config(config::ConfigReport),
 }
 
 #[derive(Debug, Serialize)]
@@ -837,7 +887,9 @@ impl CommandReport {
             | Self::DeleteAll(_)
             | Self::Daemon(_)
             | Self::Reindex(_)
-            | Self::Setup(_) => false,
+            | Self::Setup(_)
+            | Self::Status(_)
+            | Self::Config(_) => false,
         }
     }
 }
@@ -926,12 +978,24 @@ enum CliError {
          e.g. `autophagy setup --adapter claude-code --index-tool-input --monitor --yes`"
     )]
     SetupNonInteractive,
+    #[error("configuration error: {0}")]
+    Config(String),
+    #[error(
+        "mutations synthesize needs a manifest; pass --manifest <PATH> or set synthesis.manifest_path in config"
+    )]
+    MissingManifest,
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // Parse into `ArgMatches` as well as the typed `Cli`, so precedence can ask
+    // clap which flags were explicitly passed (via `ValueSource`).
+    let matches = Cli::command().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
     let output = cli.output;
-    match execute(cli).and_then(|report| {
+    match dispatch(cli, &matches).and_then(|report| {
         let has_issues = report.has_issues();
         write_report(io::stdout().lock(), output, &report)?;
         Ok(has_issues)
@@ -945,8 +1009,40 @@ fn main() -> ExitCode {
     }
 }
 
+/// Load config (except for the `config` command, which manages its own loading
+/// so it keeps working against a malformed file), then execute.
+fn dispatch(cli: Cli, matches: &ArgMatches) -> Result<CommandReport, CliError> {
+    if matches!(cli.command, Commands::Config { .. }) {
+        let Commands::Config { action } = cli.command else {
+            unreachable!("checked above")
+        };
+        return Ok(CommandReport::Config(config::run(action)?));
+    }
+    let mut warnings = Vec::new();
+    let config = config::Config::load(&mut warnings)?;
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    execute(cli, matches, &config)
+}
+
+/// Descend to the deepest active subcommand's matches, where the leaf flags
+/// (e.g. `mutations propose --min-occurrences`) actually live.
+fn leaf_matches(matches: &ArgMatches) -> &ArgMatches {
+    let mut current = matches;
+    while let Some((_, sub)) = current.subcommand() {
+        current = sub;
+    }
+    current
+}
+
 #[allow(clippy::too_many_lines)]
-fn execute(cli: Cli) -> Result<CommandReport, CliError> {
+fn execute(
+    cli: Cli,
+    matches: &ArgMatches,
+    config: &config::Config,
+) -> Result<CommandReport, CliError> {
+    let leaf = leaf_matches(matches);
     match cli.command {
         Commands::Import {
             input,
@@ -961,129 +1057,156 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             index_metadata,
             dry_run,
             max_diagnostics,
-        } => match adapter {
-            ImportAdapter::GenericJsonl => {
-                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
-                let mut options = ImportOptions::new(instance_key);
-                options.display_name = display_name;
-                options.projects = projects;
-                options.exclude_paths = exclude_paths;
-                options.index_tool_input = index_tool_input;
-                options.index_metadata = index_metadata;
-                options.dry_run = dry_run;
-                options.max_diagnostics = max_diagnostics;
-                let reader = open_input(&input)?;
-                let summary = if dry_run {
-                    import_jsonl(reader, None, &options)?
-                } else {
-                    let database = resolve_database_path(cli.database)?;
-                    let mut store = open_store(&database)?;
-                    import_jsonl(reader, Some(&mut store), &options)?
-                };
-                Ok(CommandReport::Import(ImportReport::Generic(summary)))
+        } => {
+            // default < config < explicit flag, resolved once for every adapter.
+            let index_tool_input = config::resolve_bool(
+                leaf,
+                "index_tool_input",
+                index_tool_input,
+                config.import_index_tool_input,
+            );
+            let include_content = config::resolve_bool(
+                leaf,
+                "include_content",
+                include_content,
+                config.import_include_content,
+            );
+            let index_metadata = config::resolve_list(
+                leaf,
+                "index_metadata",
+                &index_metadata,
+                config.import_index_metadata.as_deref(),
+            );
+            let exclude_paths = config::resolve_list(
+                leaf,
+                "exclude_paths",
+                &exclude_paths,
+                config.import_exclude_paths.as_deref(),
+            );
+            match adapter {
+                ImportAdapter::GenericJsonl => {
+                    let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                    let mut options = ImportOptions::new(instance_key);
+                    options.display_name = display_name;
+                    options.projects = projects;
+                    options.exclude_paths = exclude_paths;
+                    options.index_tool_input = index_tool_input;
+                    options.index_metadata = index_metadata;
+                    options.dry_run = dry_run;
+                    options.max_diagnostics = max_diagnostics;
+                    let reader = open_input(&input)?;
+                    let summary = if dry_run {
+                        import_jsonl(reader, None, &options)?
+                    } else {
+                        let database = resolve_database_path(cli.database)?;
+                        let mut store = open_store(&database)?;
+                        import_jsonl(reader, Some(&mut store), &options)?
+                    };
+                    Ok(CommandReport::Import(ImportReport::Generic(summary)))
+                }
+                ImportAdapter::ClaudeCode => {
+                    let input = if input == Path::new("-") {
+                        default_projects_root()?
+                    } else {
+                        input
+                    };
+                    let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                    let mut options = ClaudeImportOptions::new(input, instance_key);
+                    options.display_name = display_name;
+                    options.projects = projects;
+                    options.exclude_paths = exclude_paths;
+                    options.include_subagents = include_subagents;
+                    options.include_content = include_content;
+                    options.index_tool_input = index_tool_input;
+                    options.index_metadata = index_metadata;
+                    options.dry_run = dry_run;
+                    options.max_diagnostics = max_diagnostics;
+                    let summary = if dry_run {
+                        import_claude_code(None, &options)?
+                    } else {
+                        let database = resolve_database_path(cli.database)?;
+                        let mut store = open_store(&database)?;
+                        import_claude_code(Some(&mut store), &options)?
+                    };
+                    Ok(CommandReport::Import(ImportReport::ClaudeCode(summary)))
+                }
+                ImportAdapter::Codex => {
+                    let input = if input == Path::new("-") {
+                        default_sessions_root()?
+                    } else {
+                        input
+                    };
+                    let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                    let mut options = CodexImportOptions::new(input, instance_key);
+                    options.display_name = display_name;
+                    options.projects = projects;
+                    options.exclude_paths = exclude_paths;
+                    options.include_content = include_content;
+                    options.index_tool_input = index_tool_input;
+                    options.index_metadata = index_metadata;
+                    options.dry_run = dry_run;
+                    options.max_diagnostics = max_diagnostics;
+                    let summary = if dry_run {
+                        import_codex(None, &options)?
+                    } else {
+                        let database = resolve_database_path(cli.database)?;
+                        let mut store = open_store(&database)?;
+                        import_codex(Some(&mut store), &options)?
+                    };
+                    Ok(CommandReport::Import(ImportReport::Codex(summary)))
+                }
+                ImportAdapter::Pi => {
+                    let input = if input == Path::new("-") {
+                        default_pi_sessions_root()?
+                    } else {
+                        input
+                    };
+                    let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                    let mut options = PiImportOptions::new(input, instance_key);
+                    options.display_name = display_name;
+                    options.projects = projects;
+                    options.exclude_paths = exclude_paths;
+                    options.include_content = include_content;
+                    options.index_tool_input = index_tool_input;
+                    options.index_metadata = index_metadata;
+                    options.dry_run = dry_run;
+                    options.max_diagnostics = max_diagnostics;
+                    let summary = if dry_run {
+                        import_pi(None, &options)?
+                    } else {
+                        let database = resolve_database_path(cli.database)?;
+                        let mut store = open_store(&database)?;
+                        import_pi(Some(&mut store), &options)?
+                    };
+                    Ok(CommandReport::Import(ImportReport::Pi(summary)))
+                }
+                ImportAdapter::Opencode => {
+                    let input = if input == Path::new("-") {
+                        default_storage_root()?
+                    } else {
+                        input
+                    };
+                    let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
+                    let mut options = OpenCodeImportOptions::new(input, instance_key);
+                    options.display_name = display_name;
+                    options.projects = projects;
+                    options.exclude_paths = exclude_paths;
+                    options.include_content = include_content;
+                    options.index_tool_input = index_tool_input;
+                    options.index_metadata = index_metadata;
+                    options.dry_run = dry_run;
+                    options.max_diagnostics = max_diagnostics;
+                    let summary = if dry_run {
+                        import_opencode(None, &options)?
+                    } else {
+                        let database = resolve_database_path(cli.database)?;
+                        let mut store = open_store(&database)?;
+                        import_opencode(Some(&mut store), &options)?
+                    };
+                    Ok(CommandReport::Import(ImportReport::Opencode(summary)))
+                }
             }
-            ImportAdapter::ClaudeCode => {
-                let input = if input == Path::new("-") {
-                    default_projects_root()?
-                } else {
-                    input
-                };
-                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
-                let mut options = ClaudeImportOptions::new(input, instance_key);
-                options.display_name = display_name;
-                options.projects = projects;
-                options.exclude_paths = exclude_paths;
-                options.include_subagents = include_subagents;
-                options.include_content = include_content;
-                options.index_tool_input = index_tool_input;
-                options.index_metadata = index_metadata;
-                options.dry_run = dry_run;
-                options.max_diagnostics = max_diagnostics;
-                let summary = if dry_run {
-                    import_claude_code(None, &options)?
-                } else {
-                    let database = resolve_database_path(cli.database)?;
-                    let mut store = open_store(&database)?;
-                    import_claude_code(Some(&mut store), &options)?
-                };
-                Ok(CommandReport::Import(ImportReport::ClaudeCode(summary)))
-            }
-            ImportAdapter::Codex => {
-                let input = if input == Path::new("-") {
-                    default_sessions_root()?
-                } else {
-                    input
-                };
-                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
-                let mut options = CodexImportOptions::new(input, instance_key);
-                options.display_name = display_name;
-                options.projects = projects;
-                options.exclude_paths = exclude_paths;
-                options.include_content = include_content;
-                options.index_tool_input = index_tool_input;
-                options.index_metadata = index_metadata;
-                options.dry_run = dry_run;
-                options.max_diagnostics = max_diagnostics;
-                let summary = if dry_run {
-                    import_codex(None, &options)?
-                } else {
-                    let database = resolve_database_path(cli.database)?;
-                    let mut store = open_store(&database)?;
-                    import_codex(Some(&mut store), &options)?
-                };
-                Ok(CommandReport::Import(ImportReport::Codex(summary)))
-            }
-            ImportAdapter::Pi => {
-                let input = if input == Path::new("-") {
-                    default_pi_sessions_root()?
-                } else {
-                    input
-                };
-                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
-                let mut options = PiImportOptions::new(input, instance_key);
-                options.display_name = display_name;
-                options.projects = projects;
-                options.exclude_paths = exclude_paths;
-                options.include_content = include_content;
-                options.index_tool_input = index_tool_input;
-                options.index_metadata = index_metadata;
-                options.dry_run = dry_run;
-                options.max_diagnostics = max_diagnostics;
-                let summary = if dry_run {
-                    import_pi(None, &options)?
-                } else {
-                    let database = resolve_database_path(cli.database)?;
-                    let mut store = open_store(&database)?;
-                    import_pi(Some(&mut store), &options)?
-                };
-                Ok(CommandReport::Import(ImportReport::Pi(summary)))
-            }
-            ImportAdapter::Opencode => {
-                let input = if input == Path::new("-") {
-                    default_storage_root()?
-                } else {
-                    input
-                };
-                let instance_key = instance_key.unwrap_or(derive_instance_key(&input)?);
-                let mut options = OpenCodeImportOptions::new(input, instance_key);
-                options.display_name = display_name;
-                options.projects = projects;
-                options.exclude_paths = exclude_paths;
-                options.include_content = include_content;
-                options.index_tool_input = index_tool_input;
-                options.index_metadata = index_metadata;
-                options.dry_run = dry_run;
-                options.max_diagnostics = max_diagnostics;
-                let summary = if dry_run {
-                    import_opencode(None, &options)?
-                } else {
-                    let database = resolve_database_path(cli.database)?;
-                    let mut store = open_store(&database)?;
-                    import_opencode(Some(&mut store), &options)?
-                };
-                Ok(CommandReport::Import(ImportReport::Opencode(summary)))
-            }
-        },
+        }
         Commands::Sessions { limit } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
@@ -1120,7 +1243,10 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
             let events = store.list_events_for_detection(project.as_deref())?;
-            let report = detect_with_report(&events, thresholds.into());
+            let report = detect_with_report(
+                &events,
+                config::resolve_thresholds(leaf, thresholds, config),
+            );
             Ok(CommandReport::Digest(digest_report(report)?))
         }
         Commands::Patterns {
@@ -1130,7 +1256,10 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
             let events = store.list_events_for_detection(project.as_deref())?;
-            let report = detect_with_report(&events, thresholds.into());
+            let report = detect_with_report(
+                &events,
+                config::resolve_thresholds(leaf, thresholds, config),
+            );
             let DetectionDiagnostics {
                 events_scanned,
                 sessions_scanned,
@@ -1145,7 +1274,9 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
                 observations,
             }))
         }
-        Commands::Mutations { action } => execute_mutation_action(cli.database, action),
+        Commands::Mutations { action } => {
+            execute_mutation_action(cli.database, action, leaf, config)
+        }
         Commands::Export { project } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
@@ -1190,6 +1321,20 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             projects,
             exclude_paths,
         } => {
+            let adapters = config::resolve_adapters(leaf, &adapters, config)?;
+            let interval = config::resolve_interval(leaf, interval, config);
+            let include_content = config::resolve_bool(
+                leaf,
+                "include_content",
+                include_content,
+                config.import_include_content,
+            );
+            let exclude_paths = config::resolve_list(
+                leaf,
+                "exclude_paths",
+                &exclude_paths,
+                config.import_exclude_paths.as_deref(),
+            );
             let report = watch::run(
                 cli.database,
                 &adapters,
@@ -1205,6 +1350,11 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
         Commands::Daemon { action } => {
             let report = match action {
                 DaemonCommand::Install { adapters, interval } => {
+                    // The unit bakes in explicit args, but they are derived from
+                    // config at install time (config changes need a reinstall).
+                    let daemon_leaf = leaf_matches(matches);
+                    let adapters = config::resolve_adapters(daemon_leaf, &adapters, config)?;
+                    let interval = config::resolve_interval(daemon_leaf, interval, config);
                     let names = watch::adapter_names(&adapters);
                     daemon::install(cli.database, interval, names)?
                 }
@@ -1218,6 +1368,24 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             index_metadata,
             exclude_paths,
         } => {
+            let index_tool_input = config::resolve_bool(
+                leaf,
+                "index_tool_input",
+                index_tool_input,
+                config.import_index_tool_input,
+            );
+            let index_metadata = config::resolve_list(
+                leaf,
+                "index_metadata",
+                &index_metadata,
+                config.import_index_metadata.as_deref(),
+            );
+            let exclude_paths = config::resolve_list(
+                leaf,
+                "exclude_paths",
+                &exclude_paths,
+                config.import_exclude_paths.as_deref(),
+            );
             let database = resolve_database_path(cli.database)?;
             let mut store = open_store(&database)?;
             let options = ReindexOptions {
@@ -1243,18 +1411,30 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let report = setup::run(
                 cli.database,
                 cli.output,
+                config,
                 setup::SetupPlan {
                     adapters,
+                    adapters_explicit: config::flag_set(leaf, "adapters"),
                     index_tool_input,
+                    index_tool_input_explicit: config::flag_set(leaf, "index_tool_input"),
                     include_content,
+                    include_content_explicit: config::flag_set(leaf, "include_content"),
                     index_metadata,
+                    index_metadata_explicit: config::flag_set(leaf, "index_metadata"),
                     monitor,
                     interval,
+                    interval_explicit: config::flag_set(leaf, "interval"),
                     yes,
                 },
             )?;
             Ok(CommandReport::Setup(report))
         }
+        Commands::Status => Ok(CommandReport::Status(Box::new(status::run(
+            cli.database,
+            config,
+        )?))),
+        // Handled in `dispatch` before config is loaded.
+        Commands::Config { .. } => unreachable!("config handled in dispatch"),
     }
 }
 
@@ -1262,6 +1442,8 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
 fn execute_mutation_action(
     database: Option<PathBuf>,
     action: MutationAction,
+    matches: &ArgMatches,
+    config: &config::Config,
 ) -> Result<CommandReport, CliError> {
     let database = resolve_database_path(database)?;
     let mut store = open_store(&database)?;
@@ -1272,7 +1454,10 @@ fn execute_mutation_action(
             dry_run,
         } => {
             let events = store.list_events_for_detection(project.as_deref())?;
-            let findings = detect(&events, thresholds.into());
+            let findings = detect(
+                &events,
+                config::resolve_thresholds(matches, thresholds, config),
+            );
             let generated = generate_candidates(&findings);
             let mut registrations = Vec::new();
             if !dry_run {
@@ -1311,6 +1496,24 @@ fn execute_mutation_action(
             thresholds,
             dry_run,
         } => {
+            // Resolve provider and manifest under default < config < flag.
+            let provider = if config::flag_set(matches, "provider") {
+                provider
+            } else {
+                match config.synthesis_provider.as_deref() {
+                    Some("ollama") => SynthesisProviderChoice::Ollama,
+                    Some("openai-compatible") => SynthesisProviderChoice::OpenaiCompatible,
+                    _ => provider,
+                }
+            };
+            let manifest = match manifest {
+                Some(path) => path,
+                None => config
+                    .synthesis_manifest_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .ok_or(CliError::MissingManifest)?,
+            };
             let manifest_path = manifest.display().to_string();
             let model_manifest = ModelManifest::from_path(&manifest)?;
             // The provider choice must match what the manifest declares.
@@ -1349,7 +1552,10 @@ fn execute_mutation_action(
                 }
             }
             let events = store.list_events_for_detection(project.as_deref())?;
-            let findings = detect(&events, thresholds.into());
+            let findings = detect(
+                &events,
+                config::resolve_thresholds(matches, thresholds, config),
+            );
             let synthesized =
                 synthesize_candidates(&findings, &model_manifest, synthesis_provider.as_ref());
             let (total_prompt_tokens, total_completion_tokens) = aggregate_usage(&synthesized);
@@ -1946,6 +2152,8 @@ fn write_report(
             // Setup streams its own guided text during execution, so there is no
             // deferred text to render here.
             CommandReport::Setup(_) => {}
+            CommandReport::Status(report) => status::write_text(report, &mut writer)?,
+            CommandReport::Config(report) => config::write_text(report, &mut writer)?,
         },
     }
     Ok(())

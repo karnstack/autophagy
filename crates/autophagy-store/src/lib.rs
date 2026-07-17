@@ -12,7 +12,7 @@ mod util;
 
 pub use error::StoreError;
 pub use model::{
-    DeleteAllSummary, DeleteSummary, InsertOutcome, InstallationRegistration,
+    AdapterActivity, DeleteAllSummary, DeleteSummary, InsertOutcome, InstallationRegistration,
     InstallationTransitionOutcome, MutationDetails, MutationInstallationRecord, MutationRecord,
     MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
     MutationTransition, MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal,

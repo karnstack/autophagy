@@ -33,8 +33,25 @@ Attached to a terminal, setup walks you through five short steps:
    background service (launchd on macOS, systemd on Linux). If you accept, it
    prints how to undo it: `autophagy daemon uninstall`.
 
-It finishes with a short "what next" block pointing at `patterns`, `search`,
-`mutations propose`, and the macOS app.
+On completion it writes your choices to the
+[config file](configuration.md) so later commands inherit them, and prints a
+short "what next" block pointing at `patterns`, `search`, `mutations propose`,
+and the macOS app.
+
+## Re-running setup to change things
+
+Setup is rerunnable. Run it again any time and it pre-fills your current settings
+as the defaults shown, so you only change what you want. On completion it writes
+the updated config and applies the consequences:
+
+- newly enabling indexing rebuilds the search index in place with `reindex`;
+- changing the adapter set or interval while a daemon is installed offers to
+  reinstall it so the change takes effect.
+
+It reports what changed, and — like the first run — it never deletes anything.
+To see the current state without changing anything, use `autophagy status`; to
+change a single value without the wizard, use `autophagy config set`. Both are
+covered in the [configuration guide](configuration.md).
 
 ## Non-interactive
 

@@ -36,26 +36,40 @@ use autophagy_store::EventStore;
 use serde::Serialize;
 
 use crate::{
-    CliError, CommandReport, OutputFormat, daemon, derive_instance_key, digest_report, open_store,
-    resolve_database_path, watch::NativeAdapter, write_report,
+    CliError, CommandReport, OutputFormat, config::Config, daemon, derive_instance_key,
+    digest_report, open_store, resolve_database_path, watch::NativeAdapter, write_report,
 };
 
-/// Parsed `setup` command inputs.
+/// Parsed `setup` command inputs plus which flags were passed explicitly.
+///
+/// The `*_explicit` markers let setup apply precedence (default < config < flag)
+/// on the non-interactive path and prefill prompt defaults from config on the
+/// interactive path.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct SetupPlan {
     /// Adapters to consider; empty means every native adapter.
     pub adapters: Vec<NativeAdapter>,
+    /// Whether `--adapter` was passed explicitly.
+    pub adapters_explicit: bool,
     /// Make commands searchable (import indexing gate) when non-interactive.
     pub index_tool_input: bool,
+    /// Whether `--index-tool-input` was passed explicitly.
+    pub index_tool_input_explicit: bool,
     /// Persist prompt/response/tool-result text when non-interactive.
     pub include_content: bool,
+    /// Whether `--include-content` was passed explicitly.
+    pub include_content_explicit: bool,
     /// Already-redacted metadata keys to index as searchable text.
     pub index_metadata: Vec<String>,
+    /// Whether `--index-metadata` was passed explicitly.
+    pub index_metadata_explicit: bool,
     /// Install background monitoring when non-interactive.
     pub monitor: bool,
     /// Seconds between monitoring discovery cycles.
     pub interval: u64,
+    /// Whether `--interval` was passed explicitly.
+    pub interval_explicit: bool,
     /// Run without prompting.
     pub yes: bool,
 }
@@ -98,6 +112,14 @@ pub struct SetupReport {
     pub digest_observations: usize,
     /// Whether background monitoring was installed.
     pub monitor_installed: bool,
+    /// Resolved config file path.
+    pub config_path: String,
+    /// Whether the config file was (re)written this run.
+    pub config_written: bool,
+    /// Human-readable summary of settings that changed from the prior config.
+    pub changed: Vec<String>,
+    /// Whether an installed daemon was reinstalled to apply config changes.
+    pub daemon_reinstalled: bool,
 }
 
 /// Run the guided setup flow.
@@ -111,6 +133,7 @@ pub struct SetupReport {
 pub fn run(
     database: Option<PathBuf>,
     output: OutputFormat,
+    config: &Config,
     plan: SetupPlan,
 ) -> Result<SetupReport, CliError> {
     let json = matches!(output, OutputFormat::Json);
@@ -130,14 +153,30 @@ pub fn run(
     let database = resolve_database_path(database)?;
     let mut store = open_store(&database)?;
 
+    // Prior config values drive prompt prefills and change detection.
+    let prior_index_tool_input = config.import_index_tool_input.unwrap_or(false);
+    let prior_include_content = config.import_include_content.unwrap_or(false);
+    let prior_adapters: Vec<String> = config.import_adapters.clone().unwrap_or_default();
+    let prior_interval = config.watch_interval_seconds;
+
     ui.say("Autophagy setup — local, offline, nothing leaves your machine.");
+    if config.present {
+        ui.say("Re-running setup — current settings are shown as defaults.");
+    }
     ui.say("");
 
-    // 1. Detect adapters and decide which to import.
-    let candidates = if plan.adapters.is_empty() {
-        NativeAdapter::ALL.to_vec()
-    } else {
+    // 1. Detect adapters and decide which to import. Candidates come from an
+    // explicit `--adapter`, else the configured set, else every adapter.
+    let candidates = if plan.adapters_explicit && !plan.adapters.is_empty() {
         dedup(&plan.adapters)
+    } else if let Some(configured) = config.import_adapters_parsed()? {
+        if configured.is_empty() {
+            NativeAdapter::ALL.to_vec()
+        } else {
+            configured
+        }
+    } else {
+        NativeAdapter::ALL.to_vec()
     };
     let mut adapter_reports = Vec::new();
     let mut selected = Vec::new();
@@ -175,25 +214,41 @@ pub fn run(
     }
 
     // 2. Privacy questions (at most two): indexing and content persistence.
+    // Interactive prompts prefill with the current config value (or the
+    // recommended default on first run); non-interactive follows precedence.
     ui.say("");
     let index_tool_input = if interactive {
         ui.prompt_yes_no(
             "Make the commands your agents ran searchable? They are stored locally either way; \
              indexing enables exact recall, and secrets are filtered by redaction rules \
              (recommended)",
-            true,
+            config.import_index_tool_input.unwrap_or(true),
         )
-    } else {
+    } else if plan.index_tool_input_explicit {
         plan.index_tool_input
+    } else {
+        prior_index_tool_input
     };
     let include_content = if interactive {
         ui.prompt_yes_no(
             "Also store prompt, response, and tool-result text? Enables richer search; still \
              local and redacted",
-            false,
+            config.import_include_content.unwrap_or(false),
         )
-    } else {
+    } else if plan.include_content_explicit {
         plan.include_content
+    } else {
+        prior_include_content
+    };
+    let index_metadata = if plan.index_metadata_explicit {
+        plan.index_metadata.clone()
+    } else {
+        config.import_index_metadata.clone().unwrap_or_default()
+    };
+    let interval = if plan.interval_explicit {
+        plan.interval
+    } else {
+        config.interval_or_default()
     };
 
     // A database imported before signature indexing existed keeps its events
@@ -216,19 +271,22 @@ pub fn run(
             &mut store,
             index_tool_input,
             include_content,
-            &plan.index_metadata,
+            &index_metadata,
         )?;
         report.inserted = inserted;
         ui.say(&format!("  {inserted} event(s) inserted."));
     }
 
-    // Heal an already-imported but unindexed database in place.
-    let reindex_summary = if index_tool_input && needs_heal {
+    // Rebuild the search index when indexing is on and the store either has no
+    // signatures yet or indexing was just newly enabled — a reimport alone
+    // cannot make already-stored events searchable.
+    let newly_enabled_index = index_tool_input && !prior_index_tool_input;
+    let reindex_summary = if index_tool_input && (needs_heal || newly_enabled_index) {
         let summary = reindex(
             &mut store,
             &ReindexOptions {
                 index_tool_input: true,
-                index_metadata: plan.index_metadata.clone(),
+                index_metadata: index_metadata.clone(),
                 exclude_paths: Vec::new(),
             },
         )?;
@@ -279,11 +337,8 @@ pub fn run(
         if selected.is_empty() {
             ui.say("No adapters selected to watch — skipping monitoring.");
         } else {
-            let report = daemon::install(
-                Some(database.clone()),
-                plan.interval,
-                adapter_names(&selected),
-            )?;
+            let report =
+                daemon::install(Some(database.clone()), interval, adapter_names(&selected))?;
             monitor_installed = report.supported && report.unit_present;
             if monitor_installed {
                 ui.say("Monitoring installed. Undo any time with `autophagy daemon uninstall`.");
@@ -293,7 +348,65 @@ pub fn run(
         }
     }
 
-    // 6. What next.
+    // 6. Persist the chosen settings so later runs and commands inherit them.
+    let selected_names = adapter_names(&selected);
+    let config_path = crate::config::write_setup(&crate::config::SetupValues {
+        adapters: selected_names.clone(),
+        index_tool_input,
+        include_content,
+        index_metadata: index_metadata.clone(),
+        interval_seconds: interval,
+    })?;
+    let mut changed = Vec::new();
+    if index_tool_input != prior_index_tool_input {
+        changed.push(format!("index_tool_input → {index_tool_input}"));
+    }
+    if include_content != prior_include_content {
+        changed.push(format!("include_content → {include_content}"));
+    }
+    if selected_names != prior_adapters {
+        changed.push(format!("adapters → [{}]", selected_names.join(", ")));
+    }
+    if prior_interval.is_some_and(|prior| prior != interval) {
+        changed.push(format!("interval_seconds → {interval}"));
+    }
+    ui.say("");
+    ui.say(&format!("Saved settings to {}.", config_path.display()));
+    if config.present && !changed.is_empty() {
+        ui.say(&format!("Changed: {}.", changed.join(", ")));
+    }
+
+    // 7. If an installed daemon's inputs changed and we did not just install
+    // one fresh, offer to reinstall so the change takes effect (the unit bakes
+    // its arguments in at install time).
+    let adapters_changed = selected_names != prior_adapters;
+    let interval_changed = prior_interval.is_some_and(|prior| prior != interval);
+    let mut daemon_reinstalled = false;
+    if !monitor_installed && (adapters_changed || interval_changed) && !selected.is_empty() {
+        let installed = daemon::status(Some(database.clone()))?.unit_present;
+        if installed {
+            let reinstall = if interactive {
+                ui.prompt_yes_no(
+                    "Monitoring is installed and its settings changed. Reinstall it now to apply?",
+                    true,
+                )
+            } else {
+                plan.yes
+            };
+            if reinstall {
+                let report =
+                    daemon::install(Some(database.clone()), interval, selected_names.clone())?;
+                daemon_reinstalled = report.supported && report.unit_present;
+                if daemon_reinstalled {
+                    ui.say("Monitoring reinstalled with the new settings.");
+                }
+            } else {
+                ui.say("Run `autophagy daemon install` to apply the change when ready.");
+            }
+        }
+    }
+
+    // 8. What next.
     if verbose {
         ui.say("");
         ui.say("What next:");
@@ -313,6 +426,10 @@ pub fn run(
         digest_findings,
         digest_observations,
         monitor_installed,
+        config_path: config_path.display().to_string(),
+        config_written: true,
+        changed,
+        daemon_reinstalled,
     })
 }
 

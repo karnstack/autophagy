@@ -16,6 +16,25 @@ const VALID_JSONL: &str = concat!(
     "\"metadata\":{\"search\":\"generated client stale\"}}\n"
 );
 
+/// A fixture whose failing tool call carries `tool.input`, so indexing builds a
+/// signature and a single-occurrence finding qualifies at the lowest thresholds.
+const INDEXABLE_JSONL: &str = concat!(
+    "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_ix_start\",",
+    "\"session_id\":\"ses_ix\",\"timestamp\":\"2026-07-16T10:00:00Z\",",
+    "\"sequence\":0,\"source\":\"generic-jsonl\",\"type\":\"session.started\",",
+    "\"project\":\"/workspace/demo\"}\n",
+    "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_ix_failure\",",
+    "\"session_id\":\"ses_ix\",\"timestamp\":\"2026-07-16T10:01:00Z\",",
+    "\"sequence\":1,\"source\":\"generic-jsonl\",\"type\":\"tool.failed\",",
+    "\"project\":\"/workspace/demo\",\"tool\":{\"name\":\"bash\",",
+    "\"input\":\"cargo test\",\"exit_code\":1},",
+    "\"metadata\":{\"summary\":\"schema changed; generated client was stale\"}}\n",
+    "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_ix_end\",",
+    "\"session_id\":\"ses_ix\",\"timestamp\":\"2026-07-16T10:02:00Z\",",
+    "\"sequence\":2,\"source\":\"generic-jsonl\",\"type\":\"session.ended\",",
+    "\"project\":\"/workspace/demo\"}\n"
+);
+
 #[test]
 fn import_sessions_search_and_reimport_work_end_to_end() {
     let directory = tempfile::tempdir().expect("temporary directory");
@@ -1244,6 +1263,292 @@ fn watch_once_imports_incrementally() {
     );
 }
 
+#[test]
+fn config_set_get_unset_round_trip_and_validation() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+
+    let set = run_json(&database, ["config", "set", "detect.min_occurrences", "7"]);
+    assert_eq!(set["result"]["action"], "set");
+
+    let got = run_json(&database, ["config", "get", "detect.min_occurrences"]);
+    assert_eq!(got["result"]["value"], "7");
+    assert_eq!(got["result"]["source"], "config");
+
+    // The value is visible in the effective listing with a config source.
+    let list = run_json(&database, ["config", "list"]);
+    let entry = list["result"]["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| entry["key"] == "detect.min_occurrences")
+        .expect("key present");
+    assert_eq!(entry["value"], "7");
+    assert_eq!(entry["source"], "config");
+
+    let unset = run_json(&database, ["config", "unset", "detect.min_occurrences"]);
+    assert_eq!(unset["result"]["removed"], true);
+
+    // After unset the effective value reverts to the built-in default.
+    let reverted = run_json(&database, ["config", "get", "detect.min_occurrences"]);
+    assert_eq!(reverted["result"]["value"], "3");
+    assert_eq!(reverted["result"]["source"], "default");
+
+    // A wrong-typed value is a precise error and does not write.
+    let bad = command(&database)
+        .args(["config", "set", "detect.min_occurrences", "lots"])
+        .output()
+        .expect("run");
+    assert!(!bad.status.success());
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("detect.min_occurrences"),
+        "error names the offending key"
+    );
+
+    // An unknown key is rejected.
+    let unknown = command(&database)
+        .args(["config", "get", "nonsense.key"])
+        .output()
+        .expect("run");
+    assert!(!unknown.status.success());
+}
+
+#[test]
+fn digest_precedence_is_default_then_config_then_flag() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let input = directory.path().join("events.jsonl");
+    let database = directory.path().join("autophagy.db");
+    fs::write(&input, INDEXABLE_JSONL).expect("write fixture");
+    run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:cli",
+            "--index-tool-input",
+        ],
+    );
+
+    // Default thresholds: the two-event fixture yields no findings.
+    let default = run_json(&database, ["digest"]);
+    assert_eq!(
+        default["result"]["findings"].as_array().expect("arr").len(),
+        0
+    );
+
+    // Config lowers the thresholds, so a finding qualifies without any flag.
+    run_json(&database, ["config", "set", "detect.min_occurrences", "1"]);
+    run_json(&database, ["config", "set", "detect.min_sessions", "1"]);
+    let configured = run_json(&database, ["digest"]);
+    assert_eq!(
+        configured["result"]["findings"]
+            .as_array()
+            .expect("arr")
+            .len(),
+        1,
+        "config thresholds take effect"
+    );
+
+    // An explicit flag overrides the config file.
+    let overridden = run_json(&database, ["digest", "--min-occurrences", "999"]);
+    assert_eq!(
+        overridden["result"]["findings"]
+            .as_array()
+            .expect("arr")
+            .len(),
+        0,
+        "explicit flag wins over config"
+    );
+}
+
+#[test]
+fn import_honors_config_index_tool_input() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let input = directory.path().join("events.jsonl");
+    let database = directory.path().join("autophagy.db");
+    fs::write(&input, INDEXABLE_JSONL).expect("write fixture");
+
+    // With indexing enabled only in config (no flag), import builds signatures.
+    run_json(
+        &database,
+        ["config", "set", "import.index_tool_input", "true"],
+    );
+    run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:cli",
+        ],
+    );
+    let status = run_json(&database, ["status"]);
+    assert_eq!(status["result"]["index"]["tool_input_indexed"], true);
+    assert!(
+        status["result"]["index"]["signatures"]
+            .as_u64()
+            .expect("sigs")
+            >= 1,
+        "config enabled tool-input indexing"
+    );
+}
+
+#[test]
+fn watch_honors_config_interval_with_flag_override() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let empty_claude = directory.path().join("empty-claude");
+    fs::create_dir_all(&empty_claude).expect("mkdir");
+
+    run_json(
+        &database,
+        ["config", "set", "watch.interval_seconds", "123"],
+    );
+
+    // No --interval flag: the configured interval is used.
+    let configured = run_watch_summary(&database, &empty_claude);
+    assert_eq!(configured["interval_secs"], 123);
+
+    // An explicit --interval overrides the config file.
+    let output = command(&database)
+        .args(["--output", "json"])
+        .args([
+            "watch",
+            "--adapter",
+            "claude-code",
+            "--once",
+            "--interval",
+            "5",
+        ])
+        .env("CLAUDE_CONFIG_DIR", &empty_claude)
+        .output()
+        .expect("run watch");
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8");
+    let last = stdout
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .expect("summary line");
+    let overridden: Value = serde_json::from_str(last).expect("summary JSON");
+    assert_eq!(overridden["interval_secs"], 5);
+}
+
+#[test]
+fn status_reports_counts_and_shape_against_a_fixture_database() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let input = directory.path().join("events.jsonl");
+    let database = directory.path().join("autophagy.db");
+    fs::write(&input, INDEXABLE_JSONL).expect("write fixture");
+    run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:cli",
+            "--index-tool-input",
+        ],
+    );
+
+    let status = run_json(&database, ["status"]);
+    let result = &status["result"];
+    assert_eq!(result["database"]["events"], 3);
+    assert_eq!(result["database"]["sessions"], 1);
+    assert!(
+        result["database"]["schema_version"]
+            .as_i64()
+            .expect("schema")
+            > 0
+    );
+    assert!(result["database"]["size_bytes"].as_u64().is_some());
+    assert_eq!(result["index"]["tool_input_indexed"], true);
+    assert_eq!(result["detector"]["min_occurrences"], 3);
+    // The generic source appears in the per-adapter activity breakdown.
+    let adapters = result["adapters"].as_array().expect("adapters");
+    assert!(adapters.iter().any(|adapter| adapter["events"] == 3));
+    assert_eq!(result["config_present"], false);
+}
+
+#[test]
+fn status_works_against_an_empty_database_and_no_config() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let status = run_json(&database, ["status"]);
+    let result = &status["result"];
+    assert_eq!(result["database"]["events"], 0);
+    assert_eq!(result["findings"], 0);
+    assert_eq!(result["config_present"], false);
+    assert!(result["adapters"].as_array().expect("adapters").is_empty());
+}
+
+#[test]
+fn rerunnable_setup_enables_indexing_and_reindexes_in_place() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let input = directory.path().join("events.jsonl");
+    let database = directory.path().join("autophagy.db");
+    let empty_claude = directory.path().join("empty-claude");
+    fs::create_dir_all(&empty_claude).expect("mkdir");
+    fs::write(&input, INDEXABLE_JSONL).expect("write fixture");
+
+    // Seed events without indexing, and a config that has indexing off.
+    run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:cli",
+        ],
+    );
+    run_json(
+        &database,
+        ["config", "set", "import.index_tool_input", "false"],
+    );
+
+    // Re-run setup non-interactively, newly enabling indexing. No adapter root
+    // exists (empty CLAUDE_CONFIG_DIR), so setup imports nothing but must still
+    // heal the existing events in place through reindex.
+    let output = command(&database)
+        .args(["--output", "json"])
+        .args([
+            "setup",
+            "--yes",
+            "--index-tool-input",
+            "--adapter",
+            "claude-code",
+        ])
+        .env("CLAUDE_CONFIG_DIR", &empty_claude)
+        .output()
+        .expect("run setup");
+    assert!(
+        output.status.success(),
+        "setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    let result = &report["result"];
+    assert_eq!(result["index_tool_input"], true);
+    assert_eq!(result["config_written"], true);
+    assert!(
+        result["reindex"].is_object(),
+        "index newly enabled must trigger reindex"
+    );
+    assert!(
+        result["changed"]
+            .as_array()
+            .expect("changed")
+            .iter()
+            .any(|change| change
+                .as_str()
+                .is_some_and(|c| c.contains("index_tool_input"))),
+        "the change is reported"
+    );
+
+    // The heal is observable: signatures now exist.
+    let status = run_json(&database, ["status"]);
+    assert_eq!(status["result"]["index"]["tool_input_indexed"], true);
+}
+
 /// Run `autophagy watch --adapter claude-code --once` and return the final
 /// summary object (the last JSON line the command prints).
 fn run_watch_summary(database: &Path, claude_config_dir: &Path) -> Value {
@@ -1283,5 +1588,10 @@ fn run_json<const N: usize>(database: &Path, args: [&str; N]) -> Value {
 fn command(database: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_autophagy"));
     command.args(["--database", database.to_str().expect("UTF-8 path")]);
+    // Isolate configuration per test: pin the config directory to the database's
+    // own temporary directory so tests never read the developer's real config.
+    if let Some(parent) = database.parent() {
+        command.env("AUTOPHAGY_CONFIG_DIR", parent);
+    }
     command
 }
