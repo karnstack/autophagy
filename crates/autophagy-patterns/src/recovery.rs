@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use autophagy_events::{Event, EventKind};
 
 use crate::{
-    DetectorConfig, DetectorKind, EvidencePacket, EvidenceReference, EvidenceSpecVersion,
+    Candidate, DetectorConfig, DetectorKind, EvidencePacket, EvidenceReference,
+    EvidenceSpecVersion,
     score::{qualifies, score},
     signature::{FailureOperation, failure_operation, finding_id},
 };
@@ -25,7 +26,10 @@ struct RecoveryGroup<'a> {
     occurrences: Vec<RecoveryOccurrence<'a>>,
 }
 
-pub(crate) fn detect(events: &[Event], config: DetectorConfig) -> Vec<EvidencePacket> {
+pub(crate) fn detect(
+    events: &[Event],
+    config: DetectorConfig,
+) -> (Vec<EvidencePacket>, Vec<Candidate>) {
     let mut sessions: BTreeMap<&str, Vec<&Event>> = BTreeMap::new();
     for event in events {
         sessions
@@ -44,37 +48,48 @@ pub(crate) fn detect(events: &[Event], config: DetectorConfig) -> Vec<EvidencePa
         });
         collect_session(session, &mut groups, &mut direct);
     }
-    groups
-        .into_iter()
-        .filter_map(|(signature, group)| {
-            let support_anchors = group
-                .occurrences
-                .iter()
-                .map(|occurrence| occurrence.recovery)
-                .collect::<Vec<_>>();
-            let direct_recoveries = direct
-                .get(&group.failure_signature)
-                .map_or(&[][..], Vec::as_slice);
-            let counterexample_anchors = direct_recoveries
-                .iter()
-                .map(|occurrence| occurrence.recovered)
-                .collect::<Vec<_>>();
-            let recurrence = score(&support_anchors, &counterexample_anchors)?;
-            qualifies(&recurrence, config).then(|| EvidencePacket {
+    let mut findings = Vec::new();
+    let mut candidates = Vec::new();
+    for (signature, group) in groups {
+        let support_anchors = group
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.recovery)
+            .collect::<Vec<_>>();
+        let direct_recoveries = direct
+            .get(&group.failure_signature)
+            .map_or(&[][..], Vec::as_slice);
+        let counterexample_anchors = direct_recoveries
+            .iter()
+            .map(|occurrence| occurrence.recovered)
+            .collect::<Vec<_>>();
+        let Some(recurrence) = score(&support_anchors, &counterexample_anchors) else {
+            continue;
+        };
+        let title = format!("Repeated successful recovery: {}", group.label);
+        if qualifies(&recurrence, config) {
+            findings.push(EvidencePacket {
                 spec_version: EvidenceSpecVersion::V0_1,
                 finding_id: finding_id(
                     DetectorKind::RepeatedSuccessfulRecovery.as_str(),
                     &signature,
                 ),
                 detector: DetectorKind::RepeatedSuccessfulRecovery,
-                signature,
-                title: format!("Repeated successful recovery: {}", group.label),
-                score: recurrence,
+                signature: signature.clone(),
+                title: title.clone(),
+                score: recurrence.clone(),
                 evidence: recovery_references(&group.occurrences),
                 counterexamples: direct_references(direct_recoveries),
-            })
-        })
-        .collect()
+            });
+        }
+        candidates.push(Candidate {
+            detector: DetectorKind::RepeatedSuccessfulRecovery,
+            signature,
+            title,
+            score: recurrence,
+        });
+    }
+    (findings, candidates)
 }
 
 fn collect_session<'a>(

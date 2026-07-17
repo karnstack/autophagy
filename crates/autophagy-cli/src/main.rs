@@ -31,7 +31,9 @@ use autophagy_install::{
     plan_skill, unmaterialize,
 };
 use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
-use autophagy_patterns::{DetectorConfig, EvidencePacket, detect};
+use autophagy_patterns::{
+    DetectionDiagnostics, DetectorConfig, EvidencePacket, Observation, detect, detect_with_report,
+};
 use autophagy_replay::{
     CounterfactualOutcome, ExpectedAction, ReplayDraftError, ReplayEvaluationError, ReplayReport,
     ReplaySuite, evaluate, extract_review_draft,
@@ -319,8 +321,12 @@ struct ThresholdArgs {
     #[arg(long, default_value_t = 2, value_name = "COUNT")]
     min_sessions: u32,
 
-    /// Minimum support share in basis points (0-10000).
-    #[arg(long, default_value_t = 5_000, value_parser = clap::value_parser!(u16).range(0..=10_000), value_name = "BPS")]
+    /// Optional anti-noise floor on support share in basis points (0-10000).
+    ///
+    /// Qualification is decided by recurrence, not failure share; this floor
+    /// defaults to 0 (disabled) and only suppresses candidates whose failure
+    /// share is vanishingly small.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=10_000), value_name = "BPS")]
     min_support_ratio_bps: u16,
 }
 
@@ -560,7 +566,7 @@ enum CommandReport {
     Sessions(Vec<SessionSummary>),
     Search(Vec<RetrievalHit>),
     Digest(DigestReport),
-    Patterns(Vec<EvidencePacket>),
+    Patterns(PatternsReport),
     #[serde(rename = "mutations_propose")]
     MutationProposal(MutationProposalReport),
     #[serde(rename = "mutations_synthesize")]
@@ -594,9 +600,21 @@ struct DigestReport {
     spec_version: &'static str,
     generated_at: String,
     events_scanned: usize,
+    sessions_scanned: usize,
+    candidate_signatures: usize,
     model_used: bool,
     network_used: bool,
     findings: Vec<EvidencePacket>,
+    observations: Vec<Observation>,
+}
+
+#[derive(Debug, Serialize)]
+struct PatternsReport {
+    events_scanned: usize,
+    sessions_scanned: usize,
+    candidate_signatures: usize,
+    findings: Vec<EvidencePacket>,
+    observations: Vec<Observation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -992,14 +1010,23 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
             let events = store.list_events_for_detection(project.as_deref())?;
-            let findings = detect(&events, thresholds.into());
+            let report = detect_with_report(&events, thresholds.into());
+            let DetectionDiagnostics {
+                events_scanned,
+                sessions_scanned,
+                candidate_signatures,
+                observations,
+            } = report.diagnostics;
             Ok(CommandReport::Digest(DigestReport {
                 spec_version: "digest/0.1",
                 generated_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
-                events_scanned: events.len(),
+                events_scanned,
+                sessions_scanned,
+                candidate_signatures,
                 model_used: false,
                 network_used: false,
-                findings,
+                findings: report.findings,
+                observations,
             }))
         }
         Commands::Patterns {
@@ -1009,7 +1036,20 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
             let events = store.list_events_for_detection(project.as_deref())?;
-            Ok(CommandReport::Patterns(detect(&events, thresholds.into())))
+            let report = detect_with_report(&events, thresholds.into());
+            let DetectionDiagnostics {
+                events_scanned,
+                sessions_scanned,
+                candidate_signatures,
+                observations,
+            } = report.diagnostics;
+            Ok(CommandReport::Patterns(PatternsReport {
+                events_scanned,
+                sessions_scanned,
+                candidate_signatures,
+                findings: report.findings,
+                observations,
+            }))
         }
         Commands::Mutations { action } => execute_mutation_action(cli.database, action),
         Commands::Export { project } => {
@@ -1596,16 +1636,24 @@ fn write_report(
                     )?;
                 }
             }
-            CommandReport::Digest(report) => {
-                writeln!(
-                    writer,
-                    "{} events · {} findings · local deterministic digest",
-                    report.events_scanned,
-                    report.findings.len()
-                )?;
-                write_findings(&mut writer, &report.findings)?;
-            }
-            CommandReport::Patterns(findings) => write_findings(&mut writer, findings)?,
+            CommandReport::Digest(report) => write_detection(
+                &mut writer,
+                "local deterministic digest",
+                report.events_scanned,
+                report.sessions_scanned,
+                report.candidate_signatures,
+                &report.findings,
+                &report.observations,
+            )?,
+            CommandReport::Patterns(report) => write_detection(
+                &mut writer,
+                "deterministic evidence packets",
+                report.events_scanned,
+                report.sessions_scanned,
+                report.candidate_signatures,
+                &report.findings,
+                &report.observations,
+            )?,
             CommandReport::MutationProposal(report) => {
                 write_mutation_proposal(&mut writer, report)?;
             }
@@ -1763,6 +1811,29 @@ fn write_report(
     Ok(())
 }
 
+fn write_detection(
+    writer: &mut impl Write,
+    header: &str,
+    events_scanned: usize,
+    sessions_scanned: usize,
+    candidate_signatures: usize,
+    findings: &[EvidencePacket],
+    observations: &[Observation],
+) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{events_scanned} events · {sessions_scanned} sessions · {candidate_signatures} candidate signatures · {} findings · {header}",
+        findings.len()
+    )?;
+    write_findings(writer, findings)?;
+    // Never a silent zero: when nothing qualified, show the strongest recurring
+    // candidates and the exact gate each missed so the scan explains itself.
+    if findings.is_empty() {
+        write_observations(writer, observations)?;
+    }
+    Ok(())
+}
+
 fn write_findings(writer: &mut impl Write, findings: &[EvidencePacket]) -> io::Result<()> {
     if findings.is_empty() {
         writeln!(writer, "no findings above threshold")?;
@@ -1776,6 +1847,29 @@ fn write_findings(writer: &mut impl Write, findings: &[EvidencePacket]) -> io::R
             finding.score.score_bps,
             finding.evidence.len(),
             finding.counterexamples.len()
+        )?;
+    }
+    Ok(())
+}
+
+fn write_observations(writer: &mut impl Write, observations: &[Observation]) -> io::Result<()> {
+    if observations.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        writer,
+        "near-threshold observations (recurring candidates, not findings):"
+    )?;
+    for observation in observations {
+        writeln!(
+            writer,
+            "{}\t{} occ · {} sessions · {} counterexamples · {} bps support\tunmet: {}",
+            observation.title,
+            observation.score.occurrences,
+            observation.score.distinct_sessions,
+            observation.score.counterexamples,
+            observation.score.support_ratio_bps,
+            observation.unmet_gate.as_str()
         )?;
     }
     Ok(())

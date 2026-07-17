@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use autophagy_events::{Event, EventKind};
 
 use crate::{
-    DetectorConfig, DetectorKind, EvidencePacket, EvidenceReference, EvidenceSpecVersion,
+    Candidate, DetectorConfig, DetectorKind, EvidencePacket, EvidenceReference,
+    EvidenceSpecVersion,
     score::{qualifies, score},
     signature::{FailureOperation, failure_operation, finding_id},
 };
@@ -14,7 +15,10 @@ struct FailureGroup<'a> {
     events: Vec<&'a Event>,
 }
 
-pub(crate) fn detect(events: &[Event], config: DetectorConfig) -> Vec<EvidencePacket> {
+pub(crate) fn detect(
+    events: &[Event],
+    config: DetectorConfig,
+) -> (Vec<EvidencePacket>, Vec<Candidate>) {
     let mut failures: BTreeMap<String, FailureGroup<'_>> = BTreeMap::new();
     let mut successes: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
 
@@ -37,25 +41,36 @@ pub(crate) fn detect(events: &[Event], config: DetectorConfig) -> Vec<EvidencePa
         }
     }
 
-    failures
-        .into_iter()
-        .filter_map(|(signature, group)| {
-            let counterexamples = successes
-                .get(&group.success_key)
-                .map_or(&[][..], Vec::as_slice);
-            let recurrence = score(&group.events, counterexamples)?;
-            qualifies(&recurrence, config).then(|| EvidencePacket {
+    let mut findings = Vec::new();
+    let mut candidates = Vec::new();
+    for (signature, group) in failures {
+        let counterexamples = successes
+            .get(&group.success_key)
+            .map_or(&[][..], Vec::as_slice);
+        let Some(recurrence) = score(&group.events, counterexamples) else {
+            continue;
+        };
+        let title = format!("Repeated command failure: {}", truncate(&group.label, 160));
+        if qualifies(&recurrence, config) {
+            findings.push(EvidencePacket {
                 spec_version: EvidenceSpecVersion::V0_1,
                 finding_id: finding_id(DetectorKind::RepeatedCommandFailure.as_str(), &signature),
                 detector: DetectorKind::RepeatedCommandFailure,
-                signature,
-                title: format!("Repeated command failure: {}", truncate(&group.label, 160)),
-                score: recurrence,
+                signature: signature.clone(),
+                title: title.clone(),
+                score: recurrence.clone(),
                 evidence: references(&group.events),
                 counterexamples: references(counterexamples),
-            })
-        })
-        .collect()
+            });
+        }
+        candidates.push(Candidate {
+            detector: DetectorKind::RepeatedCommandFailure,
+            signature,
+            title,
+            score: recurrence,
+        });
+    }
+    (findings, candidates)
 }
 
 fn add_failure<'a>(
