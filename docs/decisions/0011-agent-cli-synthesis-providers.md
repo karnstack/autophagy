@@ -1,4 +1,4 @@
-# ADR 0010: Agent-CLI synthesis providers
+# ADR 0011: Agent-CLI synthesis providers
 
 - Status: accepted
 - Date: 2026-07-17

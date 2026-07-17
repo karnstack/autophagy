@@ -57,5 +57,5 @@ key for these providers.
 }
 ```
 
-See [ADR 0010](../../decisions/0010-agent-cli-synthesis-providers.md) for the
+See [ADR 0011](../../decisions/0011-agent-cli-synthesis-providers.md) for the
 design rationale, the verified CLI invocation table, and the privacy stance.

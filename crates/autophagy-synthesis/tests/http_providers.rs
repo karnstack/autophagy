@@ -577,11 +577,14 @@ fn measured_prompt_size_over_the_fixture_corpus_is_bounded() {
         "PROMPT MEASUREMENT: candidates={count} max_prompt_chars={max_chars} \
          approx_prompt_tokens={approx_tokens} response_cap_tokens={MAX_COMPLETION_TOKENS}"
     );
-    // A structured, template-only prompt stays small. This bound pins the figure
-    // quoted in docs/guides/synthesis.md (~693 approx tokens max); keep the doc
-    // and this bound in lockstep so the quoted number cannot drift silently.
+    // A structured, template-only prompt stays small. The system prompt now
+    // embeds the exact response shape (including the literal permissions object)
+    // so real models emit a schema-valid candidate rather than declining. This
+    // bound pins the figure quoted in docs/guides/synthesis.md (~899 approx
+    // tokens max); keep the doc and this bound in lockstep so the quoted number
+    // cannot drift silently.
     assert!(
-        approx_tokens <= 750,
+        approx_tokens <= 950,
         "prompt exceeded the documented bound ({approx_tokens} approx tokens)"
     );
 }

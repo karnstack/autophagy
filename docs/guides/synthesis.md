@@ -47,7 +47,7 @@ manifest), and [`docs/specs/synthesis/0.3/`](../specs/synthesis/0.3/README.md)
 (agent-CLI manifest). The design rationale and privacy stance are in
 [ADR 0004](../decisions/0004-local-synthesis-boundary.md),
 [ADR 0007](../decisions/0007-model-synthesis-providers.md), and
-[ADR 0010](../decisions/0010-agent-cli-synthesis-providers.md).
+[ADR 0011](../decisions/0011-agent-cli-synthesis-providers.md).
 
 ## With and without a model
 
@@ -212,10 +212,12 @@ and `network_used: false`.
 ## Token accounting and cost expectations
 
 The prompt is built only from the deterministic template's structured fields —
-the baseline text, the hard constraints, and the cited event **identifiers**. It
+the baseline text, the hard constraints, and the cited event **identifiers** —
+plus a fixed system prompt that spells out the exact response shape (including
+the literal permissions object) so a model emits a schema-valid candidate. It
 never includes session transcripts or raw event payloads. Measured against the
-deterministic fixture corpus, that is roughly **700 prompt tokens per candidate**
-(693 at the maximum), and the response is capped at **1024 tokens**. When a
+deterministic fixture corpus, that is roughly **900 prompt tokens per candidate**
+(899 at the maximum), and the response is capped at **1024 tokens**. When a
 runtime reports usage, Autophagy surfaces the exact `prompt_tokens` and
 `completion_tokens` per candidate; when it does not, usage is reported as
 unavailable and never estimated.
@@ -226,8 +228,8 @@ Cost then follows directly, in tokens (Autophagy quotes no invented prices):
   cost** — you already run the hardware.
 - **Hosted endpoints** (only reachable with `--allow-remote-endpoint`) cost
   roughly `candidates × (prompt_tokens + completion_tokens) × provider_rate`.
-  With ~700 prompt tokens plus up to 1024 completion tokens per candidate, that
-  is on the order of ~1.7k tokens per candidate; multiply by your provider's
+  With ~900 prompt tokens plus up to 1024 completion tokens per candidate, that
+  is on the order of ~1.9k tokens per candidate; multiply by your provider's
   current per-token price from its own pricing page.
 - **Agent CLIs** (`claude-cli`, `codex-cli`) have **no separate Autophagy cost**:
   the request goes through your existing CLI login and is billed to your existing
