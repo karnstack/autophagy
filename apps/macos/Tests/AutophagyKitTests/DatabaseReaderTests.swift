@@ -9,7 +9,7 @@ struct DatabaseReaderTests {
         let temp = TempPath(FixtureDatabase.populated())
         let reader = try DatabaseReader(path: temp.path)
         #expect(reader.isAutophagyDatabase())
-        #expect(reader.schemaInfo().compatibility == .supported(version: 8))
+        #expect(reader.schemaInfo().compatibility == .supported(version: 1))
     }
 
     @Test func readsSessionsWithSourceMetadata() throws {
@@ -117,7 +117,7 @@ struct DatabaseReaderTests {
         let reader = try DatabaseReader(path: temp.path)
         let snapshot = reader.menuBarSnapshot(recentLimit: 5)
         #expect(snapshot.isConnected)
-        #expect(snapshot.schema == .supported(version: 8))
+        #expect(snapshot.schema == .supported(version: 1))
         #expect(snapshot.sessionCount == 2)
         #expect(snapshot.eventCount == 3)
         #expect(snapshot.candidateCount == 2)

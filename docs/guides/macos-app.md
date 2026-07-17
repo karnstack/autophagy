@@ -133,11 +133,19 @@ always a normal Dock app unless you opt in.
 
 ## Schema-version tolerance
 
-The app is written to read schema version 8. On open it reads `user_version`
-and the `schema_migrations` ledger and reports whether the database is fully
-supported, older but readable, or newer than the app understands. A newer or
-older schema is read safely — unknown tables are skipped and missing tables
-yield empty views — rather than crashing or misreading.
+The app is written to read schema version 1, the squashed release baseline (the
+eight development-time migrations were collapsed into one before release; see
+ADR 0012). On open it reads `user_version` and the `schema_migrations` ledger
+and reports whether the database is fully supported, older but readable, or
+newer than the app understands. A newer or older schema is read safely — unknown
+tables are skipped and missing tables yield empty views — rather than crashing
+or misreading.
+
+One legacy database predates the squash and still carries the development-time
+v8 ledger. Until the CLI touches it, the app classifies it as newer-than-known
+(8 > 1) and reads it read-only under that heading. The CLI adopts it to the v1
+baseline on first open — a one-time, in-place ledger rewrite that preserves all
+data — after which the app reports it as fully supported at v1.
 
 A database that the engine left in WAL mode but cleanly checkpointed (its
 `-wal`/`-shm` sidecars removed) is opened read-only via SQLite's `immutable`

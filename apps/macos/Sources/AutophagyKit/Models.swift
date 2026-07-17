@@ -3,8 +3,12 @@ import Foundation
 /// The schema version this build of the app was written to read.
 ///
 /// Corresponds to the highest immutable migration in
-/// `crates/autophagy-store/migrations` at the time of writing.
-public let knownSchemaVersion = 8
+/// `crates/autophagy-store/migrations` at the time of writing. The migrations
+/// were squashed to a single v1 baseline before the first release (see ADR
+/// 0012). A not-yet-adopted legacy database still carrying the development-time
+/// v8 ledger classifies as `newerThanKnown` and reads read-only; the CLI adopts
+/// it to v1 on first touch.
+public let knownSchemaVersion = 1
 
 /// How the opened database's schema relates to what this app understands.
 public enum SchemaCompatibility: Equatable, Sendable {

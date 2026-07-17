@@ -19,18 +19,16 @@ enum FixtureDatabase {
         return path
     }
 
-    /// A database carrying the full v8 schema subset the app reads, with one
-    /// source, several sessions/events, and one challenged + one rejected
-    /// mutation candidate (with evidence links and transitions).
+    /// A database carrying the full v1 baseline schema subset the app reads, with
+    /// one source, several sessions/events, and one challenged + one rejected
+    /// mutation candidate (with evidence links and transitions). This is the
+    /// normal, adopted state the app sees: a single v1 baseline ledger row.
     static func populated() -> String {
-        make(schemaVersion: 8) { db in
+        make(schemaVersion: 1) { db in
             createSchema(db)
             exec(db, """
             INSERT INTO schema_migrations(version, description, checksum, applied_at) VALUES
-              (1,'initial',zeroblob(32),'2026-07-16T00:00:00Z'),
-              (6,'retrieval',zeroblob(32),'2026-07-16T00:00:00Z'),
-              (7,'claude_code_install',zeroblob(32),'2026-07-16T00:00:00Z'),
-              (8,'mutation_provenance',zeroblob(32),'2026-07-16T00:00:00Z');
+              (1,'initial schema',zeroblob(32),'2026-07-16T00:00:00Z');
             """)
             exec(db, """
             INSERT INTO sources(source_id, adapter, instance_key, display_name,
