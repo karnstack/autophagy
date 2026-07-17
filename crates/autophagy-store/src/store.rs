@@ -953,6 +953,30 @@ impl EventStore {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Return the current lifecycle state of one registered mutation, or
+    /// `None` when no candidate with that ID has ever been registered.
+    ///
+    /// This is the cheap, single-column lookup callers use to display a
+    /// mutation's *current* state (e.g. after a `propose`/`synthesize` pass
+    /// re-derives the same deterministic candidate for evidence that was
+    /// already registered and has since moved past `candidate`) without
+    /// paying for the full [`Self::get_mutation`] package and transition
+    /// history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn mutation_state(&self, mutation_id: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT state FROM mutation_candidates WHERE mutation_id = ?1",
+                [mutation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
     /// Count registered mutation candidates grouped by lifecycle state.
     ///
     /// Read-only COUNT aggregation; states with no candidates are absent.

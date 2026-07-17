@@ -8,7 +8,7 @@ mod status;
 mod watch;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs::{self, File},
     io::{self, BufRead, BufReader, Write},
@@ -870,6 +870,20 @@ struct MutationProposalReport {
     dry_run: bool,
     generated: Vec<GenerationOutcome>,
     registrations: Vec<MutationRegisterOutcome>,
+    /// Non-fatal registration notes, currently only immutable-package template
+    /// conflicts (see [`template_conflict_warning`]). Skipped from JSON when
+    /// empty so the machine surface is unchanged for conflict-free runs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
+    /// Each generated candidate's CURRENT registry lifecycle state, keyed by
+    /// mutation ID, fetched from the store after the registration attempt
+    /// above. Deterministic generation re-derives the same mutation ID for
+    /// evidence that was already registered, so a candidate can already be
+    /// `shadow_passed`, `retired`, etc.; this map is the source of truth the
+    /// text and JSON renderers use instead of assuming every row is still
+    /// `candidate`. Absent entries mean the mutation has never been
+    /// registered (dry-run preview of a brand-new candidate).
+    current_states: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -890,6 +904,10 @@ struct MutationSynthesisReport {
     total_completion_tokens: Option<u64>,
     synthesized: Vec<SynthesisOutcome>,
     registrations: Vec<MutationRegisterOutcome>,
+    /// See [`MutationProposalReport::current_states`]: each synthesized
+    /// candidate's CURRENT registry lifecycle state, fetched after the
+    /// registration attempt above, keyed by mutation ID.
+    current_states: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1961,6 +1979,7 @@ fn execute_mutation_action(
             .findings;
             let generated = generate_candidates(&findings);
             let mut registrations = Vec::new();
+            let mut warnings = Vec::new();
             if !dry_run {
                 for outcome in &generated {
                     let GenerationOutcome::Candidate { package } = outcome else {
@@ -1980,13 +1999,28 @@ fn execute_mutation_action(
                             .counterexample_event_ids
                             .clone(),
                     };
-                    registrations.push(store.register_mutation(&registration)?);
+                    match store.register_mutation(&registration) {
+                        Ok(outcome) => registrations.push(outcome),
+                        Err(StoreError::MutationContentConflict { mutation_id }) => {
+                            warnings.push(template_conflict_warning(&mutation_id));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
             }
+            let current_states = mutation_states_by_id(
+                &store,
+                generated.iter().filter_map(|outcome| match outcome {
+                    GenerationOutcome::Candidate { package } => Some(package.mutation_id.as_str()),
+                    GenerationOutcome::InsufficientEvidence { .. } => None,
+                }),
+            )?;
             Ok(CommandReport::MutationProposal(MutationProposalReport {
                 dry_run,
                 generated,
                 registrations,
+                warnings,
+                current_states,
             }))
         }
         MutationAction::Synthesize {
@@ -2118,9 +2152,24 @@ fn execute_mutation_action(
                             .counterexample_event_ids
                             .clone(),
                     };
-                    registrations.push(store.register_mutation(&registration)?);
+                    match store.register_mutation(&registration) {
+                        Ok(outcome) => registrations.push(outcome),
+                        Err(StoreError::MutationContentConflict { mutation_id }) => {
+                            warnings.push(template_conflict_warning(&mutation_id));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
             }
+            let current_states = mutation_states_by_id(
+                &store,
+                synthesized.iter().filter_map(|outcome| match outcome {
+                    SynthesisOutcome::Candidate { package, .. } => {
+                        Some(package.mutation_id.as_str())
+                    }
+                    _ => None,
+                }),
+            )?;
             Ok(CommandReport::MutationSynthesis(MutationSynthesisReport {
                 dry_run,
                 provider: synthesis_provider.name().to_owned(),
@@ -2134,6 +2183,7 @@ fn execute_mutation_action(
                 total_completion_tokens,
                 synthesized,
                 registrations,
+                current_states,
             }))
         }
         MutationAction::List => Ok(CommandReport::MutationList(store.list_mutations()?)),
@@ -3121,10 +3171,38 @@ fn write_mutation_lesson(writer: &mut impl Write, details: &MutationDetails) -> 
     Ok(())
 }
 
+/// Look up a mutation's current display state, falling back to `candidate`
+/// only when the ID has no stored state yet (never registered — a dry-run
+/// preview of brand-new evidence, which will in fact become `candidate` the
+/// moment it is registered).
+fn display_state<'a>(
+    current_states: &'a BTreeMap<String, String>,
+    mutation_id: &'a str,
+) -> &'a str {
+    current_states
+        .get(mutation_id)
+        .map_or("candidate", String::as_str)
+}
+
+/// Warning for a candidate whose evidence re-derived an already-registered
+/// mutation ID with different package content. Registered packages are
+/// immutable, so the stored package stays authoritative; this happens when the
+/// deterministic template evolved between the original registration and this
+/// run, and it must not abort the rest of the batch.
+fn template_conflict_warning(mutation_id: &str) -> String {
+    format!(
+        "mutation '{mutation_id}' is already registered with earlier-template content; \
+         the stored immutable package is kept"
+    )
+}
+
 fn write_mutation_proposal(
     writer: &mut impl Write,
     report: &MutationProposalReport,
 ) -> io::Result<()> {
+    for warning in &report.warnings {
+        writeln!(writer, "warning: {warning}")?;
+    }
     if report.generated.is_empty() {
         writeln!(writer, "no mutation candidates above evidence threshold")?;
     }
@@ -3132,10 +3210,11 @@ fn write_mutation_proposal(
         match outcome {
             GenerationOutcome::Candidate { package } => writeln!(
                 writer,
-                "{}\t{}\t{} evidence\tzero permissions\tcandidate",
+                "{}\t{}\t{} evidence\tzero permissions\t{}",
                 package.mutation_id,
                 package.title,
-                package.hypothesis.supporting_event_ids.len()
+                package.hypothesis.supporting_event_ids.len(),
+                display_state(&report.current_states, &package.mutation_id),
             )?,
             GenerationOutcome::InsufficientEvidence { finding_id, reason } => {
                 writeln!(writer, "{finding_id}\tinsufficient evidence\t{reason}")?;
@@ -3148,6 +3227,33 @@ fn write_mutation_proposal(
         writeln!(writer, "{} registry outcomes", report.registrations.len())?;
     }
     Ok(())
+}
+
+/// Fetch each mutation's CURRENT registry lifecycle state, keyed by mutation
+/// ID, for every ID a `propose`/`synthesize` pass generated a candidate for.
+///
+/// Generation is deterministic: the same finding always re-derives the same
+/// mutation ID, so re-running `propose`/`synthesize` over evidence that was
+/// registered in an earlier pass reproduces an identical `GenerationOutcome::
+/// Candidate`/`SynthesisOutcome::Candidate` even after that mutation has been
+/// challenged, replayed, shadow-evaluated, promoted, or retired. Looking the
+/// state up fresh from the store — rather than assuming every generated row
+/// is still `candidate` — is what keeps the displayed state honest. IDs never
+/// registered (a dry-run preview of brand-new evidence) are simply absent.
+///
+/// # Errors
+/// Returns [`CliError`] when the store cannot be queried.
+fn mutation_states_by_id<'a>(
+    store: &EventStore,
+    mutation_ids: impl Iterator<Item = &'a str>,
+) -> Result<BTreeMap<String, String>, CliError> {
+    let mut states = BTreeMap::new();
+    for mutation_id in mutation_ids {
+        if let Some(state) = store.mutation_state(mutation_id)? {
+            states.insert(mutation_id.to_owned(), state);
+        }
+    }
+    Ok(states)
 }
 
 fn aggregate_usage(outcomes: &[SynthesisOutcome]) -> (Option<u64>, Option<u64>) {
@@ -3207,10 +3313,11 @@ fn write_mutation_synthesis(
         match outcome {
             SynthesisOutcome::Candidate { package, .. } => writeln!(
                 writer,
-                "{}\t{}\t{} evidence\tzero permissions\tcandidate",
+                "{}\t{}\t{} evidence\tzero permissions\t{}",
                 package.mutation_id,
                 package.title,
-                package.hypothesis.supporting_event_ids.len()
+                package.hypothesis.supporting_event_ids.len(),
+                display_state(&report.current_states, &package.mutation_id),
             )?,
             SynthesisOutcome::InsufficientEvidence { finding_id, reason } => {
                 writeln!(writer, "{finding_id}\tinsufficient evidence\t{reason}")?;

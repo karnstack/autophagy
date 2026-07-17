@@ -726,6 +726,98 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
     );
 }
 
+/// `propose`/`synthesize` regenerate the exact same deterministic candidate
+/// for evidence that was already registered in an earlier pass. Once that
+/// mutation moves past `candidate` (rejected, shadow-evaluated, retired, ...)
+/// re-running `propose`/`synthesize` must display its ACTUAL current state,
+/// never the stale, generation-time `candidate` label.
+#[test]
+fn propose_and_synthesize_display_current_mutation_state_not_stale_candidate() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+
+    let proposed = run_json(&database, ["mutations", "propose"]);
+    let generated = proposed["result"]["generated"]
+        .as_array()
+        .expect("generated");
+    assert_eq!(generated.len(), 2);
+    let mutation_id = generated[0]["package"]["mutation_id"]
+        .as_str()
+        .expect("mutation id")
+        .to_owned();
+    // Freshly generated and just registered: both fixture rows are still
+    // literally `candidate`.
+    assert_eq!(
+        proposed["result"]["current_states"][mutation_id.as_str()],
+        "candidate"
+    );
+
+    // Move the mutation past `candidate` with an auditable rejection.
+    let rejected = command(&database)
+        .args([
+            "mutations",
+            "reject",
+            &mutation_id,
+            "--reason",
+            "superseded by manual review",
+        ])
+        .output()
+        .expect("reject");
+    assert!(
+        rejected.status.success(),
+        "reject failed: {}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+
+    let registry = run_json(&database, ["mutations", "list"]);
+    let stored_state = registry["result"]
+        .as_array()
+        .expect("registry")
+        .iter()
+        .find(|mutation| mutation["mutation_id"] == mutation_id)
+        .expect("mutation still registered")["state"]
+        .clone();
+    assert_eq!(stored_state, "rejected");
+
+    // Re-running `propose` deterministically re-derives the identical
+    // candidate for the same evidence (same mutation ID, same content), so
+    // registration collapses to a no-op `duplicate` outcome. The JSON
+    // `current_states` map must reflect the mutation's real state, not the
+    // package's generation-time classification.
+    let reproposed = run_json(&database, ["mutations", "propose"]);
+    assert_eq!(
+        reproposed["result"]["current_states"][mutation_id.as_str()],
+        "rejected"
+    );
+
+    // `mutations synthesize` (deterministic provider) must show the same fix.
+    let synthesized = run_json(&database, ["mutations", "synthesize"]);
+    assert_eq!(
+        synthesized["result"]["current_states"][mutation_id.as_str()],
+        "rejected"
+    );
+
+    // The human-readable text row must print the real state too — never the
+    // hardcoded `candidate` literal the audit found.
+    let text_output = command(&database)
+        .args(["mutations", "propose"])
+        .output()
+        .expect("run propose text");
+    assert!(text_output.status.success());
+    let stdout = String::from_utf8_lossy(&text_output.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.starts_with(&mutation_id))
+        .unwrap_or_else(|| panic!("no row for {mutation_id} in:\n{stdout}"));
+    assert!(
+        row.ends_with("\trejected"),
+        "row must show the actual current state, not a stale 'candidate': {row}"
+    );
+}
+
 #[test]
 fn recovery_motif_is_detected_and_registered_end_to_end() {
     let directory = tempfile::tempdir().expect("temporary directory");
@@ -2541,4 +2633,87 @@ fn command(database: &Path) -> Command {
         command.env("AUTOPHAGY_CONFIG_DIR", parent);
     }
     command
+}
+
+#[test]
+fn propose_and_synthesize_survive_immutable_template_conflicts() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+
+    // Preview the exact candidate generation would register today.
+    let preview = run_json(&database, ["mutations", "propose", "--dry-run"]);
+    let mut package: autophagy_mutations::MutationPackage =
+        serde_json::from_value(preview["result"]["generated"][0]["package"].clone())
+            .expect("generated package");
+    let mutation_id = package.mutation_id.clone();
+
+    // Register it as an earlier template revision would have: identical
+    // identity and evidence, different exclusion phrasing. The registry is
+    // immutable, so a later propose regenerating today's phrasing cannot
+    // overwrite it — and must not abort the batch over it either.
+    package.exclusions[0] = autophagy_mutations::LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION.to_owned();
+    let mut store = autophagy_store::EventStore::open(&database).expect("store");
+    store
+        .register_mutation(&autophagy_store::MutationRegistration {
+            mutation_id: package.mutation_id.clone(),
+            source_finding_id: package.source_finding_id.clone(),
+            source_detector: package.source_detector.as_str().to_owned(),
+            equivalence_key: autophagy_mutations::equivalence_key(&package),
+            spec_version: package.spec_version.as_str().to_owned(),
+            semantic_version: package.version.clone(),
+            package: serde_json::to_value(&package).expect("package JSON"),
+            supporting_event_ids: package.hypothesis.supporting_event_ids.clone(),
+            counterexample_event_ids: package.hypothesis.counterexample_event_ids.clone(),
+        })
+        .expect("register earlier-template package");
+    drop(store);
+
+    // Text mode: the run succeeds, warns about the one conflict, and still
+    // lists every candidate with its real stored state.
+    let output = command(&database)
+        .args(["mutations", "propose"])
+        .output()
+        .expect("propose");
+    assert!(
+        output.status.success(),
+        "propose failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("earlier-template content"),
+        "missing conflict warning: {stdout}"
+    );
+
+    // JSON mode: the warning is machine-visible and the conflicted mutation
+    // still reports its current stored state.
+    let proposed = run_json(&database, ["mutations", "propose"]);
+    let warnings = proposed["result"]["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .expect("warning text")
+            .contains(&mutation_id)),
+        "warnings missing conflicted id: {warnings:?}"
+    );
+    assert_eq!(
+        proposed["result"]["current_states"][mutation_id.as_str()],
+        "candidate"
+    );
+
+    // The deterministic synthesize path takes the same non-fatal branch.
+    let synthesized = run_json(&database, ["mutations", "synthesize"]);
+    assert!(
+        synthesized["result"]["warnings"]
+            .as_array()
+            .expect("synthesis warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .expect("warning text")
+                .contains(&mutation_id))
+    );
 }

@@ -24,7 +24,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use autophagy_mutations::MutationPackage;
+use autophagy_mutations::{
+    ADVISORY_EXCLUSION, LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION, MutationPackage,
+};
 use sha2::{Digest, Sha256};
 
 /// Supported repo-scoped skill installation targets.
@@ -313,13 +315,35 @@ fn render_skill(package: &MutationPackage, skill_name: &str, target: InstallTarg
     rendered.push_str(&package.intervention.instruction);
     rendered.push_str("\n\n## Do not use\n\n");
     for exclusion in &package.exclusions {
-        writeln!(rendered, "- {exclusion}").expect("String write");
+        writeln!(rendered, "- {}", installed_exclusion_text(exclusion)).expect("String write");
     }
     rendered.push_str("\nThis skill was installed only after challenge, replay, shadow evaluation, and explicit user approval.\n");
     if target == InstallTarget::ClaudeCode {
         rendered.push_str(&render_evidence_footer(package, target));
     }
     rendered
+}
+
+/// Render one exclusion for the installed `SKILL.md`, correcting the single
+/// pipeline-stage exclusion that stops being true once a package reaches
+/// installation.
+///
+/// Registered mutation packages are immutable and audit-logged — this crate
+/// never rewrites the stored package — so a package registered before
+/// [`ADVISORY_EXCLUSION`] replaced the old phrasing can still carry
+/// [`LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION`] verbatim. Installation only
+/// happens after replay and shadow evaluation both passed, so rendering that
+/// exact historical line as-is would contradict the "installed only after
+/// challenge, replay, shadow evaluation" statement two lines below it in the
+/// same file. The match is exact/structural (not fuzzy) so it only ever
+/// touches that one known template string; every other exclusion, including
+/// any future or user-authored wording, is rendered verbatim.
+fn installed_exclusion_text(exclusion: &str) -> &str {
+    if exclusion == LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION {
+        ADVISORY_EXCLUSION
+    } else {
+        exclusion
+    }
 }
 
 fn render_evidence_footer(package: &MutationPackage, target: InstallTarget) -> String {
