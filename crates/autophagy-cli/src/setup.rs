@@ -192,6 +192,11 @@ pub fn run(
         verbose,
     };
 
+    // Whether the user pointed the database somewhere explicit. Setup's config
+    // file, by contrast, never moves with `--database`, so an explicit database
+    // is the signal that the two locations have diverged (see the global-config
+    // notice below).
+    let database_explicit = database.is_some();
     let database = resolve_database_path(database)?;
     let mut store = open_store(&database)?;
 
@@ -202,7 +207,10 @@ pub fn run(
     let prior_interval = config.watch_interval_seconds;
 
     ui.say("Autophagy setup — local, offline, nothing leaves your machine.");
-    if config.present {
+    // Only claim this is a re-run when a config file is actually on disk; a
+    // first run against an empty (or freshly relocated) config directory has no
+    // prior settings to show as defaults.
+    if crate::config::config_path()?.exists() {
         ui.say("Re-running setup — current settings are shown as defaults.");
     }
     ui.say("");
@@ -428,6 +436,27 @@ pub fn run(
     }
 
     // 7. Persist the chosen settings so later runs and commands inherit them.
+    // Settings live in a single global config file that does NOT move with
+    // `--database`. When the user redirected the database to an explicit path
+    // but the config still lands in the shared application-support directory,
+    // say so plainly before writing — otherwise a throwaway `--database /tmp/…`
+    // run silently rewrites their real global config. AUTOPHAGY_CONFIG_DIR is
+    // the escape hatch that keeps a run fully isolated; surface it here.
+    let config_is_global = std::env::var_os(crate::config::CONFIG_DIR_ENV).is_none();
+    if config_is_global && database_explicit {
+        let notice = format!(
+            "note: settings are saved globally to {} (set {} to keep this run isolated)",
+            crate::config::config_path()?.display(),
+            crate::config::CONFIG_DIR_ENV,
+        );
+        if interactive {
+            ui.say(&notice);
+        } else {
+            // Non-interactive (`--yes`, including JSON): stdout carries the
+            // report, so the advisory goes to stderr where it can't corrupt it.
+            eprintln!("{notice}");
+        }
+    }
     let selected_names = adapter_names(&selected);
     let config_path = crate::config::write_setup(&crate::config::SetupValues {
         adapters: selected_names.clone(),
