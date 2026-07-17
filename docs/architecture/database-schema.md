@@ -1,6 +1,6 @@
 # Local database schema
 
-Status: implemented through exact and hybrid retrieval (2026-07-17)
+Status: squashed to a single v1 baseline before first release (2026-07-17)
 
 SQLite is the single-user source of truth. Foreign keys and WAL mode are enabled
 per connection. Timestamps are canonical RFC 3339 UTC strings so exports remain
@@ -8,7 +8,14 @@ readable; sortable integer sequence fields break same-timestamp ties.
 
 The authoritative DDL lives in the ordered, immutable files under
 [`crates/autophagy-store/migrations`](../../crates/autophagy-store/migrations).
-The logical schema and its trust boundaries are summarized here.
+The release baseline is a single migration, `0001_initial_schema.sql`: the eight
+development-time migrations were squashed into one v1 baseline before the first
+release, while no external database existed (see ADR 0012). From the first
+release onward the chain is ordered and immutable — new migrations are added,
+never edited. The squash is schema-identical to the old chain's final state,
+proven by `tests/schema_equivalence.rs`, and the single legacy database is
+adopted to the v1 ledger in place on first open. The logical schema and its
+trust boundaries are summarized here.
 
 ```sql
 CREATE TABLE schema_migrations (

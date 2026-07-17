@@ -5,22 +5,27 @@ import Testing
 
 @Suite("Schema tolerance and read-only guarantee")
 struct SchemaAndReadonlyTests {
-    @Test func olderSchemaIsReadable() throws {
-        let temp = TempPath(FixtureDatabase.make(schemaVersion: 3) { db in
+    @Test func notYetAdoptedLegacyV8IsReadableAndFlagged() throws {
+        // Before the CLI adopts it, the one legacy database still carries the
+        // full development-time v8 ledger. This build knows only the squashed v1
+        // baseline, so it classifies the database as newer-than-known and reads
+        // it read-only; the CLI rewrites the ledger to v1 on first touch.
+        let temp = TempPath(FixtureDatabase.make(schemaVersion: 8) { db in
             FixtureDatabase.createSchema(db)
             FixtureDatabase.exec(db, """
-            INSERT INTO schema_migrations(version, description, checksum, applied_at)
-            VALUES (3,'mutation_registry',zeroblob(32),'2026-07-16T00:00:00Z');
+            INSERT INTO schema_migrations(version, description, checksum, applied_at) VALUES
+              (1,'initial event store',zeroblob(32),'2026-07-16T00:00:00Z'),
+              (8,'accept mutation/0.2 provenance packages',zeroblob(32),'2026-07-16T00:00:00Z');
             """)
         })
         let reader = try DatabaseReader(path: temp.path)
         #expect(reader.schemaInfo().compatibility
-            == .olderReadable(version: 3, known: knownSchemaVersion))
+            == .newerThanKnown(version: 8, known: knownSchemaVersion))
         // No sessions, but the call must not throw.
         #expect(reader.sessions().isEmpty)
     }
 
-    @Test func newerSchemaIsReadableAndFlagged() throws {
+    @Test func farNewerSchemaIsReadableAndFlagged() throws {
         let temp = TempPath(FixtureDatabase.make(schemaVersion: 99) { db in
             FixtureDatabase.createSchema(db)
             FixtureDatabase.exec(db, """
@@ -33,16 +38,18 @@ struct SchemaAndReadonlyTests {
             == .newerThanKnown(version: 99, known: knownSchemaVersion))
     }
 
-    @Test func missingLaterMigrationTablesDegradeToEmpty() throws {
-        // A v2-era database has sessions and events but none of the mutation,
-        // conflict, or signature tables added by later migrations. The reader
-        // must return those as empty rather than throwing.
+    @Test func missingTablesDegradeToEmpty() throws {
+        // A database carrying only the foundational tables (sources, sessions,
+        // events, search) but none of the mutation, conflict, or signature
+        // tables. Its ledger reports a version this build does not know, so it is
+        // flagged newer-than-known; the reader must still return the absent
+        // tables as empty rather than throwing.
         let temp = TempPath(FixtureDatabase.foundationOnly())
         let reader = try DatabaseReader(path: temp.path)
 
         #expect(reader.isAutophagyDatabase())
         #expect(reader.schemaInfo().compatibility
-            == .olderReadable(version: 2, known: knownSchemaVersion))
+            == .newerThanKnown(version: 2, known: knownSchemaVersion))
 
         // Foundational reads still work.
         #expect(reader.sessions().map(\.id) == ["ses_a"])
@@ -95,7 +102,7 @@ struct SchemaAndReadonlyTests {
 
         let reader = try DatabaseReader(path: temp.path)
         #expect(reader.isAutophagyDatabase())
-        #expect(reader.schemaInfo().compatibility == .supported(version: 8))
+        #expect(reader.schemaInfo().compatibility == .supported(version: 1))
         #expect(reader.sessions().count == 2)
         #expect(reader.mutations().count == 2)
     }
