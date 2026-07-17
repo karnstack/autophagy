@@ -37,9 +37,11 @@ use autophagy_install::{
     InstallError, InstallTarget, InstalledArtifact, SkillPlan, SupervisorError, materialize,
     plan_skill, unmaterialize,
 };
-use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
+use autophagy_mutations::{
+    GenerationOutcome, MutationPackage, equivalence_key, generate_candidates,
+};
 use autophagy_patterns::{
-    DetectionDiagnostics, DetectionReport, DetectorConfig, EvidencePacket, Observation,
+    DetectionDiagnostics, DetectionReport, DetectorConfig, EvidencePacket, Observation, UnmetGate,
 };
 use autophagy_replay::{
     CounterfactualOutcome, ExpectedAction, ReplayDraftError, ReplayEvaluationError, ReplayReport,
@@ -179,6 +181,10 @@ enum Commands {
     },
 
     /// Recall evidence by exact signature and/or full text with ranked explanations.
+    #[command(
+        after_help = "Text rows abbreviate event ids and clean snippets for scanning. \
+        Use --output json for full event ids, raw snippets, and the complete ranking explanation."
+    )]
     Search {
         /// FTS5 query expression. Required unless `--signature` is supplied.
         #[arg(required_unless_present = "signature")]
@@ -750,7 +756,7 @@ enum CommandReport {
     #[serde(rename = "mutations_show")]
     MutationShow(MutationDetails),
     #[serde(rename = "mutations_transition")]
-    MutationTransition(MutationTransitionOutcome),
+    MutationTransition(MutationTransitionReport),
     #[serde(rename = "mutations_replay")]
     MutationReplay(MutationReplayReport),
     #[serde(rename = "mutations_replay_draft")]
@@ -812,12 +818,20 @@ struct DigestReport {
     network_used: bool,
     findings: Vec<EvidencePacket>,
     observations: Vec<Observation>,
+    // Text-only: the detector thresholds this pass ran under, used to explain in
+    // plain language which gate each near-threshold observation missed. Skipped
+    // from JSON so the machine surface stays byte-stable.
+    #[serde(skip)]
+    thresholds: DetectorConfig,
 }
 
 /// Build a digest report from one deterministic detection pass. Shared by the
 /// `digest` command and `setup`'s immediate digest so both render the same
 /// deterministic, model-free report through the same path.
-fn digest_report(report: DetectionReport) -> Result<DigestReport, CliError> {
+fn digest_report(
+    report: DetectionReport,
+    thresholds: DetectorConfig,
+) -> Result<DigestReport, CliError> {
     let DetectionDiagnostics {
         events_scanned,
         sessions_scanned,
@@ -834,6 +848,7 @@ fn digest_report(report: DetectionReport) -> Result<DigestReport, CliError> {
         network_used: false,
         findings: report.findings,
         observations,
+        thresholds,
     })
 }
 
@@ -844,6 +859,10 @@ struct PatternsReport {
     candidate_signatures: usize,
     findings: Vec<EvidencePacket>,
     observations: Vec<Observation>,
+    // Text-only detector thresholds; see `DigestReport::thresholds`. Skipped from
+    // JSON to keep the machine surface byte-stable.
+    #[serde(skip)]
+    thresholds: DetectorConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -881,10 +900,25 @@ struct ChallengeAssessment {
     note: Option<String>,
 }
 
+/// A lifecycle transition plus the id form the user supplied, so the next-step
+/// hint echoes their short id rather than the resolved 64-hex identity. The
+/// `requested_id` is text-only (`#[serde(skip)]`) so the JSON surface — the bare
+/// [`MutationTransitionOutcome`] fields — stays byte-stable.
+#[derive(Debug, Serialize)]
+struct MutationTransitionReport {
+    #[serde(flatten)]
+    outcome: MutationTransitionOutcome,
+    #[serde(skip)]
+    requested_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct MutationReplayReport {
     evaluation: ReplayReport,
     registration: ReplayRegisterOutcome,
+    // Text-only: the id form the user typed, echoed by the next-step hint.
+    #[serde(skip)]
+    requested_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -896,6 +930,9 @@ struct MutationReplayDraftReport {
     no_op_scenarios: usize,
     unreviewed_scenarios: usize,
     draft: ReplaySuite,
+    // Text-only: the id form the user typed, echoed by the next-step hint.
+    #[serde(skip)]
+    requested_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -906,12 +943,18 @@ struct MutationShadowDraftReport {
     intervention_observations: usize,
     no_op_observations: usize,
     draft: ShadowSuite,
+    // Text-only: the id form the user typed, echoed by the next-step hint.
+    #[serde(skip)]
+    requested_id: String,
 }
 
 #[derive(Debug, Serialize)]
 struct MutationShadowReport {
     evaluation: ShadowReport,
     registration: ShadowRegisterOutcome,
+    // Text-only: the id form the user typed, echoed by the next-step hint.
+    #[serde(skip)]
+    requested_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -997,28 +1040,30 @@ impl CommandReport {
                      --check equivalent-searched --check counterexamples-reviewed"
                 ))
             }
-            Self::MutationTransition(outcome) if outcome.to_state == "challenged" => Some(format!(
-                "next: autophagy mutations replay-draft {} --suite replay-suite.json",
-                outcome.mutation_id
-            )),
+            Self::MutationTransition(report) if report.outcome.to_state == "challenged" => {
+                Some(format!(
+                    "next: autophagy mutations replay-draft {} --suite replay-suite.json",
+                    report.requested_id
+                ))
+            }
             Self::MutationReplayDraft(report) => Some(format!(
                 "next: autophagy mutations replay {} --suite {} \
                  (after setting counterfactual_outcome for each intervention scenario)",
-                report.draft.mutation_id, report.path
+                report.requested_id, report.path
             )),
             Self::MutationReplay(report) if report.evaluation.passed => Some(format!(
                 "next: autophagy mutations shadow-draft {} --suite shadow-suite.json",
-                report.evaluation.mutation_id
+                report.requested_id
             )),
             Self::MutationShadowDraft(report) => Some(format!(
                 "next: autophagy mutations shadow {} --suite {} \
                  (after confirming intervention_would_help for each observation)",
-                report.draft.mutation_id, report.path
+                report.requested_id, report.path
             )),
             Self::MutationShadow(report) if report.evaluation.passed => Some(format!(
                 "next: autophagy mutations install {} --repository <repo> \
                  --target claude-code --confirm-permissions repo-skill-write",
-                report.evaluation.mutation_id
+                report.requested_id
             )),
             _ => None,
         }
@@ -1144,6 +1189,8 @@ enum CliError {
         ids: String,
         suite_path: String,
     },
+    #[error("id prefix '{query}' is ambiguous; it matches {matches}")]
+    AmbiguousId { query: String, matches: String },
 }
 
 /// The built-in reference manifest for the offline `deterministic` provider.
@@ -1171,6 +1218,237 @@ fn builtin_deterministic_manifest() -> ModelManifest {
         api_key_env: None,
         model: None,
     }
+}
+
+/// Number of digest characters kept when abbreviating a stored identifier for a
+/// scannable text row. Eight hex digits is enough to stay unique in practice
+/// while fitting a terminal column; the full id is always available in JSON.
+const SHORT_ID_KEEP: usize = 8;
+
+/// Minimum characters after a type prefix (`mut_`, `ses_`) before a token is
+/// treated as a resolvable short-id prefix rather than left for an exact lookup.
+const MIN_SHORT_PREFIX: usize = 6;
+
+/// Abbreviate a prefixed identifier for a text row: keep everything up to and
+/// including the final `_`, then the first [`SHORT_ID_KEEP`] characters of the
+/// digest, marking the elision with a single ellipsis. `evt_claude_<64hex>`
+/// becomes `evt_claude_fc1bc1d7…`; `mut_<64hex>` becomes `mut_a1b2c3d4…`. Ids
+/// with a short suffix (or no `_`) are returned unchanged.
+fn short_id(id: &str) -> String {
+    match id.rsplit_once('_') {
+        Some((prefix, suffix)) if suffix.chars().count() > SHORT_ID_KEEP => {
+            let head: String = suffix.chars().take(SHORT_ID_KEEP).collect();
+            format!("{prefix}_{head}…")
+        }
+        _ => id.to_owned(),
+    }
+}
+
+/// Render an RFC3339 timestamp as a compact, human-scannable time: a coarse
+/// relative age within the last week (`2h ago`), otherwise an absolute
+/// `YYYY-MM-DD HH:MM` in UTC. Unparseable input falls back to the raw string so
+/// no information is silently dropped.
+fn compact_time(timestamp: &str, now: OffsetDateTime) -> String {
+    let Ok(then) = OffsetDateTime::parse(timestamp, &Rfc3339) else {
+        return timestamp.to_owned();
+    };
+    let seconds = (now - then).whole_seconds();
+    if (0..604_800).contains(&seconds) {
+        let seconds = seconds.unsigned_abs();
+        return match seconds {
+            0..=59 => format!("{seconds}s ago"),
+            60..=3599 => format!("{}m ago", seconds / 60),
+            3600..=86_399 => format!("{}h ago", seconds / 3600),
+            _ => format!("{}d ago", seconds / 86_400),
+        };
+    }
+    let then = then.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        then.year(),
+        u8::from(then.month()),
+        then.day(),
+        then.hour(),
+        then.minute()
+    )
+}
+
+/// Format a basis-points rate as a one-decimal percentage (`7411` → `74.1%`).
+/// Percentages are what humans read; the underlying basis-points fields stay in
+/// the spec-versioned JSON surface unchanged.
+fn percent(bps: u32) -> String {
+    format!("{:.1}%", f64::from(bps) / 100.0)
+}
+
+/// Rewrite an absolute project path into a `~`-relative form when it lives under
+/// the user's home directory, so session rows stay short without becoming
+/// ambiguous. Paths outside home (and non-UTF-8 homes) are returned unchanged.
+fn shorten_project(path: &str) -> String {
+    if let Some(home) = directories::BaseDirs::new().and_then(|dirs| {
+        dirs.home_dir()
+            .to_str()
+            .map(std::string::ToString::to_string)
+    }) {
+        if let Some(rest) = path.strip_prefix(&home) {
+            let rest = rest.trim_start_matches('/');
+            return if rest.is_empty() {
+                "~".to_owned()
+            } else {
+                format!("~/{rest}")
+            };
+        }
+    }
+    path.to_owned()
+}
+
+/// The basename (final path component) of a project path, for the compact search
+/// row. Falls back to the whole string when there is no separator.
+fn project_basename(path: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path)
+        .to_owned()
+}
+
+/// Human-readable label for a retrieval match kind.
+fn match_kind_label(kind: autophagy_store::RetrievalMatchKind) -> &'static str {
+    use autophagy_store::RetrievalMatchKind::{ExactSignature, FullText, SignatureAndFullText};
+    match kind {
+        ExactSignature => "signature",
+        FullText => "text",
+        SignatureAndFullText => "signature+text",
+    }
+}
+
+/// Clean a raw FTS snippet for a scannable text row while preserving the `[…]`
+/// match highlights the store inserts.
+///
+/// Tool events index their input as a compact JSON object, so the raw snippet
+/// reads `{"command":"mise exec -- [cargo] [test] …`. When a `command` field is
+/// present its value is extracted (highlights intact); otherwise the JSON
+/// framing characters are stripped so plain metadata text remains.
+fn clean_snippet(snippet: &str) -> String {
+    if let Some(command) = extract_command_value(snippet) {
+        let trimmed = command.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    let stripped: String = snippet
+        .trim()
+        .chars()
+        .filter(|character| !matches!(character, '{' | '}' | '"'))
+        .collect();
+    stripped.trim().to_owned()
+}
+
+/// Extract the `command` field's string value from a (possibly truncated) FTS
+/// snippet, keeping the `[…]` highlight markers. Returns `None` when no
+/// `command` field is present. The snippet is not valid JSON — the highlight
+/// brackets break parsing — so this scans structurally instead of deserializing.
+fn extract_command_value(snippet: &str) -> Option<String> {
+    let key = snippet.find("command")?;
+    let after_key = &snippet[key + "command".len()..];
+    let colon = after_key.find(':')?;
+    let after_colon = &after_key[colon + 1..];
+    let open_quote = after_colon.find('"')?;
+    let value_region = &after_colon[open_quote + 1..];
+    let mut result = String::new();
+    let mut characters = value_region.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => match characters.peek() {
+                Some('"') => {
+                    result.push('"');
+                    characters.next();
+                }
+                Some('\\') => {
+                    result.push('\\');
+                    characters.next();
+                }
+                Some('n' | 't' | 'r') => {
+                    result.push(' ');
+                    characters.next();
+                }
+                _ => result.push('\\'),
+            },
+            // The value's closing quote ends the command; a truncated snippet
+            // simply runs to the end of the region.
+            '"' => break,
+            other => result.push(other),
+        }
+    }
+    Some(result)
+}
+
+/// Truncate a command string at a word boundary near `limit` characters, marking
+/// the elision with a single ellipsis. Never splits mid-token: it trims back to
+/// the last whitespace within the budget, falling back to a hard cut only when a
+/// single token already exceeds it.
+fn truncate_words(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let budget: String = text.chars().take(limit).collect();
+    let cut = budget
+        .rfind(char::is_whitespace)
+        .filter(|boundary| *boundary > 0)
+        .unwrap_or(budget.len());
+    format!("{}…", budget[..cut].trim_end())
+}
+
+/// Resolve a possibly-abbreviated stored identifier against the known ids.
+///
+/// An exact full-id match always wins. Otherwise, for a token that starts with
+/// the expected type prefix and carries at least [`MIN_SHORT_PREFIX`] characters
+/// beyond it, a unique prefix match resolves to the full id; an ambiguous prefix
+/// is an error listing the candidates. Anything else (too short, no match) is
+/// returned unchanged so the caller's exact lookup produces its standard
+/// not-found error.
+fn resolve_stored_id<I>(candidates: I, query: &str, type_prefix: &str) -> Result<String, CliError>
+where
+    I: IntoIterator<Item = String>,
+{
+    let ids: Vec<String> = candidates.into_iter().collect();
+    if ids.iter().any(|id| id == query) {
+        return Ok(query.to_owned());
+    }
+    let specific = query
+        .strip_prefix(type_prefix)
+        .is_some_and(|rest| rest.chars().count() >= MIN_SHORT_PREFIX);
+    if !specific {
+        return Ok(query.to_owned());
+    }
+    let mut matches: Vec<String> = ids.into_iter().filter(|id| id.starts_with(query)).collect();
+    match matches.len() {
+        0 => Ok(query.to_owned()),
+        1 => Ok(matches.remove(0)),
+        _ => {
+            matches.sort();
+            Err(CliError::AmbiguousId {
+                query: query.to_owned(),
+                matches: truncate_ids(&matches),
+            })
+        }
+    }
+}
+
+/// Resolve a mutation id, accepting unique `mut_` short-id prefixes.
+fn resolve_mutation_id(store: &EventStore, query: &str) -> Result<String, CliError> {
+    let candidates = store
+        .list_mutations()?
+        .into_iter()
+        .map(|record| record.mutation_id);
+    resolve_stored_id(candidates, query, "mut_")
+}
+
+/// Resolve a session id, accepting unique `ses_` short-id prefixes.
+fn resolve_session_id(store: &EventStore, query: &str) -> Result<String, CliError> {
+    let candidates = store
+        .list_sessions(u32::MAX)?
+        .into_iter()
+        .map(|session| session.session_id);
+    resolve_stored_id(candidates, query, "ses_")
 }
 
 /// Render at most the first three IDs, then summarize the remainder, keeping a
@@ -1459,13 +1737,10 @@ fn execute(
         } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
-            let report = detection::detect_cached(
-                &store,
-                project.as_deref(),
-                config::resolve_thresholds(leaf, thresholds, config),
-                recompute,
-            )?;
-            Ok(CommandReport::Digest(digest_report(report)?))
+            let thresholds = config::resolve_thresholds(leaf, thresholds, config);
+            let report =
+                detection::detect_cached(&store, project.as_deref(), thresholds, recompute)?;
+            Ok(CommandReport::Digest(digest_report(report, thresholds)?))
         }
         Commands::Patterns {
             project,
@@ -1474,12 +1749,9 @@ fn execute(
         } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
-            let report = detection::detect_cached(
-                &store,
-                project.as_deref(),
-                config::resolve_thresholds(leaf, thresholds, config),
-                recompute,
-            )?;
+            let thresholds = config::resolve_thresholds(leaf, thresholds, config);
+            let report =
+                detection::detect_cached(&store, project.as_deref(), thresholds, recompute)?;
             let DetectionDiagnostics {
                 events_scanned,
                 sessions_scanned,
@@ -1492,6 +1764,7 @@ fn execute(
                 candidate_signatures,
                 findings: report.findings,
                 observations,
+                thresholds,
             }))
         }
         Commands::Mutations { action } => {
@@ -1522,9 +1795,12 @@ fn execute(
             let database = resolve_database_path(cli.database)?;
             let mut store = open_store(&database)?;
             match target {
-                DeleteTarget::Session { session_id } => Ok(CommandReport::DeleteSession(
-                    store.delete_session(&session_id)?,
-                )),
+                DeleteTarget::Session { session_id } => {
+                    let session_id = resolve_session_id(&store, &session_id)?;
+                    Ok(CommandReport::DeleteSession(
+                        store.delete_session(&session_id)?,
+                    ))
+                }
                 DeleteTarget::All { confirm } => {
                     if confirm != "delete-all" {
                         return Err(CliError::DeleteAllConfirmation);
@@ -1861,14 +2137,19 @@ fn execute_mutation_action(
             }))
         }
         MutationAction::List => Ok(CommandReport::MutationList(store.list_mutations()?)),
-        MutationAction::Show { mutation_id } => Ok(CommandReport::MutationShow(
-            store.get_mutation(&mutation_id)?,
-        )),
+        MutationAction::Show { mutation_id } => {
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
+            Ok(CommandReport::MutationShow(
+                store.get_mutation(&mutation_id)?,
+            ))
+        }
         MutationAction::Challenge {
             mutation_id,
             checks,
             note,
         } => {
+            let requested_id = mutation_id.clone();
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
             let completed = checks.into_iter().collect::<BTreeSet<_>>();
             let missing = ChallengeCheck::ALL
                 .into_iter()
@@ -1894,16 +2175,29 @@ fn execute_mutation_action(
                 note,
             };
             Ok(CommandReport::MutationTransition(
-                store.challenge_mutation(&mutation_id, &serde_json::to_value(assessment)?)?,
+                MutationTransitionReport {
+                    outcome: store
+                        .challenge_mutation(&mutation_id, &serde_json::to_value(assessment)?)?,
+                    requested_id,
+                },
             ))
         }
         MutationAction::Reject {
             mutation_id,
             reason,
-        } => Ok(CommandReport::MutationTransition(
-            store.reject_mutation(&mutation_id, &reason)?,
-        )),
+        } => {
+            let requested_id = mutation_id.clone();
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
+            Ok(CommandReport::MutationTransition(
+                MutationTransitionReport {
+                    outcome: store.reject_mutation(&mutation_id, &reason)?,
+                    requested_id,
+                },
+            ))
+        }
         MutationAction::Replay { mutation_id, suite } => {
+            let requested_id = mutation_id.clone();
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
             let suite_path = suite.to_string_lossy().into_owned();
             let suite: ReplaySuite = serde_json::from_slice(&fs::read(&suite)?)?;
             let details = store.get_mutation(&mutation_id)?;
@@ -1951,6 +2245,7 @@ fn execute_mutation_action(
             Ok(CommandReport::MutationReplay(MutationReplayReport {
                 evaluation,
                 registration,
+                requested_id,
             }))
         }
         MutationAction::ReplayDraft {
@@ -1959,6 +2254,8 @@ fn execute_mutation_action(
             context_events,
             force,
         } => {
+            let requested_id = mutation_id.clone();
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
             let details = store.get_mutation(&mutation_id)?;
             let package = serde_json::from_value(details.mutation.package)?;
             let events = store.list_events_for_detection(None)?;
@@ -1995,6 +2292,7 @@ fn execute_mutation_action(
                     no_op_scenarios,
                     unreviewed_scenarios,
                     draft,
+                    requested_id,
                 },
             ))
         }
@@ -2004,6 +2302,8 @@ fn execute_mutation_action(
             context_events,
             force,
         } => {
+            let requested_id = mutation_id.clone();
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
             let details = store.get_mutation(&mutation_id)?;
             let package = serde_json::from_value(details.mutation.package)?;
             let events = store.list_events_for_detection(None)?;
@@ -2032,10 +2332,13 @@ fn execute_mutation_action(
                     intervention_observations,
                     no_op_observations,
                     draft,
+                    requested_id,
                 },
             ))
         }
         MutationAction::Shadow { mutation_id, suite } => {
+            let requested_id = mutation_id.clone();
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
             let suite: ShadowSuite = serde_json::from_slice(&fs::read(&suite)?)?;
             let details = store.get_mutation(&mutation_id)?;
             let package = serde_json::from_value(details.mutation.package)?;
@@ -2064,6 +2367,7 @@ fn execute_mutation_action(
             Ok(CommandReport::MutationShadow(MutationShadowReport {
                 evaluation,
                 registration,
+                requested_id,
             }))
         }
         MutationAction::Install {
@@ -2076,6 +2380,7 @@ fn execute_mutation_action(
             if confirm_permissions != "repo-skill-write" {
                 return Err(CliError::InstallPermissionConfirmation);
             }
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
             let details = store.get_mutation(&mutation_id)?;
             if details.mutation.state != "shadow_passed" {
                 return Err(StoreError::MutationStateTransition {
@@ -2123,6 +2428,7 @@ fn execute_mutation_action(
             }
         }
         MutationAction::Uninstall { mutation_id } => {
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
             let audit = store.get_installation(&mutation_id)?;
             let details = store.get_mutation(&mutation_id)?;
             let package = serde_json::from_value(details.mutation.package)?;
@@ -2263,18 +2569,7 @@ fn write_report(
                 if sessions.is_empty() {
                     writeln!(writer, "no sessions imported yet — run `autophagy setup`")?;
                 } else {
-                    writeln!(writer, "SESSION\tSOURCE\tEVENTS\tLAST EVENT\tPROJECT")?;
-                    for session in sessions {
-                        writeln!(
-                            writer,
-                            "{}\t{}\t{}\t{}\t{}",
-                            session.session_id,
-                            session.adapter,
-                            session.event_count,
-                            session.last_event_at,
-                            session.project_path.as_deref().unwrap_or("-")
-                        )?;
-                    }
+                    write_sessions(&mut writer, sessions)?;
                 }
             }
             CommandReport::Search(report) => {
@@ -2288,19 +2583,7 @@ fn write_report(
                         writeln!(writer, "no retrieval matches")?;
                     }
                 }
-                for hit in &report.hits {
-                    writeln!(
-                        writer,
-                        "{}\t{}\t{} bps\t{}",
-                        hit.event_id,
-                        hit.explanation.match_kind.as_str(),
-                        hit.explanation.rank_score_bps,
-                        hit.snippet
-                            .as_deref()
-                            .or(hit.signature.as_deref())
-                            .unwrap_or("-")
-                    )?;
-                }
+                write_search_hits(&mut writer, &report.hits)?;
             }
             CommandReport::Digest(report) => write_detection(
                 &mut writer,
@@ -2310,6 +2593,7 @@ fn write_report(
                 report.candidate_signatures,
                 &report.findings,
                 &report.observations,
+                report.thresholds,
             )?,
             CommandReport::Patterns(report) => write_detection(
                 &mut writer,
@@ -2319,6 +2603,7 @@ fn write_report(
                 report.candidate_signatures,
                 &report.findings,
                 &report.observations,
+                report.thresholds,
             )?,
             CommandReport::MutationProposal(report) => {
                 write_mutation_proposal(&mut writer, report)?;
@@ -2341,15 +2626,16 @@ fn write_report(
                 }
             }
             CommandReport::MutationShow(details) => {
-                writeln!(
-                    writer,
-                    "{}\t{}\t{}",
-                    details.mutation.mutation_id,
-                    details.mutation.state,
-                    details.mutation.package["title"]
-                        .as_str()
-                        .unwrap_or("untitled")
-                )?;
+                write_mutation_lesson(&mut writer, details)?;
+                // The lesson block above answers "what is this?"; a blank line
+                // then separates it from the append-only audit trail below.
+                if !details.transitions.is_empty()
+                    || !details.replays.is_empty()
+                    || !details.shadows.is_empty()
+                    || !details.installations.is_empty()
+                {
+                    writeln!(writer)?;
+                }
                 for transition in &details.transitions {
                     writeln!(
                         writer,
@@ -2385,10 +2671,13 @@ fn write_report(
                     )?;
                 }
             }
-            CommandReport::MutationTransition(outcome) => writeln!(
+            CommandReport::MutationTransition(report) => writeln!(
                 writer,
                 "{}\t{} -> {}\tchanged={}",
-                outcome.mutation_id, outcome.from_state, outcome.to_state, outcome.changed
+                report.outcome.mutation_id,
+                report.outcome.from_state,
+                report.outcome.to_state,
+                report.outcome.changed
             )?,
             CommandReport::MutationReplay(report) => writeln!(
                 writer,
@@ -2421,11 +2710,11 @@ fn write_report(
             )?,
             CommandReport::MutationShadow(report) => writeln!(
                 writer,
-                "{}\tpassed={}\tprecision={} bps · recall={} bps · {} false positives\tmutation_applied=false",
+                "{}\tpassed={}\tprecision={} · recall={} · {} false positives\tmutation_applied=false",
                 report.evaluation.shadow_id,
                 report.evaluation.passed,
-                report.evaluation.summary.precision_bps,
-                report.evaluation.summary.recall_bps,
+                percent(u32::from(report.evaluation.summary.precision_bps)),
+                percent(u32::from(report.evaluation.summary.recall_bps)),
                 report.evaluation.summary.false_positives
             )?,
             CommandReport::MutationInstall(report) => writeln!(
@@ -2492,6 +2781,7 @@ fn write_report(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_detection(
     writer: &mut impl Write,
     header: &str,
@@ -2500,6 +2790,7 @@ fn write_detection(
     candidate_signatures: usize,
     findings: &[EvidencePacket],
     observations: &[Observation],
+    thresholds: DetectorConfig,
 ) -> io::Result<()> {
     writeln!(
         writer,
@@ -2510,7 +2801,7 @@ fn write_detection(
     // Never a silent zero: when nothing qualified, show the strongest recurring
     // candidates and the exact gate each missed so the scan explains itself.
     if findings.is_empty() {
-        write_observations(writer, observations)?;
+        write_observations(writer, observations, candidate_signatures, thresholds)?;
     }
     Ok(())
 }
@@ -2545,10 +2836,10 @@ fn write_findings(writer: &mut impl Write, findings: &[EvidencePacket]) -> io::R
     for finding in findings {
         writeln!(
             writer,
-            "{}\t{}\t{} bps\t{} evidence\t{} counterexamples",
+            "{}\t{}\t{}\t{} evidence\t{} counterexamples",
             finding.finding_id,
             finding.title,
-            finding.score.score_bps,
+            percent(u32::from(finding.score.score_bps)),
             finding.evidence.len(),
             finding.counterexamples.len()
         )?;
@@ -2556,25 +2847,276 @@ fn write_findings(writer: &mut impl Write, findings: &[EvidencePacket]) -> io::R
     Ok(())
 }
 
-fn write_observations(writer: &mut impl Write, observations: &[Observation]) -> io::Result<()> {
-    if observations.is_empty() {
+/// Minimum occurrences a candidate must recur before it is worth surfacing as a
+/// near-threshold observation. Below this a signature is effectively a one-off,
+/// and listing several such giants only buried the real signal.
+const NEAR_MISS_MIN_OCCURRENCES: u32 = 2;
+
+/// Most near-threshold observations to list, keeping the digest scannable.
+const NEAR_MISS_LIMIT: usize = 5;
+
+/// Character budget for a near-miss command title before word-boundary
+/// truncation, chosen to fit a terminal line alongside its statistics.
+const NEAR_MISS_TITLE_BUDGET: usize = 72;
+
+fn write_observations(
+    writer: &mut impl Write,
+    observations: &[Observation],
+    candidate_signatures: usize,
+    thresholds: DetectorConfig,
+) -> io::Result<()> {
+    // Only genuinely recurring candidates are worth a reviewer's attention. A
+    // one-occurrence signature is noise, however large its command; showing five
+    // of them buried the digest, so they are filtered out entirely.
+    let recurring: Vec<&Observation> = observations
+        .iter()
+        .filter(|observation| observation.score.occurrences >= NEAR_MISS_MIN_OCCURRENCES)
+        .take(NEAR_MISS_LIMIT)
+        .collect();
+    if recurring.is_empty() {
+        writeln!(
+            writer,
+            "{candidate_signatures} candidate signatures, none recurring — nothing near threshold"
+        )?;
         return Ok(());
     }
     writeln!(
         writer,
         "near-threshold observations (recurring candidates, not findings):"
     )?;
-    for observation in observations {
+    for observation in recurring {
         writeln!(
             writer,
-            "{}\t{} occ · {} sessions · {} counterexamples · {} bps support\tunmet: {}",
-            observation.title,
+            "{}\t{} occ · {} sessions · {} counterexamples · {} support\t{}",
+            truncate_words(&observation.title, NEAR_MISS_TITLE_BUDGET),
             observation.score.occurrences,
             observation.score.distinct_sessions,
             observation.score.counterexamples,
-            observation.score.support_ratio_bps,
-            observation.unmet_gate.as_str()
+            percent(u32::from(observation.score.support_ratio_bps)),
+            unmet_gate_reason(observation, thresholds),
         )?;
+    }
+    Ok(())
+}
+
+/// Plain-language explanation of the gate a near-threshold candidate missed,
+/// naming both the required and observed value (`needs 3+ occurrences, saw 2`)
+/// in place of the internal gate identifier.
+fn unmet_gate_reason(observation: &Observation, thresholds: DetectorConfig) -> String {
+    let score = &observation.score;
+    match observation.unmet_gate {
+        UnmetGate::MinOccurrences => format!(
+            "needs {}+ occurrences, saw {}",
+            thresholds.min_occurrences, score.occurrences
+        ),
+        UnmetGate::MinSessions => format!(
+            "needs {}+ sessions, saw {}",
+            thresholds.min_sessions, score.distinct_sessions
+        ),
+        UnmetGate::MinSupportRatio => format!(
+            "needs {} support, saw {}",
+            percent(u32::from(thresholds.min_support_ratio_bps)),
+            percent(u32::from(score.support_ratio_bps))
+        ),
+    }
+}
+
+/// Render the session list as aligned, scannable columns: abbreviated session
+/// ids, compact times, event counts, and `~`-relative project paths. Full ids
+/// and full timestamps remain available under `--output json`.
+fn write_sessions(writer: &mut impl Write, sessions: &[SessionSummary]) -> io::Result<()> {
+    let now = OffsetDateTime::now_utc();
+    let ids: Vec<String> = sessions
+        .iter()
+        .map(|session| short_id(&session.session_id))
+        .collect();
+    let sources: Vec<&str> = sessions
+        .iter()
+        .map(|session| session.adapter.as_str())
+        .collect();
+    let events: Vec<String> = sessions
+        .iter()
+        .map(|session| session.event_count.to_string())
+        .collect();
+    let lasts: Vec<String> = sessions
+        .iter()
+        .map(|session| compact_time(&session.last_event_at, now))
+        .collect();
+    let projects: Vec<String> = sessions
+        .iter()
+        .map(|session| {
+            session
+                .project_path
+                .as_deref()
+                .map_or_else(|| "-".to_owned(), shorten_project)
+        })
+        .collect();
+
+    let width = |header: &str, column: &[String]| {
+        column
+            .iter()
+            .map(String::len)
+            .chain(std::iter::once(header.len()))
+            .max()
+            .unwrap_or(0)
+    };
+    let id_w = width("SESSION", &ids);
+    let src_w = sources
+        .iter()
+        .map(|source| source.len())
+        .chain(std::iter::once("SOURCE".len()))
+        .max()
+        .unwrap_or(0);
+    let evt_w = width("EVENTS", &events);
+    let last_w = width("LAST EVENT", &lasts);
+
+    writeln!(
+        writer,
+        "{:<id_w$}  {:<src_w$}  {:>evt_w$}  {:<last_w$}  PROJECT",
+        "SESSION", "SOURCE", "EVENTS", "LAST EVENT"
+    )?;
+    for index in 0..sessions.len() {
+        writeln!(
+            writer,
+            "{:<id_w$}  {:<src_w$}  {:>evt_w$}  {:<last_w$}  {}",
+            ids[index], sources[index], events[index], lasts[index], projects[index]
+        )?;
+    }
+    Ok(())
+}
+
+/// Render retrieval hits as scannable columns: abbreviated event id, compact
+/// time, project basename, plain match kind, percentage score, and a cleaned
+/// snippet with match highlights preserved. Full ids, raw snippets, and the
+/// ranking explanation remain available under `--output json`.
+fn write_search_hits(writer: &mut impl Write, hits: &[RetrievalHit]) -> io::Result<()> {
+    let now = OffsetDateTime::now_utc();
+    let ids: Vec<String> = hits.iter().map(|hit| short_id(&hit.event_id)).collect();
+    let times: Vec<String> = hits
+        .iter()
+        .map(|hit| compact_time(&hit.occurred_at, now))
+        .collect();
+    let projects: Vec<String> = hits
+        .iter()
+        .map(|hit| {
+            hit.project
+                .as_deref()
+                .map_or_else(|| "-".to_owned(), project_basename)
+        })
+        .collect();
+    let kinds: Vec<&str> = hits
+        .iter()
+        .map(|hit| match_kind_label(hit.explanation.match_kind))
+        .collect();
+    let scores: Vec<String> = hits
+        .iter()
+        .map(|hit| percent(hit.explanation.rank_score_bps))
+        .collect();
+    let snippets: Vec<String> = hits
+        .iter()
+        .map(|hit| {
+            hit.snippet
+                .as_deref()
+                .map(clean_snippet)
+                .or_else(|| hit.signature.clone())
+                .unwrap_or_else(|| "-".to_owned())
+        })
+        .collect();
+
+    let column_width = |column: &[String]| column.iter().map(String::len).max().unwrap_or(0);
+    let id_w = column_width(&ids);
+    let time_w = column_width(&times);
+    let project_w = column_width(&projects);
+    let kind_w = kinds.iter().map(|kind| kind.len()).max().unwrap_or(0);
+    let score_w = column_width(&scores);
+
+    for index in 0..hits.len() {
+        writeln!(
+            writer,
+            "{:<id_w$}  {:<time_w$}  {:<project_w$}  {:<kind_w$}  {:>score_w$}  {}",
+            ids[index], times[index], projects[index], kinds[index], scores[index], snippets[index]
+        )?;
+    }
+    Ok(())
+}
+
+/// Width of the label column in the `mutations show` lesson block.
+const LESSON_LABEL: usize = 13;
+
+/// Render the mutation package as a compact, labeled lesson block: the title,
+/// state, falsifiable hypothesis, proposed intervention, trigger selectors,
+/// evidence/counterexample counts, and promotion gates as percentages. This
+/// answers the reviewer's core question — "what is this lesson?" — that the raw
+/// header-plus-transitions rendering left to the JSON surface.
+fn write_mutation_lesson(writer: &mut impl Write, details: &MutationDetails) -> io::Result<()> {
+    let record = &details.mutation;
+    let row = |label: &str, value: &str| format!("{label:<LESSON_LABEL$} {value}");
+
+    let title = record.package["title"].as_str().unwrap_or("untitled");
+    writeln!(writer, "{title}")?;
+    writeln!(writer, "{}", row("id", &short_id(&record.mutation_id)))?;
+    writeln!(writer, "{}", row("state", &record.state))?;
+
+    match serde_json::from_value::<MutationPackage>(record.package.clone()) {
+        Ok(package) => {
+            writeln!(
+                writer,
+                "{}",
+                row("hypothesis", &package.hypothesis.statement)
+            )?;
+            writeln!(
+                writer,
+                "{}",
+                row("intervention", &package.intervention.instruction)
+            )?;
+            let selectors = package
+                .triggers
+                .iter()
+                .map(|trigger| trigger.selector.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let selectors = if selectors.is_empty() {
+                "none".to_owned()
+            } else {
+                selectors
+            };
+            writeln!(writer, "{}", row("triggers", &selectors))?;
+            writeln!(
+                writer,
+                "{}",
+                row(
+                    "evidence",
+                    &format!(
+                        "{} events · {} counterexamples",
+                        package.hypothesis.supporting_event_ids.len(),
+                        package.hypothesis.counterexample_event_ids.len()
+                    )
+                )
+            )?;
+            writeln!(
+                writer,
+                "{}",
+                row(
+                    "gates",
+                    &format!(
+                        "{}+ replays · {} success · ≤{} false positives",
+                        package.promotion.minimum_replays,
+                        percent(u32::from(package.promotion.minimum_success_rate_bps)),
+                        percent(u32::from(package.promotion.maximum_false_positive_rate_bps)),
+                    )
+                )
+            )?;
+        }
+        Err(_) => {
+            // The stored package should always deserialize; if a future contract
+            // makes it momentarily unreadable, still show the header rather than
+            // failing the whole command.
+            writeln!(
+                writer,
+                "{}",
+                row("note", "package detail unavailable; see --output json")
+            )?;
+        }
     }
     Ok(())
 }
@@ -2910,4 +3452,152 @@ fn write_import_summary(writer: &mut impl Write, summary: &ImportSummary) -> io:
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MIN_SHORT_PREFIX, clean_snippet, percent, project_basename, resolve_stored_id, short_id,
+        shorten_project, truncate_words,
+    };
+
+    const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn short_id_keeps_prefix_and_eight_digest_chars() {
+        assert_eq!(
+            short_id("evt_claude_fc1bc1d7aaaaaaaaaaaaaaaa"),
+            "evt_claude_fc1bc1d7…"
+        );
+        assert_eq!(
+            short_id("ses_claude_d19bfbd8bbbbbbbbbbbbbbbb"),
+            "ses_claude_d19bfbd8…"
+        );
+        assert_eq!(short_id(&format!("mut_{HASH}")), "mut_01234567…");
+    }
+
+    #[test]
+    fn short_id_leaves_already_short_ids_untouched() {
+        // Suffix at or below the keep width, or no separator at all.
+        assert_eq!(short_id("evt_cli_failure"), "evt_cli_failure");
+        assert_eq!(short_id("ses_demo"), "ses_demo");
+        assert_eq!(short_id("bare"), "bare");
+    }
+
+    #[test]
+    fn percent_renders_basis_points_to_one_decimal() {
+        assert_eq!(percent(7411), "74.1%");
+        assert_eq!(percent(5000), "50.0%");
+        assert_eq!(percent(10_000), "100.0%");
+        assert_eq!(percent(0), "0.0%");
+    }
+
+    #[test]
+    fn clean_snippet_extracts_command_and_preserves_highlights() {
+        let raw = r#"{"command":"mise exec -- [cargo] [test] -p autophagy-store"}"#;
+        assert_eq!(
+            clean_snippet(raw),
+            "mise exec -- [cargo] [test] -p autophagy-store"
+        );
+    }
+
+    #[test]
+    fn clean_snippet_handles_truncated_command_payload() {
+        // A snippet cut off mid-value (no closing quote) still yields the text.
+        let raw = r#"{"command":"mise exec -- [cargo] test -p autophagy"#;
+        assert_eq!(clean_snippet(raw), "mise exec -- [cargo] test -p autophagy");
+    }
+
+    #[test]
+    fn clean_snippet_strips_json_framing_without_a_command_field() {
+        let raw = r#"{"path":"/workspace/[demo]"}"#;
+        // No command field: JSON framing is stripped, highlights preserved.
+        assert_eq!(clean_snippet(raw), "path:/workspace/[demo]");
+    }
+
+    #[test]
+    fn clean_snippet_leaves_plain_text_alone() {
+        assert_eq!(clean_snippet("cargo [test] failed"), "cargo [test] failed");
+    }
+
+    #[test]
+    fn truncate_words_cuts_at_a_word_boundary() {
+        let text = "mise exec -- cargo test --workspace --all-features some-really-long-token";
+        let truncated = truncate_words(text, 30);
+        assert!(
+            truncated.ends_with('…'),
+            "truncation marks elision: {truncated}"
+        );
+        assert!(
+            !truncated.contains("--all-features"),
+            "must not keep a token past the budget: {truncated}"
+        );
+        // The kept portion is a clean whole-token prefix, never mid-word.
+        let kept = truncated.trim_end_matches('…');
+        assert!(text.starts_with(kept), "kept portion is a clean prefix");
+        assert!(!kept.ends_with('-'), "no dangling partial token: {kept}");
+    }
+
+    #[test]
+    fn truncate_words_leaves_short_text_unchanged() {
+        assert_eq!(truncate_words("cargo test", 40), "cargo test");
+    }
+
+    #[test]
+    fn shorten_project_and_basename() {
+        assert_eq!(project_basename("/workspace/demo/repo"), "repo");
+        assert_eq!(project_basename("repo"), "repo");
+        // A non-home path is returned verbatim (unambiguous).
+        assert_eq!(shorten_project("/opt/things/x"), "/opt/things/x");
+    }
+
+    #[test]
+    fn resolve_stored_id_matches_a_unique_prefix() {
+        let ids = vec![format!("mut_{HASH}"), "mut_ff00ff00deadbeef".to_owned()];
+        let resolved =
+            resolve_stored_id(ids.clone(), "mut_012345", "mut_").expect("unique prefix resolves");
+        assert_eq!(resolved, format!("mut_{HASH}"));
+    }
+
+    #[test]
+    fn resolve_stored_id_passes_through_an_exact_full_id() {
+        let full = format!("mut_{HASH}");
+        let ids = vec![full.clone(), "mut_ff00ff00deadbeef".to_owned()];
+        assert_eq!(
+            resolve_stored_id(ids, &full, "mut_").expect("exact id resolves"),
+            full
+        );
+    }
+
+    #[test]
+    fn resolve_stored_id_reports_an_ambiguous_prefix() {
+        let ids = vec!["mut_abcdef001111".to_owned(), "mut_abcdef002222".to_owned()];
+        let error =
+            resolve_stored_id(ids, "mut_abcdef", "mut_").expect_err("an ambiguous prefix errors");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("ambiguous"),
+            "message names ambiguity: {rendered}"
+        );
+        assert!(
+            rendered.contains("mut_abcdef001111") && rendered.contains("mut_abcdef002222"),
+            "message lists the candidates: {rendered}"
+        );
+    }
+
+    #[test]
+    fn resolve_stored_id_passes_missing_and_too_short_prefixes_through() {
+        let ids = vec![format!("mut_{HASH}")];
+        // No match: returned unchanged so the caller's exact lookup 404s.
+        assert_eq!(
+            resolve_stored_id(ids.clone(), "mut_ffffff", "mut_").expect("no match passes through"),
+            "mut_ffffff"
+        );
+        // Below the minimum prefix length: not treated as a resolvable prefix.
+        let short = format!("mut_{}", &HASH[..MIN_SHORT_PREFIX - 1]);
+        assert_eq!(
+            resolve_stored_id(ids, &short, "mut_").expect("too-short passes through"),
+            short
+        );
+    }
 }

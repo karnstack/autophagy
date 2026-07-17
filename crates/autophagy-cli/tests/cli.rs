@@ -1194,8 +1194,12 @@ fn setup_digest_surfaces_scan_stats_and_observations_when_nothing_qualifies() {
         "zero-finding digest must surface observations:\n{stdout}"
     );
     assert!(
-        stdout.contains("unmet: min_occurrences"),
-        "each observation must name the exact gate it missed:\n{stdout}"
+        stdout.contains("needs 3+ occurrences, saw 2"),
+        "each observation must name the missed gate in plain language:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("bps"),
+        "the digest must speak in percentages, not basis points:\n{stdout}"
     );
 }
 
@@ -2211,6 +2215,306 @@ fn mutation_pipeline_ergonomics_are_smooth_end_to_end() {
     assert!(
         String::from_utf8_lossy(&shadowed.stderr).contains("next: autophagy mutations install"),
         "missing shadow install hint"
+    );
+}
+
+/// One failing session whose `tool.input` is a command object with a long,
+/// abbreviatable event id — exercises snippet cleaning and short-id rendering.
+const COMMAND_JSONL: &str = concat!(
+    "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_generic_1111aaaa2222bbbb\",",
+    "\"session_id\":\"ses_generic_9999cccc8888dddd\",\"timestamp\":\"2026-07-16T10:00:00Z\",",
+    "\"sequence\":0,\"source\":\"generic-jsonl\",\"type\":\"session.started\",",
+    "\"project\":\"/workspace/demo\"}\n",
+    "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_generic_3333eeee4444ffff\",",
+    "\"session_id\":\"ses_generic_9999cccc8888dddd\",\"timestamp\":\"2026-07-16T10:01:00Z\",",
+    "\"sequence\":1,\"source\":\"generic-jsonl\",\"type\":\"tool.failed\",",
+    "\"project\":\"/workspace/demo\",\"tool\":{\"name\":\"bash\",",
+    "\"input\":{\"command\":\"mise exec -- cargo test -p autophagy-store\"},\"exit_code\":1}}\n"
+);
+
+/// A single session with two distinct one-off command failures: candidate
+/// signatures exist, but none recurs, so the digest must print its summary line
+/// instead of listing one-occurrence giants.
+const NONRECURRING_JSONL: &str = concat!(
+    "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_nr_start\",",
+    "\"session_id\":\"ses_nr\",\"timestamp\":\"2026-07-16T10:00:00Z\",",
+    "\"sequence\":0,\"source\":\"generic-jsonl\",\"type\":\"session.started\",",
+    "\"project\":\"/workspace/demo\"}\n",
+    "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_nr_a\",",
+    "\"session_id\":\"ses_nr\",\"timestamp\":\"2026-07-16T10:01:00Z\",",
+    "\"sequence\":1,\"source\":\"generic-jsonl\",\"type\":\"tool.failed\",",
+    "\"project\":\"/workspace/demo\",\"tool\":{\"name\":\"bash\",",
+    "\"input\":{\"command\":\"cargo build --release\"},\"exit_code\":1}}\n",
+    "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_nr_b\",",
+    "\"session_id\":\"ses_nr\",\"timestamp\":\"2026-07-16T10:02:00Z\",",
+    "\"sequence\":2,\"source\":\"generic-jsonl\",\"type\":\"tool.failed\",",
+    "\"project\":\"/workspace/demo\",\"tool\":{\"name\":\"bash\",",
+    "\"input\":{\"command\":\"npm run lint\"},\"exit_code\":1}}\n"
+);
+
+/// Search text rows must be scannable — abbreviated event id, percentage score,
+/// and a cleaned command snippet — while `--output json` keeps the full event
+/// id, the raw snippet, and the basis-points ranking fields byte-stable.
+#[test]
+fn search_text_humanizes_rows_while_json_keeps_full_fields() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("search.db");
+    let input = directory.path().join("events.jsonl");
+    fs::write(&input, COMMAND_JSONL).expect("write fixture");
+    run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:search",
+            "--index-tool-input",
+        ],
+    );
+
+    let output = command(&database)
+        .args(["search", "cargo"])
+        .output()
+        .expect("run search");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(
+        stdout.contains("evt_generic_3333eeee…"),
+        "search rows must abbreviate the event id:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("evt_generic_3333eeee4444ffff"),
+        "the full event id must not appear in text rows:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("mise exec -- ") && stdout.contains("cargo"),
+        "the snippet must show the cleaned command text:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("{\"command\""),
+        "the raw JSON framing must be stripped from the snippet:\n{stdout}"
+    );
+    assert!(
+        stdout.contains('%') && !stdout.contains("bps"),
+        "the rank score must read as a percentage, not basis points:\n{stdout}"
+    );
+
+    let search = run_json(&database, ["search", "cargo"]);
+    let hit = &search["result"][0];
+    assert_eq!(
+        hit["event_id"], "evt_generic_3333eeee4444ffff",
+        "JSON keeps the full event id"
+    );
+    assert!(
+        hit["snippet"]
+            .as_str()
+            .expect("snippet")
+            .contains("\"command\""),
+        "JSON keeps the raw snippet unchanged: {hit}"
+    );
+    assert!(
+        hit["explanation"]["rank_score_bps"].is_number(),
+        "JSON keeps the spec-versioned basis-points field: {hit}"
+    );
+}
+
+/// Session text rows must align without raw tabs, abbreviate the session id, and
+/// print a compact timestamp; JSON keeps the full session id and RFC3339 time.
+#[test]
+fn sessions_text_aligns_and_compacts_while_json_stays_stable() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("sessions.db");
+    let input = directory.path().join("events.jsonl");
+    fs::write(&input, COMMAND_JSONL).expect("write fixture");
+    run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:sessions",
+        ],
+    );
+
+    let output = command(&database)
+        .arg("sessions")
+        .output()
+        .expect("run sessions");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(
+        !stdout.contains('\t'),
+        "aligned columns must not use raw tabs:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("ses_generic_9999cccc…"),
+        "the session id must be abbreviated:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("2026-07-16T10:01:00Z"),
+        "the timestamp must be compact (relative or short-absolute), not raw RFC3339:\n{stdout}"
+    );
+
+    let sessions = run_json(&database, ["sessions"]);
+    assert_eq!(
+        sessions["result"][0]["session_id"], "ses_generic_9999cccc8888dddd",
+        "JSON keeps the full session id"
+    );
+    assert_eq!(
+        sessions["result"][0]["last_event_at"], "2026-07-16T10:01:00Z",
+        "JSON keeps the full RFC3339 timestamp"
+    );
+}
+
+/// A zero-finding digest with no recurring candidate prints a single summary
+/// line rather than a wall of one-occurrence signatures.
+#[test]
+fn digest_summarizes_when_no_candidate_recurs() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("digest.db");
+    let input = directory.path().join("events.jsonl");
+    fs::write(&input, NONRECURRING_JSONL).expect("write fixture");
+    run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:digest",
+            "--index-tool-input",
+        ],
+    );
+
+    let output = command(&database)
+        .arg("digest")
+        .output()
+        .expect("run digest");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(
+        stdout.contains("none recurring — nothing near threshold"),
+        "a non-recurring scan must print the summary line:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("near-threshold observations"),
+        "one-occurrence giants must not be listed:\n{stdout}"
+    );
+}
+
+/// `mutations show` text must render the lesson — hypothesis statement,
+/// intervention instruction, and promotion gates as percentages — not just a
+/// header. JSON keeps the full package byte-stable.
+#[test]
+fn mutations_show_text_renders_the_lesson() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("show.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+    run_json(&database, ["mutations", "propose"]);
+
+    let registry = run_json(&database, ["mutations", "list"]);
+    let record = registry["result"]
+        .as_array()
+        .expect("registry")
+        .iter()
+        .find(|mutation| mutation["source_detector"] == "repeated_command_failure")
+        .expect("failure mutation");
+    let mutation_id = record["mutation_id"].as_str().expect("id").to_owned();
+
+    // Pull the authoritative lesson text from the JSON package.
+    let shown = run_json(&database, ["mutations", "show", &mutation_id]);
+    let statement = shown["result"]["mutation"]["package"]["hypothesis"]["statement"]
+        .as_str()
+        .expect("statement")
+        .to_owned();
+    let instruction = shown["result"]["mutation"]["package"]["intervention"]["instruction"]
+        .as_str()
+        .expect("instruction")
+        .to_owned();
+
+    let output = command(&database)
+        .args(["mutations", "show", &mutation_id])
+        .output()
+        .expect("run show");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(
+        stdout.contains("hypothesis") && stdout.contains(&statement),
+        "show must render the hypothesis statement:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("intervention") && stdout.contains(&instruction),
+        "show must render the intervention instruction:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("gates") && stdout.contains('%') && !stdout.contains("bps"),
+        "promotion gates must read as percentages:\n{stdout}"
+    );
+}
+
+/// A unique `mut_` prefix resolves to the full id, and the next-step hint echoes
+/// the short id the user typed rather than the resolved 64-hex identity.
+#[test]
+fn short_mutation_id_prefix_resolves_and_hint_echoes_it() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("shortid.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+    run_json(&database, ["mutations", "propose"]);
+
+    let registry = run_json(&database, ["mutations", "list"]);
+    let record = registry["result"]
+        .as_array()
+        .expect("registry")
+        .iter()
+        .find(|mutation| mutation["source_detector"] == "repeated_command_failure")
+        .expect("failure mutation");
+    let mutation_id = record["mutation_id"].as_str().expect("id").to_owned();
+    let prefix: String = mutation_id.chars().take("mut_".len() + 10).collect();
+    assert_ne!(prefix, mutation_id, "prefix must be a genuine abbreviation");
+
+    // A unique short prefix resolves to the same package the full id shows.
+    let shown = run_json(&database, ["mutations", "show", &prefix]);
+    assert_eq!(shown["result"]["mutation"]["mutation_id"], mutation_id);
+
+    // The next-step hint echoes the short prefix the user supplied.
+    let challenged = command(&database)
+        .args([
+            "mutations",
+            "challenge",
+            &prefix,
+            "--check",
+            "coincidence-considered",
+            "--check",
+            "sessions-comparable",
+            "--check",
+            "trigger-observable",
+            "--check",
+            "legitimate-uses-bounded",
+            "--check",
+            "equivalent-searched",
+            "--check",
+            "counterexamples-reviewed",
+        ])
+        .output()
+        .expect("challenge");
+    assert!(challenged.status.success());
+    let stderr = String::from_utf8_lossy(&challenged.stderr);
+    assert!(
+        stderr.contains(&format!("replay-draft {prefix} ")),
+        "the hint must echo the short id the user typed:\n{stderr}"
+    );
+
+    // An unknown prefix still surfaces the standard not-found error.
+    let missing = command(&database)
+        .args(["mutations", "show", "mut_ffffffffffff"])
+        .output()
+        .expect("show missing");
+    assert!(
+        !missing.status.success(),
+        "an unknown id must fail, not silently resolve"
     );
 }
 
