@@ -4,7 +4,8 @@ use std::io::Cursor;
 
 use autophagy_core::{ImportOptions, import_jsonl};
 use autophagy_mutations::{
-    GenerationOutcome, LifecycleState, generate_candidate, generate_candidates,
+    ADVISORY_EXCLUSION, GenerationOutcome, LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION, LifecycleState,
+    generate_candidate, generate_candidates,
 };
 use autophagy_patterns::{DetectorConfig, detect};
 use autophagy_store::EventStore;
@@ -38,6 +39,37 @@ fn findings_generate_stable_zero_permission_candidates() {
         let instance = serde_json::to_value(&package).expect("package JSON");
         assert!(validator.is_valid(&instance), "schema rejected {instance}");
     }
+}
+
+#[test]
+fn generated_exclusions_stay_true_at_every_lifecycle_stage() {
+    // The exclusion template must not claim a pipeline stage ("advisory until
+    // replay and shadow evaluation pass") that is already behind the package
+    // by the time it is challenged, replayed, shadowed, or installed — every
+    // one of which happens strictly after generation. Assert the new
+    // candidates never regress to the old, stage-bound phrasing and instead
+    // use the stage-independent `ADVISORY_EXCLUSION` wording.
+    let mut saw_advisory_exclusion = false;
+    for outcome in generate_candidates(&fixture_findings()) {
+        let GenerationOutcome::Candidate { package } = outcome else {
+            panic!("fixture finding should generate a candidate")
+        };
+        assert!(
+            package
+                .exclusions
+                .iter()
+                .all(|exclusion| exclusion != LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION),
+            "newly generated packages must not carry the stale pipeline-stage exclusion"
+        );
+        saw_advisory_exclusion |= package
+            .exclusions
+            .iter()
+            .any(|exclusion| exclusion == ADVISORY_EXCLUSION);
+    }
+    assert!(
+        saw_advisory_exclusion,
+        "the repeated-command-failure fixture candidate should use the stage-independent advisory exclusion"
+    );
 }
 
 #[test]

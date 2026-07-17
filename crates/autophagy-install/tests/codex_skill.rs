@@ -7,7 +7,10 @@ use autophagy_install::{
     InstallError, InstallTarget, materialize, plan_claude_code_skill, plan_codex_skill,
     unmaterialize,
 };
-use autophagy_mutations::{GenerationOutcome, MutationPackage, generate_candidates};
+use autophagy_mutations::{
+    ADVISORY_EXCLUSION, GenerationOutcome, LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION, MutationPackage,
+    generate_candidates,
+};
 use autophagy_patterns::{DetectorConfig, detect};
 use autophagy_store::EventStore;
 
@@ -172,6 +175,73 @@ fn install_targets_round_trip_registry_identifiers() {
         Some(InstallTarget::ClaudeCode)
     );
     assert_eq!(InstallTarget::from_registry_id("vscode_repo_skill"), None);
+}
+
+#[test]
+fn generated_skill_has_no_self_contradicting_exclusion() {
+    let repository = tempfile::tempdir().expect("repository");
+    fs::create_dir(repository.path().join(".git")).expect("git marker");
+    let package = command_failure_package();
+
+    // A freshly generated candidate already uses the corrected template
+    // phrasing, so the installed SKILL.md must not carry the old claim that
+    // this instruction is merely "advisory until replay and shadow evaluation
+    // pass" — installation only happens after both already passed, and the
+    // file says so two lines below the exclusion list.
+    let plan = plan_claude_code_skill(&package, repository.path()).expect("plan");
+    assert!(
+        !plan
+            .content
+            .contains(LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION),
+        "freshly generated SKILL.md must not carry the stale pipeline-stage exclusion: {}",
+        plan.content
+    );
+    assert!(
+        plan.content.contains(ADVISORY_EXCLUSION),
+        "freshly generated SKILL.md should render the corrected advisory exclusion"
+    );
+
+    let codex_plan = plan_codex_skill(&package, repository.path()).expect("codex plan");
+    assert!(
+        !codex_plan
+            .content
+            .contains(LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION)
+    );
+    assert!(codex_plan.content.contains(ADVISORY_EXCLUSION));
+}
+
+#[test]
+fn installer_tolerates_legacy_advisory_exclusion_phrasing() {
+    let repository = tempfile::tempdir().expect("repository");
+    fs::create_dir(repository.path().join(".git")).expect("git marker");
+
+    // Registered mutation packages are immutable and audit-logged, so a
+    // package minted before the template fix can still carry the old exact
+    // phrasing forever. The installer must render it sanely at
+    // materialization time without rewriting the stored package.
+    let mut package = command_failure_package();
+    let other_exclusion =
+        "Do not intervene when equivalent inputs already succeeded in the current context."
+            .to_owned();
+    package.exclusions = vec![
+        LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION.to_owned(),
+        other_exclusion.clone(),
+    ];
+
+    let plan = plan_claude_code_skill(&package, repository.path()).expect("plan");
+    assert!(
+        !plan
+            .content
+            .contains(LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION),
+        "installer must not render the stale pipeline-stage claim for legacy packages: {}",
+        plan.content
+    );
+    assert!(
+        plan.content.contains(ADVISORY_EXCLUSION),
+        "installer should substitute the corrected advisory phrasing"
+    );
+    // Every other exclusion is kept verbatim.
+    assert!(plan.content.contains(&other_exclusion));
 }
 
 fn command_failure_package() -> MutationPackage {

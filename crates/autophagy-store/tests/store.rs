@@ -846,6 +846,22 @@ fn mutation_registry_is_idempotent_audited_and_evidence_bound() {
     assert!(!details.replays[0].passed);
     assert!(details.replays[1].passed);
 
+    // The cheap single-column lookup callers use to display a mutation's
+    // CURRENT state (e.g. `mutations propose`/`synthesize` re-deriving the
+    // same deterministic candidate for already-registered evidence) must
+    // reflect this exact lifecycle progression, not the package's
+    // generation-time `candidate` classification.
+    assert_eq!(
+        store.mutation_state("mut_registry").expect("state lookup"),
+        Some("retired".to_owned())
+    );
+    assert_eq!(
+        store
+            .mutation_state("mut_never_registered")
+            .expect("missing lookup"),
+        None
+    );
+
     let deleted = store
         .delete_session("ses_replay-only")
         .expect("delete replay evidence");
@@ -854,6 +870,12 @@ fn mutation_registry_is_idempotent_audited_and_evidence_bound() {
         store.get_mutation("mut_registry"),
         Err(StoreError::MutationNotFound { .. })
     ));
+    assert_eq!(
+        store
+            .mutation_state("mut_registry")
+            .expect("state lookup after delete"),
+        None
+    );
 }
 
 #[test]
