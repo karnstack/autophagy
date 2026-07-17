@@ -769,6 +769,10 @@ pub struct SetupValues {
     pub index_metadata: Vec<String>,
     /// Watch/daemon discovery interval in seconds.
     pub interval_seconds: u64,
+    /// Synthesis provider chosen during setup; `None` leaves the key as-is.
+    pub synthesis_provider: Option<String>,
+    /// Manifest path for the chosen provider; `None` leaves the key as-is.
+    pub synthesis_manifest_path: Option<String>,
 }
 
 /// Persist `setup`'s chosen values, preserving unknown keys already on disk.
@@ -814,6 +818,22 @@ pub fn write_setup(values: &SetupValues) -> Result<PathBuf, CliError> {
         "interval_seconds",
         toml::Value::Integer(i64::try_from(values.interval_seconds).unwrap_or(i64::MAX)),
     );
+    if let Some(provider) = &values.synthesis_provider {
+        set_nested(
+            &mut table,
+            "synthesis",
+            "provider",
+            toml::Value::String(provider.clone()),
+        );
+    }
+    if let Some(manifest) = &values.synthesis_manifest_path {
+        set_nested(
+            &mut table,
+            "synthesis",
+            "manifest_path",
+            toml::Value::String(manifest.clone()),
+        );
+    }
     write_table(&path, &table)?;
     Ok(path)
 }

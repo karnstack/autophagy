@@ -1182,6 +1182,68 @@ fn setup_digest_surfaces_scan_stats_and_observations_when_nothing_qualifies() {
 }
 
 #[test]
+fn setup_model_backend_writes_a_loadable_manifest_and_config() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let config_dir = directory.path().join("claude-config");
+    let project_dir = config_dir.join("projects").join("-workspace-demo");
+    fs::create_dir_all(&project_dir).expect("create projects dir");
+    fs::write(project_dir.join("session.jsonl"), CLAUDE_TRANSCRIPT).expect("write transcript");
+    let database = directory.path().join("setup.db");
+
+    let output = command(&database)
+        .args([
+            "setup",
+            "--adapter",
+            "claude-code",
+            "--index-tool-input",
+            "--model-backend",
+            "claude-cli",
+            "--yes",
+        ])
+        .env("CLAUDE_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("run setup");
+    assert!(
+        output.status.success(),
+        "setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(
+        stdout.contains("--allow-remote-endpoint"),
+        "cloud backends must state the consent requirement:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("mutations synthesize --provider claude-cli"),
+        "setup must print the exact synthesize command:\n{stdout}"
+    );
+
+    // The manifest is written next to the config file and satisfies the
+    // versioned manifest contract.
+    let manifest_path = directory.path().join("synthesis-manifest.json");
+    let manifest = autophagy_synthesis::ModelManifest::from_path(&manifest_path)
+        .expect("manifest must load through the versioned contract");
+    assert!(manifest.declares(autophagy_synthesis::Capability::MutationSynthesis));
+
+    // The chosen backend is persisted so `mutations synthesize` inherits it.
+    let config = fs::read_to_string(directory.path().join("config.toml")).expect("config");
+    assert!(config.contains("provider = \"claude-cli\""), "{config}");
+    assert!(config.contains("synthesis-manifest.json"), "{config}");
+
+    // Default backend (`none`) leaves synthesis config untouched.
+    let second = tempfile::tempdir().expect("temporary directory");
+    let second_db = second.path().join("setup.db");
+    let output = command(&second_db)
+        .args(["setup", "--yes"])
+        .output()
+        .expect("run setup");
+    assert!(output.status.success());
+    let config = fs::read_to_string(second.path().join("config.toml")).expect("config");
+    assert!(!config.contains("[synthesis]"), "{config}");
+    assert!(!second.path().join("synthesis-manifest.json").exists());
+}
+
+#[test]
 fn setup_without_terminal_or_flags_points_at_the_non_interactive_flags() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let database = directory.path().join("setup.db");

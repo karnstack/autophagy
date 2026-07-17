@@ -33,6 +33,7 @@ use autophagy_adapter_pi::{
 use autophagy_core::{ReindexOptions, ReindexSummary, reindex};
 use autophagy_patterns::{DetectorConfig, detect_with_report};
 use autophagy_store::EventStore;
+use clap::ValueEnum;
 use serde::Serialize;
 
 use crate::{
@@ -72,6 +73,41 @@ pub struct SetupPlan {
     pub interval_explicit: bool,
     /// Run without prompting.
     pub yes: bool,
+    /// Model backend for richer suggestions when non-interactive; `None`
+    /// leaves any existing choice untouched.
+    pub model_backend: Option<SetupModelBackend>,
+}
+
+/// A synthesis model backend `setup` can configure. Autophagy is fully
+/// functional without one; a backend only enriches mutation candidates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum SetupModelBackend {
+    /// No model: the deterministic engine only (the default).
+    None,
+    /// The authenticated Claude Code CLI already on this machine.
+    ClaudeCli,
+    /// The authenticated Codex CLI already on this machine.
+    CodexCli,
+    /// A local Ollama server at localhost.
+    Ollama,
+}
+
+impl SetupModelBackend {
+    /// The `--provider` name `mutations synthesize` expects.
+    const fn provider_name(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::ClaudeCli => Some("claude-cli"),
+            Self::CodexCli => Some("codex-cli"),
+            Self::Ollama => Some("ollama"),
+        }
+    }
+
+    /// Whether this backend sends the structured prompt to a vendor cloud.
+    const fn reaches_cloud(self) -> bool {
+        matches!(self, Self::ClaudeCli | Self::CodexCli)
+    }
 }
 
 /// Per-adapter outcome recorded in the structured report.
@@ -120,6 +156,12 @@ pub struct SetupReport {
     pub changed: Vec<String>,
     /// Whether an installed daemon was reinstalled to apply config changes.
     pub daemon_reinstalled: bool,
+    /// Synthesis provider chosen this run, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_backend: Option<String>,
+    /// Manifest file written for the chosen backend, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
 }
 
 /// Run the guided setup flow.
@@ -348,7 +390,40 @@ pub fn run(
         }
     }
 
-    // 6. Persist the chosen settings so later runs and commands inherit them.
+    // 6. Offer a synthesis model backend. Fully optional: the deterministic
+    // engine needs no model; a backend only enriches candidates. Interactive
+    // choices are limited to what is actually available on this machine.
+    ui.say("");
+    let backend = if interactive {
+        prompt_model_backend(&mut ui, config.synthesis_provider.as_deref())
+    } else {
+        plan.model_backend.unwrap_or(SetupModelBackend::None)
+    };
+    let mut chosen_backend = None;
+    let mut manifest_path_written = None;
+    if let Some(provider) = backend.provider_name() {
+        if backend.reaches_cloud() {
+            ui.say(&format!(
+                "Note: with {provider}, the small structured prompt (template fields and evidence \
+                 IDs, never raw session text) is sent to the vendor's cloud through your existing \
+                 CLI login. Synthesis will also require --allow-remote-endpoint."
+            ));
+        }
+        let manifest = write_model_manifest(backend)?;
+        ui.say(&format!("Wrote model manifest to {}.", manifest.display()));
+        ui.say(&format!(
+            "Try it: autophagy mutations synthesize --provider {provider}{}",
+            if backend.reaches_cloud() {
+                " --allow-remote-endpoint"
+            } else {
+                ""
+            }
+        ));
+        chosen_backend = Some(provider.to_owned());
+        manifest_path_written = Some(manifest.display().to_string());
+    }
+
+    // 7. Persist the chosen settings so later runs and commands inherit them.
     let selected_names = adapter_names(&selected);
     let config_path = crate::config::write_setup(&crate::config::SetupValues {
         adapters: selected_names.clone(),
@@ -356,6 +431,8 @@ pub fn run(
         include_content,
         index_metadata: index_metadata.clone(),
         interval_seconds: interval,
+        synthesis_provider: chosen_backend.clone(),
+        synthesis_manifest_path: manifest_path_written.clone(),
     })?;
     let mut changed = Vec::new();
     if index_tool_input != prior_index_tool_input {
@@ -376,7 +453,7 @@ pub fn run(
         ui.say(&format!("Changed: {}.", changed.join(", ")));
     }
 
-    // 7. If an installed daemon's inputs changed and we did not just install
+    // 8. If an installed daemon's inputs changed and we did not just install
     // one fresh, offer to reinstall so the change takes effect (the unit bakes
     // its arguments in at install time).
     let adapters_changed = selected_names != prior_adapters;
@@ -406,7 +483,7 @@ pub fn run(
         }
     }
 
-    // 8. What next.
+    // 9. What next.
     if verbose {
         ui.say("");
         ui.say("What next:");
@@ -430,7 +507,105 @@ pub fn run(
         config_written: true,
         changed,
         daemon_reinstalled,
+        model_backend: chosen_backend,
+        manifest_path: manifest_path_written,
     })
+}
+
+/// Ask which synthesis model backend to use, offering only what is available.
+fn prompt_model_backend(ui: &mut Ui, current: Option<&str>) -> SetupModelBackend {
+    let claude = binary_on_path("claude");
+    let codex = binary_on_path("codex");
+    let mut options = vec!["none (deterministic only — Autophagy is fully functional without)"];
+    if claude {
+        options.push("claude (your existing Claude Code CLI login)");
+    }
+    if codex {
+        options.push("codex (your existing Codex CLI login)");
+    }
+    options.push("ollama (a local Ollama server, zero marginal cost)");
+    ui.say("Want richer suggestions from a model? Options:");
+    for option in &options {
+        ui.say(&format!("  - {option}"));
+    }
+    if let Some(current) = current {
+        ui.say(&format!("  (currently configured: {current})"));
+    }
+    loop {
+        let answer = ui.prompt_line("Model backend [none]:");
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "" | "none" => return SetupModelBackend::None,
+            "claude" | "claude-cli" if claude => return SetupModelBackend::ClaudeCli,
+            "codex" | "codex-cli" if codex => return SetupModelBackend::CodexCli,
+            "ollama" => return SetupModelBackend::Ollama,
+            other => ui.say(&format!("`{other}` is not one of the offered options.")),
+        }
+    }
+}
+
+/// Whether an executable with this name is reachable through `PATH`.
+fn binary_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file()
+    })
+}
+
+/// Write a ready-to-use synthesis manifest for the chosen backend into the
+/// config directory, returning its path. Contains no secrets: it names a
+/// binary or a loopback endpoint and declared capabilities only.
+fn write_model_manifest(backend: SetupModelBackend) -> Result<PathBuf, CliError> {
+    let (name, format, path, revision, hints) = match backend {
+        SetupModelBackend::None => unreachable!("no manifest for the deterministic engine"),
+        SetupModelBackend::ClaudeCli => (
+            "claude-code-login",
+            "claude_cli",
+            "claude",
+            "cli",
+            serde_json::json!({ "min_memory_mb": 512 }),
+        ),
+        SetupModelBackend::CodexCli => (
+            "codex-login",
+            "codex_cli",
+            "codex",
+            "cli",
+            serde_json::json!({ "min_memory_mb": 512 }),
+        ),
+        SetupModelBackend::Ollama => (
+            "qwen3-coder:30b",
+            "ollama",
+            "http://localhost:11434",
+            "local",
+            serde_json::json!({ "min_memory_mb": 8192 }),
+        ),
+    };
+    let manifest = serde_json::json!({
+        "spec_version": "synthesis-manifest/0.3",
+        "name": name,
+        "format": format,
+        "path": path,
+        "revision": revision,
+        "capabilities": ["mutation_synthesis"],
+        "resource_hints": hints,
+    });
+    let target = crate::config::config_path()?
+        .parent()
+        .map(|dir| dir.join("synthesis-manifest.json"))
+        .ok_or_else(|| CliError::Config("config path has no parent directory".to_owned()))?;
+    let rendered = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&manifest).map_err(CliError::from)?
+    );
+    std::fs::write(&target, rendered).map_err(|error| {
+        CliError::Config(format!(
+            "could not write model manifest {}: {error}",
+            target.display()
+        ))
+    })?;
+    Ok(target)
 }
 
 /// Minimal, testable console helper.
@@ -448,6 +623,20 @@ impl Ui {
 
     /// Ask a yes/no question. Returns `default` without reading when not
     /// interactive (non-interactive runs are driven entirely by flags).
+    /// Read one free-form answer line; empty string when non-interactive/EOF.
+    fn prompt_line(&mut self, question: &str) -> String {
+        if !self.interactive {
+            return String::new();
+        }
+        print!("{question} ");
+        let _ = io::stdout().flush();
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            return String::new();
+        }
+        line.trim().to_owned()
+    }
+
     fn prompt_yes_no(&mut self, question: &str, default: bool) -> bool {
         if !self.interactive {
             return default;

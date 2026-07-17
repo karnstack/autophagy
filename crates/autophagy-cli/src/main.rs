@@ -360,6 +360,11 @@ enum Commands {
         /// Assume yes and run non-interactively without prompting.
         #[arg(long)]
         yes: bool,
+
+        /// Synthesis model backend for richer suggestions (non-interactive).
+        /// Autophagy is fully functional with `none`.
+        #[arg(long = "model-backend", value_enum, value_name = "BACKEND")]
+        model_backend: Option<setup::SetupModelBackend>,
     },
 
     /// Show local state: database, imports, index, daemon, and thresholds.
@@ -1438,6 +1443,7 @@ fn execute(
             monitor,
             interval,
             yes,
+            model_backend,
         } => {
             let report = setup::run(
                 cli.database,
@@ -1456,6 +1462,7 @@ fn execute(
                     interval,
                     interval_explicit: config::flag_set(leaf, "interval"),
                     yes,
+                    model_backend,
                 },
             )?;
             Ok(CommandReport::Setup(report))
