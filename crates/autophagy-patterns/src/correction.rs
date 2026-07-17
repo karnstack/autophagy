@@ -3,12 +3,16 @@ use std::collections::BTreeMap;
 use autophagy_events::{Event, EventKind};
 
 use crate::{
-    DetectorConfig, DetectorKind, EvidencePacket, EvidenceReference, EvidenceSpecVersion,
+    Candidate, DetectorConfig, DetectorKind, EvidencePacket, EvidenceReference,
+    EvidenceSpecVersion,
     score::{qualifies, score},
     signature::{correction_counterexample, correction_signature, finding_id},
 };
 
-pub(crate) fn detect(events: &[Event], config: DetectorConfig) -> Vec<EvidencePacket> {
+pub(crate) fn detect(
+    events: &[Event],
+    config: DetectorConfig,
+) -> (Vec<EvidencePacket>, Vec<Candidate>) {
     let mut corrections: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
     let mut counterexamples: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
     for event in events {
@@ -23,29 +27,40 @@ pub(crate) fn detect(events: &[Event], config: DetectorConfig) -> Vec<EvidencePa
         }
     }
 
-    corrections
-        .into_iter()
-        .filter_map(|(signature, evidence)| {
-            let opposite = counterexamples
-                .get(&signature)
-                .map_or(&[][..], Vec::as_slice);
-            let recurrence = score(&evidence, opposite)?;
-            let packet_signature = format!("correction/v1|{signature}");
-            qualifies(&recurrence, config).then(|| EvidencePacket {
+    let mut findings = Vec::new();
+    let mut candidates = Vec::new();
+    for (signature, evidence) in corrections {
+        let opposite = counterexamples
+            .get(&signature)
+            .map_or(&[][..], Vec::as_slice);
+        let Some(recurrence) = score(&evidence, opposite) else {
+            continue;
+        };
+        let packet_signature = format!("correction/v1|{signature}");
+        let title = format!("Repeated user correction: {signature}");
+        if qualifies(&recurrence, config) {
+            findings.push(EvidencePacket {
                 spec_version: EvidenceSpecVersion::V0_1,
                 finding_id: finding_id(
                     DetectorKind::RepeatedUserCorrection.as_str(),
                     &packet_signature,
                 ),
                 detector: DetectorKind::RepeatedUserCorrection,
-                signature: packet_signature,
-                title: format!("Repeated user correction: {signature}"),
-                score: recurrence,
+                signature: packet_signature.clone(),
+                title: title.clone(),
+                score: recurrence.clone(),
                 evidence: references(&evidence),
                 counterexamples: references(opposite),
-            })
-        })
-        .collect()
+            });
+        }
+        candidates.push(Candidate {
+            detector: DetectorKind::RepeatedUserCorrection,
+            signature: packet_signature,
+            title,
+            score: recurrence,
+        });
+    }
+    (findings, candidates)
 }
 
 fn references(events: &[&Event]) -> Vec<EvidenceReference> {

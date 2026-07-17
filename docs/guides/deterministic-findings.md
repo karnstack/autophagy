@@ -11,14 +11,46 @@ exact supporting event IDs, and exact counterexample IDs.
 
 ## Default recurrence policy
 
-A group becomes a finding only when it has:
+Qualification is about recurrence and wasted effort, not about how often an
+operation fails relative to how often it succeeds. A group becomes a finding
+when it has:
 
-- at least three supporting events;
-- support in at least two distinct sessions; and
-- at least 50% support among support plus explicit counterexamples.
+- at least three supporting events; and
+- support in at least two distinct sessions.
+
+That bar separates a cross-session recurring pattern from a one-off or a single
+within-session retry storm. A repeated failure is worth surfacing even when the
+same command succeeds far more often — which, for everyday commands, it almost
+always does.
+
+`support_ratio_bps` (support share among support plus explicit counterexamples)
+is still reported on every finding and still contributes to the overall score,
+but it is **not** a qualification gate by default. It is available as an optional
+anti-noise floor, `--min-support-ratio-bps`, which **defaults to 0 (disabled)**.
+Raising it only suppresses candidates whose failure share is vanishingly small;
+it is never a majority-failure requirement. See
+[ADR 0009](../decisions/0009-recurrence-qualification-and-scan-diagnostics.md).
 
 The detector API accepts different thresholds for evaluation, but production
 callers should keep the defaults until fixture precision justifies a change.
+
+## Never a silent zero
+
+`digest` and `patterns` explain every scan, so a zero-finding run is never
+unexplained. Each run reports:
+
+- how many events and distinct sessions were scanned;
+- how many candidate recurrence signatures were seen across all detectors; and
+- when findings are zero, the top near-threshold **observations** — recurring
+  candidates that did not qualify — each labelled with the single gate it missed
+  (`min_occurrences`, `min_sessions`, or `min_support_ratio_bps`).
+
+Observations are diagnostics, not findings. They expose the same recurrence
+statistics a finding would but deliberately omit evidence and counterexample
+lineage, so they are never mistaken for findings and never feed mutation
+generation. In JSON, the `digest` and `patterns` reports carry `events_scanned`,
+`sessions_scanned`, `candidate_signatures`, `findings`, and `observations`
+(the `patterns` report is an object, not a bare array of findings).
 
 ## Repeated command failures
 
@@ -28,8 +60,11 @@ collapses whitespace, replaces the event's exact project prefix with
 `$PROJECT`, and groups by normalized operation plus exit code.
 
 A matching `tool.completed` operation is an explicit counterexample. It lowers
-both the support ratio and overall score. Different commands, exit codes, and
-non-shell structured tools do not get merged speculatively.
+the reported support ratio and the overall score, but — because qualification is
+recurrence-based — it does not on its own disqualify a repeated failure.
+Different commands, exit codes, and non-shell structured tools do not get merged
+speculatively; the real-data measurement behind keeping exit codes split is
+recorded in [ADR 0009](../decisions/0009-recurrence-qualification-and-scan-diagnostics.md).
 
 ## Repeated user corrections
 

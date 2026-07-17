@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use autophagy_events::Event;
 
-use crate::{DetectorConfig, RecurrenceScore};
+use crate::{DetectorConfig, RecurrenceScore, UnmetGate};
 
 pub(crate) fn score(evidence: &[&Event], counterexamples: &[&Event]) -> Option<RecurrenceScore> {
     let occurrences = u32::try_from(evidence.len()).ok()?;
@@ -37,7 +37,29 @@ pub(crate) fn score(evidence: &[&Event], counterexamples: &[&Event]) -> Option<R
 }
 
 pub(crate) const fn qualifies(score: &RecurrenceScore, config: DetectorConfig) -> bool {
-    score.occurrences >= config.min_occurrences
-        && score.distinct_sessions >= config.min_sessions
-        && score.support_ratio_bps >= config.min_support_ratio_bps
+    unmet_gate(score, config).is_none()
+}
+
+/// The first qualification gate `score` fails to clear under `config`, or
+/// `None` when the score qualifies as a finding.
+///
+/// Gates are evaluated in a fixed order — occurrences, then distinct sessions,
+/// then the optional support-ratio floor — so a candidate is always attributed
+/// to a single, stable reason. Recurrence (occurrences across distinct sessions)
+/// is the qualification signal; the support ratio is an *optional* anti-noise
+/// floor that defaults to zero and never gates on the operation's overall
+/// failure share.
+pub(crate) const fn unmet_gate(
+    score: &RecurrenceScore,
+    config: DetectorConfig,
+) -> Option<UnmetGate> {
+    if score.occurrences < config.min_occurrences {
+        Some(UnmetGate::MinOccurrences)
+    } else if score.distinct_sessions < config.min_sessions {
+        Some(UnmetGate::MinSessions)
+    } else if score.support_ratio_bps < config.min_support_ratio_bps {
+        Some(UnmetGate::MinSupportRatio)
+    } else {
+        None
+    }
 }

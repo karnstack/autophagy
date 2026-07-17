@@ -187,19 +187,37 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
     assert_eq!(imported["result"]["inserted"], 11);
 
     let patterns = run_json(&database, ["patterns"]);
-    let findings = patterns["result"].as_array().expect("findings");
+    let findings = patterns["result"]["findings"].as_array().expect("findings");
     assert_eq!(findings.len(), 2);
     assert!(
         findings
             .iter()
             .all(|finding| finding["evidence"].as_array().expect("evidence").len() == 3)
     );
+    assert_eq!(patterns["result"]["events_scanned"], 11);
+    assert_eq!(patterns["result"]["sessions_scanned"], 10);
+    // Diagnostics accompany findings so a scan is never silent.
+    assert!(
+        patterns["result"]["candidate_signatures"]
+            .as_u64()
+            .expect("candidates")
+            >= 2
+    );
+    assert!(patterns["result"]["observations"].is_array());
 
     let digest = run_json(&database, ["digest"]);
     assert_eq!(digest["result"]["spec_version"], "digest/0.1");
     assert_eq!(digest["result"]["events_scanned"], 11);
+    assert_eq!(digest["result"]["sessions_scanned"], 10);
     assert_eq!(digest["result"]["model_used"], false);
     assert_eq!(digest["result"]["network_used"], false);
+    assert!(
+        digest["result"]["candidate_signatures"]
+            .as_u64()
+            .expect("candidates")
+            >= 2
+    );
+    assert!(digest["result"]["observations"].is_array());
     assert_eq!(
         digest["result"]["findings"]
             .as_array()
@@ -681,7 +699,7 @@ fn recovery_motif_is_detected_and_registered_end_to_end() {
     assert_eq!(imported["result"]["inserted"], 11);
 
     let patterns = run_json(&database, ["patterns"]);
-    let recovery = patterns["result"]
+    let recovery = patterns["result"]["findings"]
         .as_array()
         .expect("patterns")
         .iter()
