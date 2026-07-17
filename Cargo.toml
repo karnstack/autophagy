@@ -38,6 +38,7 @@ sha2 = "0.11"
 signal-hook = "0.3"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
+toml = { version = "0.9", features = ["parse", "display", "serde"] }
 
 [workspace.lints.rust]
 missing_docs = "warn"

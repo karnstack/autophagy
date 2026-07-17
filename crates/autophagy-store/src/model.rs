@@ -328,6 +328,21 @@ pub struct StoreStats {
     pub conflicts: i64,
 }
 
+/// Per-adapter import activity, for status reporting.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct AdapterActivity {
+    /// Stable adapter identifier.
+    pub adapter: String,
+    /// Distinct sessions imported for this adapter.
+    pub sessions: i64,
+    /// Canonical events attributed to this adapter's sessions.
+    pub events: i64,
+    /// Most recent event timestamp across this adapter's sessions.
+    pub last_event_at: Option<String>,
+    /// Most recent incremental-import cursor update for this adapter.
+    pub last_import_at: Option<String>,
+}
+
 /// Effect of rebuilding the derived search projections from stored events.
 ///
 /// Returned by [`EventStore::rebuild_search_projection`](crate::EventStore::rebuild_search_projection).

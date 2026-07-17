@@ -60,6 +60,22 @@ mise exec -- cargo run -p autophagy-cli -- setup
 That is the way in. It is interactive, local, and never deletes anything; see
 the [setup guide](docs/guides/setup.md). With no terminal it runs from flags:
 `autophagy setup --adapter claude-code --index-tool-input --monitor --yes`.
+Re-run `setup` any time to change what you monitor — it pre-fills your current
+answers and applies the changes.
+
+Check what is set up and change it without repeating flags every time:
+
+```sh
+mise exec -- cargo run -p autophagy-cli -- status
+mise exec -- cargo run -p autophagy-cli -- config set detect.min_occurrences 5
+mise exec -- cargo run -p autophagy-cli -- config list
+```
+
+`status` prints a fast, local snapshot — database size, what has been imported
+and how fresh it is, the index and daemon state, and the thresholds in effect.
+`config` stores your defaults so commands stop needing repeated flags; an
+explicit flag still wins for a single run. See the
+[configuration guide](docs/guides/configuration.md).
 
 ### Or drive it by hand
 
