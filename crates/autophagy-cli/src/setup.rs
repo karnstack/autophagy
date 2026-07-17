@@ -359,12 +359,10 @@ pub fn run(
     // still shows the scan stats and near-threshold observations rather than a
     // silent nothing.
     ui.say("");
-    let digest = digest_report(crate::detection::detect_cached(
-        &store,
-        None,
+    let digest = digest_report(
+        crate::detection::detect_cached(&store, None, DetectorConfig::default(), false)?,
         DetectorConfig::default(),
-        false,
-    )?)?;
+    )?;
     let digest_events_scanned = digest.events_scanned;
     let digest_findings = digest.findings.len();
     let digest_observations = digest.observations.len();
