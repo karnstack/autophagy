@@ -191,7 +191,7 @@ fn command_failure_package() -> MutationPackage {
         .find_map(|outcome| match outcome {
             GenerationOutcome::Candidate { package }
                 if package.mutation_id
-                    == "mut_d6b7a340eb2fb6f18bee4a20932b9c954adb4975f3ea8136bf0bd264b3ec431c" =>
+                    == "mut_6b51ef819f54c0275db19b15907b0b23c39598241c912828bb64cd5bf824a0ee" =>
             {
                 Some(*package)
             }

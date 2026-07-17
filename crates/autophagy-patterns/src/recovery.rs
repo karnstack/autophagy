@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use autophagy_events::{Event, EventKind};
+use autophagy_events::{Event, EventKind, signature::SIGNATURE_SPEC_VERSION};
 
 use crate::{
     Candidate, DetectorConfig, DetectorKind, EvidencePacket, EvidenceReference,
@@ -167,15 +167,17 @@ fn preceding_failure<'a>(
 }
 
 fn recovery_signature(failure: &FailureOperation, recovery: &FailureOperation) -> String {
+    let failure_prefix = format!("failure/{SIGNATURE_SPEC_VERSION}|");
+    let operation_prefix = format!("operation/{SIGNATURE_SPEC_VERSION}|");
     format!(
-        "recovery/v1|{}|via|{}",
+        "recovery/{SIGNATURE_SPEC_VERSION}|{}|via|{}",
         failure
             .signature
-            .strip_prefix("failure/v1|")
+            .strip_prefix(&failure_prefix)
             .unwrap_or(&failure.signature),
         recovery
             .success_key
-            .strip_prefix("operation/v1|")
+            .strip_prefix(&operation_prefix)
             .unwrap_or(&recovery.success_key)
     )
 }

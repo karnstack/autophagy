@@ -14,7 +14,7 @@ The design rationale and privacy stance are in
 ## Exact normalized signatures
 
 Every tool event with an inspectable command is indexed under a normalized
-operation signature such as `operation/v1|shell|cargo build`. The same
+operation signature such as `operation/v2|shell|cargo build`. The same
 model-free normalizer that powers the deterministic detectors collapses tool
 aliases (`bash`, `exec_command`, `shell`), whitespace, and the exact project
 prefix (`$PROJECT`), so incidental variation does not fragment identical
@@ -23,7 +23,7 @@ operations.
 Look one up exactly:
 
 ```sh
-autophagy search --signature 'operation/v1|shell|cargo build'
+autophagy search --signature 'operation/v2|shell|cargo build'
 ```
 
 Exact-signature lookup does not require a text query. Combine it with a text
@@ -55,7 +55,7 @@ Each filter narrows both the exact and full-text match sources identically:
 
 ```sh
 # Repository filter (exact project path).
-autophagy search --signature 'operation/v1|shell|cargo build' --project /repo/alpha
+autophagy search --signature 'operation/v2|shell|cargo build' --project /repo/alpha
 
 # Recency filter (events within the last 14 days).
 autophagy search 'linker error' --since-days 14
@@ -64,7 +64,7 @@ autophagy search 'linker error' --since-days 14
 autophagy search 'pytest' --event-kind tool.failed --event-kind test.failed
 
 # Outcome filter (success or failure polarity).
-autophagy search --signature 'operation/v1|shell|cargo build' --outcome failure
+autophagy search --signature 'operation/v2|shell|cargo build' --outcome failure
 ```
 
 Applied filters are echoed into every hit's explanation, so a result set is
@@ -77,7 +77,7 @@ self-describing.
 `explanation` object:
 
 ```sh
-autophagy --output json search 'succeeded' --signature 'operation/v1|shell|cargo build'
+autophagy --output json search 'succeeded' --signature 'operation/v2|shell|cargo build'
 ```
 
 ## Privacy

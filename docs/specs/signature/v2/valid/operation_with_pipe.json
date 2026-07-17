@@ -1,0 +1,1 @@
+"operation/v2|shell|reins screenshot --tab «n» 2>&1 | tail -1"

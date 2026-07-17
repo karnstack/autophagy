@@ -183,7 +183,7 @@ enum Commands {
         query: Option<String>,
 
         /// Exact normalized operation signature, such as
-        /// `operation/v1|shell|cargo test`.
+        /// `operation/v2|shell|cargo test`.
         #[arg(long, value_name = "SIGNATURE")]
         signature: Option<String>,
 

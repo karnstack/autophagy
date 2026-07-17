@@ -6,7 +6,7 @@
     {
       "kind": "exact_signature",
       "contribution_bps": 10000,
-      "detail": "exact match on signature operation/v1|shell|cargo build"
+      "detail": "exact match on signature operation/v2|shell|cargo build"
     },
     {
       "kind": "recency",
