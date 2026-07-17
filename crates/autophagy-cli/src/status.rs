@@ -210,122 +210,207 @@ fn humanize(timestamp: &str, now: OffsetDateTime) -> Option<String> {
     Some(text)
 }
 
-/// Render a [`StatusReport`] as human-readable text.
+/// Width of the label column in the text rendering.
+const LABEL: usize = 10;
+
+/// Render a [`StatusReport`] as human-readable text: a fixed label column,
+/// aligned adapter rows, grouped digits, and plain-language states.
 ///
 /// # Errors
 ///
 /// Returns [`std::io::Error`] when the writer fails.
 #[allow(clippy::too_many_lines)]
 pub fn write_text(report: &StatusReport, writer: &mut impl Write) -> std::io::Result<()> {
+    let row = |label: &str, text: &str| format!("{label:<LABEL$} {text}");
+    let cont = |text: &str| format!("{:<LABEL$} {text}", "");
+
     let db = &report.database;
-    writeln!(writer, "database: {}", db.path)?;
+    writeln!(writer, "{}", row("Database", &db.path))?;
     let size = db
         .size_bytes
-        .map_or_else(|| "absent".to_owned(), format_bytes);
+        .map_or_else(|| "empty".to_owned(), format_bytes);
+    let freshness = if db.exists {
+        String::new()
+    } else {
+        " · new database (nothing imported yet)".to_owned()
+    };
     writeln!(
         writer,
-        "  {} · schema v{} · {}",
-        size,
-        db.schema_version,
-        if db.exists { "present" } else { "new" }
+        "{}",
+        cont(&format!(
+            "{size} · schema v{}{freshness}",
+            db.schema_version
+        ))
     )?;
-    writeln!(
-        writer,
-        "  {} events · {} sessions · {} sources · {} artifacts · {} conflicts",
-        db.events, db.sessions, db.sources, db.artifacts, db.conflicts
-    )?;
+    let conflicts_note = if db.conflicts > 0 {
+        format!(" · {} quarantined conflicts", group(db.conflicts))
+    } else {
+        String::new()
+    };
+    let row_counts = format!(
+        "{} events · {} sessions · {} artifacts{conflicts_note}",
+        group(db.events),
+        group(db.sessions),
+        group(db.artifacts)
+    );
+    writeln!(writer, "{}", cont(&row_counts))?;
+    writeln!(writer)?;
 
-    writeln!(
-        writer,
-        "index: {} signatures · commands searchable: {}",
-        report.index.signatures,
-        if report.index.tool_input_indexed {
-            "yes"
-        } else {
-            "no"
-        }
-    )?;
+    let search = if report.index.tool_input_indexed {
+        format!(
+            "{} command signatures indexed · exact recall on",
+            group(i64::try_from(report.index.signatures).unwrap_or(i64::MAX))
+        )
+    } else {
+        "commands not indexed — run `autophagy reindex --index-tool-input`".to_owned()
+    };
+    writeln!(writer, "{}", row("Search", &search))?;
+    writeln!(writer)?;
 
     if report.adapters.is_empty() {
-        writeln!(writer, "adapters: none imported")?;
+        writeln!(writer, "{}", row("Agents", "none imported yet"))?;
     } else {
-        writeln!(writer, "adapters:")?;
-        for adapter in &report.adapters {
-            let freshness = adapter
-                .last_import_age
-                .as_deref()
-                .or(adapter.last_event_at.as_deref())
-                .unwrap_or("no imports");
-            writeln!(
-                writer,
-                "  {}\t{} sessions · {} events · last import {}",
-                adapter.adapter, adapter.sessions, adapter.events, freshness
-            )?;
+        let name_width = report
+            .adapters
+            .iter()
+            .map(|adapter| adapter.adapter.len())
+            .max()
+            .unwrap_or(0);
+        let sessions: Vec<String> = report
+            .adapters
+            .iter()
+            .map(|adapter| group(adapter.sessions))
+            .collect();
+        let events: Vec<String> = report
+            .adapters
+            .iter()
+            .map(|adapter| group(adapter.events))
+            .collect();
+        let sessions_width = sessions.iter().map(String::len).max().unwrap_or(0);
+        let events_width = events.iter().map(String::len).max().unwrap_or(0);
+        for (index, adapter) in report.adapters.iter().enumerate() {
+            let freshness = adapter.last_import_age.as_deref().map_or_else(
+                || {
+                    adapter.last_event_at.as_deref().map_or_else(
+                        || "never imported".to_owned(),
+                        |at| format!("last event {at}"),
+                    )
+                },
+                |age| format!("imported {age}"),
+            );
+            let line = format!(
+                "{:<name_width$}   {:>sessions_width$} sessions   {:>events_width$} events   {freshness}",
+                adapter.adapter, sessions[index], events[index]
+            );
+            let rendered = if index == 0 {
+                row("Agents", &line)
+            } else {
+                cont(&line)
+            };
+            writeln!(writer, "{rendered}")?;
         }
     }
+    writeln!(writer)?;
 
+    let floor = if report.detector.min_support_ratio_bps == 0 {
+        "noise floor off".to_owned()
+    } else {
+        format!("noise floor {} bps", report.detector.min_support_ratio_bps)
+    };
     writeln!(
         writer,
-        "detector: min_occurrences={} · min_sessions={} · min_support_ratio_bps={}",
-        report.detector.min_occurrences,
-        report.detector.min_sessions,
-        report.detector.min_support_ratio_bps
+        "{}",
+        row(
+            "Detector",
+            &format!(
+                "{}+ occurrences across {}+ sessions · {floor}",
+                report.detector.min_occurrences, report.detector.min_sessions
+            )
+        )
     )?;
     match report.findings {
-        Some(count) => writeln!(writer, "findings: {count}")?,
+        Some(found) => writeln!(
+            writer,
+            "{}",
+            row("Findings", &format!("{found} at current thresholds"))
+        )?,
         None => writeln!(
             writer,
-            "findings: not computed (run `status --with-findings`)"
+            "{}",
+            row(
+                "Findings",
+                "not computed — run `autophagy status --with-findings`"
+            )
         )?,
     }
-
-    if report.candidates.is_empty() {
-        writeln!(writer, "candidates: none")?;
+    let lessons = if report.candidates.is_empty() {
+        "none yet — run `autophagy mutations propose`".to_owned()
     } else {
-        let summary = report
+        report
             .candidates
             .iter()
-            .map(|(state, count)| format!("{count} {state}"))
+            .map(|(state, count)| match state.as_str() {
+                "candidate" => format!("{count} awaiting review"),
+                other => format!("{count} {other}"),
+            })
             .collect::<Vec<_>>()
-            .join(" · ");
-        writeln!(writer, "candidates: {summary}")?;
-    }
+            .join(" · ")
+    };
+    writeln!(writer, "{}", row("Lessons", &lessons))?;
+    writeln!(writer)?;
 
-    if report.daemon.supported {
-        writeln!(
-            writer,
-            "daemon ({}): unit {} · loaded {} · configured interval {}s",
-            report.daemon.platform,
-            if report.daemon.unit_present {
-                "present"
-            } else {
-                "absent"
-            },
-            describe(report.daemon.job_loaded),
-            report.daemon.configured_interval_seconds
-        )?;
+    let daemon = if report.daemon.supported {
+        let interval = report.daemon.configured_interval_seconds;
+        match (report.daemon.unit_present, report.daemon.job_loaded) {
+            (true, Some(true)) => format!(
+                "running · checks every {interval}s ({})",
+                report.daemon.platform
+            ),
+            (true, _) => format!(
+                "installed but not running ({}) · `autophagy daemon status` for details",
+                report.daemon.platform
+            ),
+            (false, _) => {
+                "not installed — `autophagy daemon install` enables background watching".to_owned()
+            }
+        }
     } else {
-        writeln!(writer, "daemon: unsupported on this platform")?;
-    }
-
+        "unsupported on this platform — use `autophagy watch` under your own supervisor".to_owned()
+    };
+    writeln!(writer, "{}", row("Daemon", &daemon))?;
     writeln!(
         writer,
-        "config: {}{}",
-        report.config_path,
-        if report.config_present {
-            ""
-        } else {
-            " (not present — using defaults)"
-        }
+        "{}",
+        row(
+            "Config",
+            &format!(
+                "{}{}",
+                report.config_path,
+                if report.config_present {
+                    ""
+                } else {
+                    " (not present — using defaults)"
+                }
+            )
+        )
     )?;
     Ok(())
 }
 
-fn describe(loaded: Option<bool>) -> &'static str {
-    match loaded {
-        Some(true) => "yes",
-        Some(false) => "no",
-        None => "unknown",
+/// Group an integer's digits with thousands separators (`69,400`).
+fn group(value: i64) -> String {
+    let digits = value.unsigned_abs().to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    if value < 0 {
+        format!("-{grouped}")
+    } else {
+        grouped
     }
 }
 
