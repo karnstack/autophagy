@@ -72,11 +72,35 @@ autophagy setup \
   `--index-metadata <key>` indexes an already-redacted metadata key.
 - `--monitor` installs background monitoring; `--interval <seconds>` sets its
   cycle interval.
+- `--model-backend <none|claude-cli|codex-cli|ollama>` answers the model
+  question; `none` (the default) leaves any existing choice untouched.
 - `--yes` runs without prompting, accepting the flags as given.
 
 With `--output json`, setup prints a single structured report (adapters detected
 and imported, whether an existing database was reindexed, digest counts, and
 whether monitoring was installed) instead of the guided prose.
+
+## Choosing a model backend
+
+Autophagy is fully functional without any model — the deterministic engine
+finds patterns and drafts candidates on its own. Setup asks one optional
+question: whether a model should enrich those candidates. The choices offered
+are the ones actually available on your machine:
+
+- **none** — the default; nothing changes.
+- **claude / codex** — reuse the coding-agent CLI you are already logged into.
+  The small structured prompt (template fields and evidence IDs, never raw
+  session text) is sent to that vendor's cloud through your existing login, and
+  `mutations synthesize` will require `--allow-remote-endpoint` as explicit
+  consent. Costs come out of your existing plan; per-candidate token usage is
+  shown in the output.
+- **ollama** — a local Ollama server at `localhost:11434`; zero marginal cost.
+
+On any choice other than `none`, setup writes a ready-to-use
+`synthesis-manifest.json` next to the config file, records the provider and
+manifest path in the config so `mutations synthesize` picks them up
+automatically, and prints the exact command to try. It never runs synthesis on
+its own. See the [synthesis guide](synthesis.md) for details and costs.
 
 ## Healing an already-imported database
 
