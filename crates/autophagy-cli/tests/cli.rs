@@ -1638,6 +1638,102 @@ fn run_watch_summary(database: &Path, claude_config_dir: &Path) -> Value {
     serde_json::from_str(last).expect("summary JSON")
 }
 
+#[test]
+fn detection_findings_are_cached_and_report_progress() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let indexable = directory.path().join("indexable.jsonl");
+    let database = directory.path().join("autophagy.db");
+    fs::write(&indexable, INDEXABLE_JSONL).expect("write fixture");
+
+    run_json(
+        &database,
+        [
+            "import",
+            indexable.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:cache",
+            "--index-tool-input",
+        ],
+    );
+
+    // Run `patterns`, returning the parsed report and captured stderr so we can
+    // observe whether a fresh detection pass actually ran (it prints a progress
+    // line to stderr) versus being served from the cache (silent).
+    let run = |args: &[&str]| -> (Value, String) {
+        let output = command(&database)
+            .args(["--output", "json"])
+            .args(args)
+            .output()
+            .expect("run command");
+        assert!(
+            output.status.success(),
+            "command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            serde_json::from_slice(&output.stdout).expect("JSON output"),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    // First pass computes fresh and reports progress.
+    let (first, first_stderr) = run(&["patterns"]);
+    assert!(
+        first_stderr.contains("digesting"),
+        "first pass should report detection progress: {first_stderr}"
+    );
+
+    // A second identical pass is a cache hit: byte-for-byte identical findings
+    // (exact evidence IDs included) and no fresh detection pass.
+    let (second, second_stderr) = run(&["patterns"]);
+    assert_eq!(
+        first["result"], second["result"],
+        "cache hit must return identical findings"
+    );
+    assert!(
+        !second_stderr.contains("digesting"),
+        "an unchanged corpus at unchanged thresholds must not recompute: {second_stderr}"
+    );
+
+    // Changing thresholds invalidates the key, forcing a fresh pass.
+    let (_, retuned_stderr) = run(&["patterns", "--min-occurrences", "1"]);
+    assert!(
+        retuned_stderr.contains("digesting"),
+        "a threshold change must invalidate the cache: {retuned_stderr}"
+    );
+
+    // --recompute forces a fresh pass even on an otherwise-cached key.
+    let (_, forced_stderr) = run(&["patterns", "--recompute"]);
+    assert!(
+        forced_stderr.contains("digesting"),
+        "--recompute must always run a fresh pass: {forced_stderr}"
+    );
+
+    // A new import changes the corpus and invalidates the cache.
+    let more = directory.path().join("more.jsonl");
+    fs::write(&more, VALID_JSONL).expect("write second fixture");
+    run_json(
+        &database,
+        [
+            "import",
+            more.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:cache-2",
+        ],
+    );
+    let (_, after_import_stderr) = run(&["patterns"]);
+    assert!(
+        after_import_stderr.contains("digesting"),
+        "a new import must invalidate the cache: {after_import_stderr}"
+    );
+    // The corpus is stable again, so the next identical pass is a hit.
+    let (_, repeat_stderr) = run(&["patterns"]);
+    assert!(
+        !repeat_stderr.contains("digesting"),
+        "the cache should be warm again after the invalidating import: {repeat_stderr}"
+    );
+}
+
 fn run_json<const N: usize>(database: &Path, args: [&str; N]) -> Value {
     let output = command(database)
         .args(["--output", "json"])

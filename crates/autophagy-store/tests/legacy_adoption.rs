@@ -99,16 +99,18 @@ fn known_legacy_v8_database_is_adopted_and_data_preserved() {
         "precondition: legacy v8 ledger"
     );
 
-    // First open through the store adopts the baseline.
+    // First open through the store adopts the baseline, collapsing the eight
+    // legacy rows to the v1 baseline, then applies the post-baseline chain (v2)
+    // on top — landing on the current released schema.
     {
         let store = EventStore::open(&path).expect("open adopts legacy database");
-        assert_eq!(store.schema_version().expect("schema version"), 1);
+        assert_eq!(store.schema_version().expect("schema version"), 2);
     }
 
     assert_eq!(
         ledger_state(&path),
-        (1, 1, 1),
-        "ledger collapsed to a single v1 baseline row and user_version reset"
+        (2, 2, 2),
+        "legacy chain replaced by the released baseline chain and user_version reset"
     );
     assert_eq!(
         data_counts(&path),
@@ -116,12 +118,12 @@ fn known_legacy_v8_database_is_adopted_and_data_preserved() {
         "all events, sessions, candidates, evidence, and audit rows preserved"
     );
 
-    // Second open is a pure no-op: still v1, still one ledger row, data intact.
+    // Second open is a pure no-op: same schema, same ledger, data intact.
     {
         let store = EventStore::open(&path).expect("second open is a no-op");
-        assert_eq!(store.schema_version().expect("schema version"), 1);
+        assert_eq!(store.schema_version().expect("schema version"), 2);
     }
-    assert_eq!(ledger_state(&path), (1, 1, 1));
+    assert_eq!(ledger_state(&path), (2, 2, 2));
     assert_eq!(data_counts(&path), before);
 }
 

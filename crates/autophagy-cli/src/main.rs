@@ -2,6 +2,7 @@
 
 mod config;
 mod daemon;
+mod detection;
 mod setup;
 mod status;
 mod watch;
@@ -38,8 +39,7 @@ use autophagy_install::{
 };
 use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
 use autophagy_patterns::{
-    DetectionDiagnostics, DetectionReport, DetectorConfig, EvidencePacket, Observation, detect,
-    detect_with_report,
+    DetectionDiagnostics, DetectionReport, DetectorConfig, EvidencePacket, Observation,
 };
 use autophagy_replay::{
     CounterfactualOutcome, ExpectedAction, ReplayDraftError, ReplayEvaluationError, ReplayReport,
@@ -216,6 +216,10 @@ enum Commands {
 
         #[command(flatten)]
         thresholds: ThresholdArgs,
+
+        /// Ignore any cached findings and run a fresh detection pass.
+        #[arg(long)]
+        recompute: bool,
     },
 
     /// List deterministic Evidence Packet v0.1 findings.
@@ -226,6 +230,10 @@ enum Commands {
 
         #[command(flatten)]
         thresholds: ThresholdArgs,
+
+        /// Ignore any cached findings and run a fresh detection pass.
+        #[arg(long)]
+        recompute: bool,
     },
 
     /// Manage review-only, zero-permission mutation candidates.
@@ -1275,27 +1283,31 @@ fn execute(
         Commands::Digest {
             project,
             thresholds,
+            recompute,
         } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
-            let events = store.list_events_for_detection(project.as_deref())?;
-            let report = detect_with_report(
-                &events,
+            let report = detection::detect_cached(
+                &store,
+                project.as_deref(),
                 config::resolve_thresholds(leaf, thresholds, config),
-            );
+                recompute,
+            )?;
             Ok(CommandReport::Digest(digest_report(report)?))
         }
         Commands::Patterns {
             project,
             thresholds,
+            recompute,
         } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
-            let events = store.list_events_for_detection(project.as_deref())?;
-            let report = detect_with_report(
-                &events,
+            let report = detection::detect_cached(
+                &store,
+                project.as_deref(),
                 config::resolve_thresholds(leaf, thresholds, config),
-            );
+                recompute,
+            )?;
             let DetectionDiagnostics {
                 events_scanned,
                 sessions_scanned,
@@ -1492,11 +1504,13 @@ fn execute_mutation_action(
             thresholds,
             dry_run,
         } => {
-            let events = store.list_events_for_detection(project.as_deref())?;
-            let findings = detect(
-                &events,
+            let findings = detection::detect_cached(
+                &store,
+                project.as_deref(),
                 config::resolve_thresholds(matches, thresholds, config),
-            );
+                false,
+            )?
+            .findings;
             let generated = generate_candidates(&findings);
             let mut registrations = Vec::new();
             if !dry_run {
@@ -1613,11 +1627,13 @@ fn execute_mutation_action(
                     }
                 }
             }
-            let events = store.list_events_for_detection(project.as_deref())?;
-            let findings = detect(
-                &events,
+            let findings = detection::detect_cached(
+                &store,
+                project.as_deref(),
                 config::resolve_thresholds(matches, thresholds, config),
-            );
+                false,
+            )?
+            .findings;
             let synthesized =
                 synthesize_candidates(&findings, &model_manifest, synthesis_provider.as_ref());
             let (total_prompt_tokens, total_completion_tokens) = aggregate_usage(&synthesized);

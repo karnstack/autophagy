@@ -8,14 +8,15 @@ use rusqlite::{
 use time::OffsetDateTime;
 
 use crate::{
-    AdapterActivity, DeleteAllSummary, DeleteSummary, InsertOutcome, InstallationRegistration,
-    InstallationTransitionOutcome, MutationDetails, MutationInstallationRecord, MutationRecord,
-    MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
-    MutationTransition, MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal,
-    RankingSignalKind, RebuildSummary, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
-    RetrievalFilterField, RetrievalHit, RetrievalMatchKind, RetrievalQuery, SearchHit,
-    SearchProjection, SessionSummary, ShadowRegisterOutcome, ShadowRegistration, SourceCursor,
-    SourceIdentity, StoreError, StoreStats, migration, util,
+    AdapterActivity, DeleteAllSummary, DeleteSummary, DetectionFingerprint, InsertOutcome,
+    InstallationRegistration, InstallationTransitionOutcome, MutationDetails,
+    MutationInstallationRecord, MutationRecord, MutationRegisterOutcome, MutationRegistration,
+    MutationReplayRecord, MutationShadowRecord, MutationTransition, MutationTransitionOutcome,
+    PruneSummary, RankingExplanation, RankingSignal, RankingSignalKind, RebuildSummary,
+    ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter, RetrievalFilterField, RetrievalHit,
+    RetrievalMatchKind, RetrievalQuery, SearchHit, SearchProjection, SessionSummary,
+    ShadowRegisterOutcome, ShadowRegistration, SourceCursor, SourceIdentity, StoreError,
+    StoreStats, migration, util,
 };
 
 /// Score contribution for an exact normalized-signature match, in basis points.
@@ -422,6 +423,119 @@ impl EventStore {
             Event::from_json_str(&json).map_err(StoreError::from)
         })
         .collect()
+    }
+
+    /// Cheap content fingerprint of the events a detection pass would scan under
+    /// the same optional project filter as [`Self::list_events_for_detection`].
+    ///
+    /// Computed from indexed columns only, never by deserializing event JSON, so
+    /// it is orders of magnitude cheaper than detection itself. The caller folds
+    /// it, the effective thresholds, the project filter, and the detector spec
+    /// version into the [`findings cache`](Self::cached_findings) key; any event
+    /// change moves at least one field and so misses without explicit
+    /// invalidation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn detection_fingerprint(
+        &self,
+        project: Option<&str>,
+    ) -> Result<DetectionFingerprint, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT
+                count(*),
+                coalesce(max(row_id), 0),
+                count(DISTINCT session_id),
+                coalesce(max(imported_at), '')
+             FROM events
+             WHERE (?1 IS NULL OR project_path = ?1)",
+            [project],
+            |row| {
+                Ok(DetectionFingerprint {
+                    event_count: row.get(0)?,
+                    max_row_id: row.get(1)?,
+                    session_count: row.get(2)?,
+                    import_watermark: row.get(3)?,
+                })
+            },
+        )?)
+    }
+
+    /// Global corpus generation stamp: the whole-store fingerprint hashed to 32
+    /// bytes. Written alongside each cache entry so a write can garbage-collect
+    /// every entry from a prior corpus state in one statement, keeping the cache
+    /// bounded regardless of how many threshold or project variants were stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn detection_generation(&self) -> Result<[u8; 32], StoreError> {
+        let fingerprint = self.detection_fingerprint(None)?;
+        let material = format!(
+            "generation/v1\0{}\0{}\0{}",
+            fingerprint.event_count, fingerprint.max_row_id, fingerprint.import_watermark
+        );
+        Ok(util::sha256(material.as_bytes()))
+    }
+
+    /// Look up a previously stored detection report by its exact validity key.
+    ///
+    /// Returns the serialized report the caller stored under `cache_key`, or
+    /// `None` on a miss. The key is the caller's sole validity contract: the
+    /// store treats the payload as opaque JSON and never interprets it, so the
+    /// cache stays independent of the detector types it memoizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn cached_findings(&self, cache_key: &[u8; 32]) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT report_json FROM findings_cache WHERE cache_key = ?1",
+                [cache_key.as_slice()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// Store a serialized detection report under its validity `cache_key`,
+    /// tagged with the current corpus `generation`.
+    ///
+    /// The write first drops every entry from an older generation, then inserts
+    /// (or replaces) this one, all in one immediate transaction. Concurrent
+    /// current-generation entries at other thresholds or project filters
+    /// survive; only stale generations are collected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when a transactional `SQLite` operation fails.
+    pub fn store_findings(
+        &self,
+        cache_key: &[u8; 32],
+        generation: &[u8; 32],
+        report_json: &str,
+    ) -> Result<(), StoreError> {
+        let created_at = util::now_timestamp()?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM findings_cache WHERE generation <> ?1",
+            [generation.as_slice()],
+        )?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO
+               findings_cache(cache_key, generation, report_json, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                cache_key.as_slice(),
+                generation.as_slice(),
+                report_json,
+                created_at
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Number of rows currently in the exact normalized-signature index.

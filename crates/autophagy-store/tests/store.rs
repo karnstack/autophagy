@@ -30,7 +30,7 @@ fn migrations_persist_and_reopen_cleanly() {
 
     {
         let mut store = EventStore::open(&database).expect("store should open");
-        assert_eq!(store.schema_version().expect("schema version"), 1);
+        assert_eq!(store.schema_version().expect("schema version"), 2);
         assert!(matches!(
             store
                 .insert_event(&source, &event, &SearchProjection::default())
@@ -40,7 +40,7 @@ fn migrations_persist_and_reopen_cleanly() {
     }
 
     let reopened = EventStore::open(&database).expect("store should reopen");
-    assert_eq!(reopened.schema_version().expect("schema version"), 1);
+    assert_eq!(reopened.schema_version().expect("schema version"), 2);
     assert_eq!(
         reopened
             .get_event(event.event_id.as_str())
@@ -954,6 +954,97 @@ fn claude_code_installation_registers_audits_and_reverses() {
         .find(|transition| transition.to_state == "retired")
         .expect("retire transition");
     assert_eq!(retire.reason, "Claude Code repo skill uninstalled");
+}
+
+#[test]
+fn detection_fingerprint_tracks_the_scanned_corpus() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    let source = source("fingerprint");
+
+    let empty = store
+        .detection_fingerprint(None)
+        .expect("empty fingerprint");
+    assert_eq!(empty.event_count, 0);
+    assert_eq!(empty.max_row_id, 0);
+    assert_eq!(empty.session_count, 0);
+    assert_eq!(empty.import_watermark, "");
+
+    let start = session_event(
+        "evt_fp_start",
+        "ses_fp",
+        EventKind::SessionStarted,
+        "2026-07-16T10:00:00Z",
+        0,
+    );
+    store
+        .insert_event(&source, &start, &SearchProjection::default())
+        .expect("insert start");
+    let failure = tool_failure("evt_fp_fail", "ses_fp", "2026-07-16T10:01:00Z", 1);
+    store
+        .insert_event(&source, &failure, &SearchProjection::default())
+        .expect("insert failure");
+
+    let after = store.detection_fingerprint(None).expect("fingerprint");
+    assert_eq!(after.event_count, 2, "both events counted");
+    assert_eq!(after.max_row_id, 2, "highest row id advances");
+    assert_eq!(after.session_count, 1, "one distinct session");
+    assert!(
+        !after.import_watermark.is_empty(),
+        "import watermark set once events exist"
+    );
+
+    // The project filter scopes the fingerprint to matching events only.
+    let scoped = store
+        .detection_fingerprint(Some("/nonexistent"))
+        .expect("scoped fingerprint");
+    assert_eq!(scoped.event_count, 0);
+}
+
+#[test]
+fn findings_cache_round_trips_and_collects_stale_generations() {
+    let store = EventStore::open_in_memory().expect("store");
+    let key_a = [1_u8; 32];
+    let key_b = [2_u8; 32];
+    let generation_one = [9_u8; 32];
+
+    assert_eq!(
+        store.cached_findings(&key_a).expect("initial miss"),
+        None,
+        "an unwritten key misses"
+    );
+
+    store
+        .store_findings(&key_a, &generation_one, "{\"findings\":[]}")
+        .expect("store a");
+    store
+        .store_findings(&key_b, &generation_one, "{\"findings\":[1]}")
+        .expect("store b");
+    assert_eq!(
+        store.cached_findings(&key_a).expect("hit a").as_deref(),
+        Some("{\"findings\":[]}")
+    );
+    assert_eq!(
+        store.cached_findings(&key_b).expect("hit b").as_deref(),
+        Some("{\"findings\":[1]}"),
+        "concurrent current-generation entries coexist"
+    );
+
+    // Writing under a new generation collects every prior-generation entry.
+    let key_c = [3_u8; 32];
+    let generation_two = [8_u8; 32];
+    store
+        .store_findings(&key_c, &generation_two, "{\"findings\":[2]}")
+        .expect("store c");
+    assert_eq!(
+        store.cached_findings(&key_a).expect("evicted a"),
+        None,
+        "stale-generation entries are collected"
+    );
+    assert_eq!(store.cached_findings(&key_b).expect("evicted b"), None);
+    assert_eq!(
+        store.cached_findings(&key_c).expect("hit c").as_deref(),
+        Some("{\"findings\":[2]}")
+    );
 }
 
 fn source(instance_key: &str) -> SourceIdentity {

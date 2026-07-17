@@ -9,7 +9,6 @@
 
 use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
-use autophagy_patterns::detect;
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -142,14 +141,19 @@ pub fn run(
         })
         .collect();
 
-    // Thresholds are cheap (config or defaults). Findings are opt-in: computing
-    // them means loading and deserializing every event and running a full
-    // detection pass — digest-cost on a large store — so `status` stays fast by
-    // default and only pays that cost when `--with-findings` is passed.
+    // Thresholds are cheap (config or defaults). Findings are opt-in: the first
+    // pass at a given corpus and thresholds loads and deserializes every event
+    // and runs a full detection pass — digest-cost on a large store — so
+    // `status` stays fast by default and only pays that cost when
+    // `--with-findings` is passed. The result is cached in the store, so
+    // repeats at an unchanged corpus are instant.
     let detector = config.detector_config();
     let findings = if with_findings {
-        let events = store.list_events_for_detection(None)?;
-        Some(detect(&events, detector).len())
+        Some(
+            crate::detection::detect_cached(&store, None, detector, false)?
+                .findings
+                .len(),
+        )
     } else {
         None
     };

@@ -26,11 +26,18 @@ struct Migration {
 /// The baseline is schema-identical to that chain's final state, proven by
 /// `tests/schema_equivalence.rs`. From the first release onward this chain is
 /// ordered and immutable — add new migrations, never edit an applied one.
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "initial schema",
-    sql: include_str!("../migrations/0001_initial_schema.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "initial schema",
+        sql: include_str!("../migrations/0001_initial_schema.sql"),
+    },
+    Migration {
+        version: 2,
+        description: "derived detection-findings cache",
+        sql: include_str!("../migrations/0002_findings_cache.sql"),
+    },
+];
 
 /// SHA-256 checksums of the eight pre-release development migrations, in order
 /// (v1..=v8). Exactly one database was ever built by that chain — the author's
@@ -217,22 +224,23 @@ mod tests {
     use crate::{StoreError, util};
 
     #[test]
-    fn fresh_database_applies_the_v1_baseline() {
+    fn fresh_database_applies_the_full_chain() {
         let mut connection = Connection::open_in_memory().expect("database");
         apply(&mut connection).expect("initial migration");
 
+        let latest = MIGRATIONS.last().expect("migration").version;
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .expect("schema version"),
-            1
+            latest
         );
         assert_eq!(
             connection
                 .query_row("SELECT count(*) FROM schema_migrations", [], |row| row
                     .get::<_, i64>(0))
                 .expect("ledger rows"),
-            1
+            i64::try_from(MIGRATIONS.len()).expect("chain length fits i64")
         );
         // A representative table from the squashed tail exists at v1.
         assert!(
@@ -248,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn reapplying_the_baseline_is_a_no_op() {
+    fn reapplying_the_chain_is_a_no_op() {
         let mut connection = Connection::open_in_memory().expect("database");
         apply(&mut connection).expect("initial migration");
         apply(&mut connection).expect("second apply");
@@ -258,7 +266,7 @@ mod tests {
                 .query_row("SELECT count(*) FROM schema_migrations", [], |row| row
                     .get::<_, i64>(0))
                 .expect("ledger rows"),
-            1
+            i64::try_from(MIGRATIONS.len()).expect("chain length fits i64")
         );
     }
 

@@ -14,8 +14,9 @@ release, while no external database existed (see ADR 0012). From the first
 release onward the chain is ordered and immutable — new migrations are added,
 never edited. The squash is schema-identical to the old chain's final state,
 proven by `tests/schema_equivalence.rs`, and the single legacy database is
-adopted to the v1 ledger in place on first open. The logical schema and its
-trust boundaries are summarized here.
+adopted to the v1 ledger in place on first open. Migration `0002` then adds the
+derived `findings_cache` table (see ADR 0013). The logical schema and its trust
+boundaries are summarized here.
 
 ```sql
 CREATE TABLE schema_migrations (
@@ -259,6 +260,14 @@ CREATE TABLE event_signatures (
 
 CREATE INDEX event_signatures_lookup
   ON event_signatures(signature, event_row_id);
+
+-- Migration 0002: derived detection-findings cache (see ADR 0013).
+CREATE TABLE findings_cache (
+  cache_key    BLOB PRIMARY KEY CHECK (length(cache_key) = 32),
+  generation   BLOB NOT NULL CHECK (length(generation) = 32),
+  report_json  TEXT NOT NULL CHECK (json_valid(report_json)),
+  created_at   TEXT NOT NULL
+) STRICT;
 ```
 
 Insert, update, and delete triggers keep the external-content FTS5 table aligned
@@ -276,6 +285,19 @@ transaction as the event. Because a signature embeds command text, it is indexed
 only when the source's tool input is approved for indexing. Rows cascade on event
 deletion, so quarantine, prune, and delete-all keep the index consistent without
 a separate deletion path.
+
+`findings_cache` (migration 0002) memoizes the deterministic detection report so
+the findings-consuming commands do not re-run a full detection pass over every
+event on each invocation. It is derived, deterministic, local-only data holding
+no new source text — only the serialized report, whose findings carry the exact
+evidence identifiers the detectors already produce. `cache_key` is a SHA-256 over
+every input the pass depends on (detector spec version, effective thresholds,
+project filter, and a cheap content fingerprint of the events in scope: event
+count, max `row_id`, and the monotonic max `imported_at` watermark), so any
+import, delete, or prune changes the key and misses without explicit
+invalidation. `generation` tags each row with the global corpus state so a write
+collects entries from superseded states. The cache is fully reconstructable at
+any time by deleting every row; see ADR 0013.
 
 ## Idempotency
 

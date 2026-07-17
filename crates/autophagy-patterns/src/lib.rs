@@ -23,6 +23,14 @@ use autophagy_events::Event;
 /// Maximum near-threshold observations retained per detection pass.
 const OBSERVATION_LIMIT: usize = 5;
 
+/// Version tag for the deterministic detection and signature-normalization
+/// contract, folded into the persisted findings-cache key.
+///
+/// Bump this whenever detector output or the signature normalization in
+/// `autophagy-events` changes, so every previously persisted cache entry is
+/// automatically treated as stale rather than served from an outdated pass.
+pub const DETECTION_SPEC_VERSION: &str = "detection/v1";
+
 /// Thresholds shared by deterministic recurrence detectors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DetectorConfig {
