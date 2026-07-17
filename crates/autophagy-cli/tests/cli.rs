@@ -1734,6 +1734,241 @@ fn detection_findings_are_cached_and_report_progress() {
     );
 }
 
+/// A read-only command must report the database's real footprint — the store
+/// opens in WAL mode, so a naive read of the main file right after migrations
+/// undercounts a brand-new database (the ~4 KiB header, not the migrated
+/// schema). `status` sums the WAL sidecars so the number matches disk, and marks
+/// a database it just created as new rather than pre-existing.
+#[test]
+fn status_reports_post_migration_size_for_a_new_database() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+
+    let db_json = directory.path().join("fresh-json.db");
+    assert!(!db_json.exists(), "precondition: database absent");
+    let status = run_json(&db_json, ["status"]);
+    let size = status["result"]["database"]["size_bytes"]
+        .as_u64()
+        .expect("size_bytes present");
+    assert!(
+        size > 100_000,
+        "post-migration size must reflect the real footprint, got {size} bytes"
+    );
+    assert_eq!(
+        status["result"]["database"]["exists"], false,
+        "a database created by this very command reports as new, not pre-existing"
+    );
+
+    let db_text = directory.path().join("fresh-text.db");
+    let output = command(&db_text)
+        .arg("status")
+        .output()
+        .expect("run status");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("created new database"),
+        "text status must say the database was just created: {stdout}"
+    );
+}
+
+/// On an empty database the search line points at `setup` (there is nothing to
+/// reindex yet); once events exist but are unindexed, the reindex hint is the
+/// correct one and returns.
+#[test]
+fn status_search_hint_points_at_setup_before_import_and_reindex_after() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+
+    let fresh = directory.path().join("fresh.db");
+    let output = command(&fresh).arg("status").output().expect("run status");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("autophagy setup"),
+        "an empty database's search line must point at setup: {stdout}"
+    );
+    assert!(
+        !stdout.contains("reindex"),
+        "an empty database must not suggest reindex — nothing to rebuild: {stdout}"
+    );
+
+    // Events imported without indexing: reindex is now the right and only fix.
+    let imported = directory.path().join("imported.db");
+    let input = directory.path().join("events.jsonl");
+    fs::write(&input, VALID_JSONL).expect("write fixture");
+    run_json(
+        &imported,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:cli",
+        ],
+    );
+    let output = command(&imported)
+        .arg("status")
+        .output()
+        .expect("run status");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("reindex --index-tool-input"),
+        "an imported-but-unindexed database keeps the reindex hint: {stdout}"
+    );
+}
+
+/// Empty `sessions` and `search` output guides the new user in text, while the
+/// JSON shapes stay stable empty arrays so machine consumers get no prose.
+#[test]
+fn empty_sessions_and_search_guide_the_user_but_keep_json_arrays() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("empty.db");
+
+    // sessions: guidance instead of a bare header row; JSON is an empty array.
+    let output = command(&database)
+        .arg("sessions")
+        .output()
+        .expect("run sessions");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no sessions imported yet"),
+        "empty sessions prints guidance, not a bare header: {stdout}"
+    );
+    assert!(
+        !stdout.contains("SESSION\tSOURCE"),
+        "no bare tab-separated header row on empty sessions: {stdout}"
+    );
+    let sessions_json = run_json(&database, ["sessions"]);
+    assert_eq!(
+        sessions_json["result"]
+            .as_array()
+            .expect("sessions array")
+            .len(),
+        0,
+        "sessions JSON stays an empty array"
+    );
+
+    // search on an empty database explains nothing was imported; JSON is [].
+    let output = command(&database)
+        .args(["search", "anything"])
+        .output()
+        .expect("run search");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no events imported yet"),
+        "search against an empty database explains why it is empty: {stdout}"
+    );
+    let search_json = run_json(&database, ["search", "anything"]);
+    assert!(
+        search_json["result"]
+            .as_array()
+            .expect("search array")
+            .is_empty(),
+        "search JSON result stays an empty array"
+    );
+
+    // Once events exist, a genuine miss reads as a miss — not "nothing imported".
+    let input = directory.path().join("events.jsonl");
+    fs::write(&input, VALID_JSONL).expect("write fixture");
+    run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--instance-key",
+            "fixture:cli",
+        ],
+    );
+    let output = command(&database)
+        .args(["search", "zzznomatch"])
+        .output()
+        .expect("run search");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no retrieval matches"),
+        "a real miss on a populated database still says so: {stdout}"
+    );
+    assert!(
+        !stdout.contains("no events imported"),
+        "a populated database must not claim nothing was imported: {stdout}"
+    );
+}
+
+/// `setup` must warn, before writing, that it saves settings to the GLOBAL
+/// config file when the database was pointed elsewhere and no
+/// `AUTOPHAGY_CONFIG_DIR` isolation is in effect — otherwise a throwaway
+/// `--database /tmp/…` run silently rewrites the user's real global config.
+///
+/// The "global" location is faked by overriding `HOME` (and `XDG_DATA_HOME` for
+/// Linux) to a throwaway directory, so the resolved config path lands under the
+/// temp home and never the developer's real one, while `AUTOPHAGY_CONFIG_DIR`
+/// stays unset so the notice condition (config is global) genuinely holds.
+#[test]
+fn setup_warns_before_writing_global_config_for_explicit_database() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let database = workspace.path().join("throwaway.db");
+    let empty_claude = workspace.path().join("empty-claude");
+    fs::create_dir_all(&empty_claude).expect("mkdir");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_autophagy"))
+        .args(["--database", database.to_str().expect("UTF-8 path")])
+        .args(["setup", "--yes", "--adapter", "claude-code"])
+        // Fake the global config location under a throwaway home and leave
+        // AUTOPHAGY_CONFIG_DIR unset so setup treats the config as global.
+        .env_remove("AUTOPHAGY_CONFIG_DIR")
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join("xdg"))
+        // No real adapter history under the throwaway home: import nothing.
+        .env("CLAUDE_CONFIG_DIR", &empty_claude)
+        .output()
+        .expect("run setup");
+    assert!(
+        output.status.success(),
+        "setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("settings are saved globally to"),
+        "the global-config notice must appear on stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("AUTOPHAGY_CONFIG_DIR"),
+        "the notice must name the isolation escape hatch: {stderr}"
+    );
+    assert!(
+        stderr.contains(home.path().to_str().expect("UTF-8 home")),
+        "the config path in the notice must resolve under the throwaway home, \
+         never the real one: {stderr}"
+    );
+}
+
+/// The mirror of the above: when `AUTOPHAGY_CONFIG_DIR` isolates the run (as the
+/// test harness always does), the global-config notice must stay silent.
+#[test]
+fn setup_omits_global_notice_when_config_dir_is_isolated() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let empty_claude = directory.path().join("empty-claude");
+    fs::create_dir_all(&empty_claude).expect("mkdir");
+
+    // command() sets AUTOPHAGY_CONFIG_DIR to the database's temporary directory,
+    // so the config is isolated and the notice must not fire.
+    let output = command(&database)
+        .args(["--output", "json"])
+        .args(["setup", "--yes", "--adapter", "claude-code"])
+        .env("CLAUDE_CONFIG_DIR", &empty_claude)
+        .output()
+        .expect("run setup");
+    assert!(
+        output.status.success(),
+        "setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("saved globally"),
+        "isolated runs must not print the global-config notice: {stderr}"
+    );
+}
+
 fn run_json<const N: usize>(database: &Path, args: [&str; N]) -> Value {
     let output = command(database)
         .args(["--output", "json"])

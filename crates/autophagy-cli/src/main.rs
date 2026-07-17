@@ -718,7 +718,7 @@ impl ChallengeCheck {
 enum CommandReport {
     Import(ImportReport),
     Sessions(Vec<SessionSummary>),
-    Search(Vec<RetrievalHit>),
+    Search(SearchReport),
     Digest(DigestReport),
     Patterns(PatternsReport),
     #[serde(rename = "mutations_propose")]
@@ -751,6 +751,25 @@ enum CommandReport {
     Setup(setup::SetupReport),
     Status(Box<status::StatusReport>),
     Config(config::ConfigReport),
+}
+
+/// Retrieval hits paired with whether the database held any events at all.
+///
+/// The flag lets the text renderer distinguish "nothing was ever imported" from
+/// "imported, but this query matched nothing" — two very different situations
+/// for a new user. It never reaches the JSON surface: [`Serialize`] emits only
+/// the bare hit array, so `--output json` stays an array and machine consumers
+/// see no prose (an empty result is still `[]`).
+#[derive(Debug)]
+struct SearchReport {
+    hits: Vec<RetrievalHit>,
+    database_empty: bool,
+}
+
+impl Serialize for SearchReport {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.hits.serialize(serializer)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1278,7 +1297,14 @@ fn execute(
                 outcome: outcome.map(RetrievalOutcome::from),
                 limit,
             };
-            Ok(CommandReport::Search(store.retrieve(&retrieval)?))
+            let hits = store.retrieve(&retrieval)?;
+            // A zero-event store means nothing was ever imported, which the text
+            // renderer surfaces differently from a query that simply missed.
+            let database_empty = store.stats()?.events == 0;
+            Ok(CommandReport::Search(SearchReport {
+                hits,
+                database_empty,
+            }))
         }
         Commands::Digest {
             project,
@@ -2025,24 +2051,35 @@ fn write_report(
                 }
             },
             CommandReport::Sessions(sessions) => {
-                writeln!(writer, "SESSION\tSOURCE\tEVENTS\tLAST EVENT\tPROJECT")?;
-                for session in sessions {
-                    writeln!(
-                        writer,
-                        "{}\t{}\t{}\t{}\t{}",
-                        session.session_id,
-                        session.adapter,
-                        session.event_count,
-                        session.last_event_at,
-                        session.project_path.as_deref().unwrap_or("-")
-                    )?;
+                if sessions.is_empty() {
+                    writeln!(writer, "no sessions imported yet — run `autophagy setup`")?;
+                } else {
+                    writeln!(writer, "SESSION\tSOURCE\tEVENTS\tLAST EVENT\tPROJECT")?;
+                    for session in sessions {
+                        writeln!(
+                            writer,
+                            "{}\t{}\t{}\t{}\t{}",
+                            session.session_id,
+                            session.adapter,
+                            session.event_count,
+                            session.last_event_at,
+                            session.project_path.as_deref().unwrap_or("-")
+                        )?;
+                    }
                 }
             }
-            CommandReport::Search(hits) => {
-                if hits.is_empty() {
-                    writeln!(writer, "no retrieval matches")?;
+            CommandReport::Search(report) => {
+                if report.hits.is_empty() {
+                    if report.database_empty {
+                        writeln!(
+                            writer,
+                            "no events imported yet — run `autophagy setup` to import your sessions"
+                        )?;
+                    } else {
+                        writeln!(writer, "no retrieval matches")?;
+                    }
                 }
-                for hit in hits {
+                for hit in &report.hits {
                     writeln!(
                         writer,
                         "{}\t{}\t{} bps\t{}",

@@ -7,7 +7,11 @@
 //! is a COUNT-style query plus one deterministic detection pass; it works
 //! against an empty database and with no config file.
 
-use std::{collections::BTreeMap, io::Write, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -122,7 +126,7 @@ pub fn run(
     let existed_before = db_path.exists();
 
     let store = open_store(&db_path)?;
-    let size_bytes = std::fs::metadata(&db_path).ok().map(|meta| meta.len());
+    let size_bytes = on_disk_size(&db_path);
     let stats = store.stats()?;
     let signatures = store.signature_count()?;
     // Every indexed signature is an `operation/<version>|…` key. Rows that do not
@@ -250,7 +254,7 @@ pub fn write_text(report: &StatusReport, writer: &mut impl Write) -> std::io::Re
     let freshness = if db.exists {
         String::new()
     } else {
-        " · new database (nothing imported yet)".to_owned()
+        " · created new database (nothing imported yet)".to_owned()
     };
     writeln!(
         writer,
@@ -279,7 +283,13 @@ pub fn write_text(report: &StatusReport, writer: &mut impl Write) -> std::io::Re
             "{} command signatures indexed · exact recall on",
             group(i64::try_from(report.index.signatures).unwrap_or(i64::MAX))
         )
+    } else if report.database.events == 0 {
+        // Nothing imported yet: reindex has nothing to rebuild, so point the new
+        // user at the first step that actually populates the database.
+        "commands not indexed — run `autophagy setup` to import your sessions".to_owned()
     } else {
+        // Events exist but were imported without indexing; reindex is the right
+        // and only way to make their commands searchable.
         "commands not indexed — run `autophagy reindex --index-tool-input`".to_owned()
     };
     writeln!(writer, "{}", row("Search", &search))?;
@@ -440,6 +450,27 @@ fn group(value: i64) -> String {
     } else {
         grouped
     }
+}
+
+/// True on-disk footprint of the database: the main file plus its WAL and
+/// shared-memory sidecars.
+///
+/// The store opens in WAL journal mode, so the pages written by the migrations
+/// that `open_store` just ran live in `<db>-wal` until a checkpoint. Reading
+/// only the main file's length right after opening therefore undercounts a
+/// freshly created database — it reports the ~4 KiB header rather than the
+/// migrated schema — which is exactly the number a new user sees and disbelieves.
+/// Summing the sidecars makes the reported size match what the database occupies.
+fn on_disk_size(db_path: &Path) -> Option<u64> {
+    let mut total = std::fs::metadata(db_path).ok()?.len();
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = db_path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        if let Ok(meta) = std::fs::metadata(PathBuf::from(sidecar)) {
+            total += meta.len();
+        }
+    }
+    Some(total)
 }
 
 fn format_bytes(bytes: u64) -> String {
