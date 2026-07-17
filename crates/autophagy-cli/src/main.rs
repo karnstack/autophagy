@@ -870,6 +870,11 @@ struct MutationProposalReport {
     dry_run: bool,
     generated: Vec<GenerationOutcome>,
     registrations: Vec<MutationRegisterOutcome>,
+    /// Non-fatal registration notes, currently only immutable-package template
+    /// conflicts (see [`template_conflict_warning`]). Skipped from JSON when
+    /// empty so the machine surface is unchanged for conflict-free runs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
     /// Each generated candidate's CURRENT registry lifecycle state, keyed by
     /// mutation ID, fetched from the store after the registration attempt
     /// above. Deterministic generation re-derives the same mutation ID for
@@ -1974,6 +1979,7 @@ fn execute_mutation_action(
             .findings;
             let generated = generate_candidates(&findings);
             let mut registrations = Vec::new();
+            let mut warnings = Vec::new();
             if !dry_run {
                 for outcome in &generated {
                     let GenerationOutcome::Candidate { package } = outcome else {
@@ -1993,7 +1999,13 @@ fn execute_mutation_action(
                             .counterexample_event_ids
                             .clone(),
                     };
-                    registrations.push(store.register_mutation(&registration)?);
+                    match store.register_mutation(&registration) {
+                        Ok(outcome) => registrations.push(outcome),
+                        Err(StoreError::MutationContentConflict { mutation_id }) => {
+                            warnings.push(template_conflict_warning(&mutation_id));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
             }
             let current_states = mutation_states_by_id(
@@ -2007,6 +2019,7 @@ fn execute_mutation_action(
                 dry_run,
                 generated,
                 registrations,
+                warnings,
                 current_states,
             }))
         }
@@ -2139,7 +2152,13 @@ fn execute_mutation_action(
                             .counterexample_event_ids
                             .clone(),
                     };
-                    registrations.push(store.register_mutation(&registration)?);
+                    match store.register_mutation(&registration) {
+                        Ok(outcome) => registrations.push(outcome),
+                        Err(StoreError::MutationContentConflict { mutation_id }) => {
+                            warnings.push(template_conflict_warning(&mutation_id));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
             }
             let current_states = mutation_states_by_id(
@@ -3165,10 +3184,25 @@ fn display_state<'a>(
         .map_or("candidate", String::as_str)
 }
 
+/// Warning for a candidate whose evidence re-derived an already-registered
+/// mutation ID with different package content. Registered packages are
+/// immutable, so the stored package stays authoritative; this happens when the
+/// deterministic template evolved between the original registration and this
+/// run, and it must not abort the rest of the batch.
+fn template_conflict_warning(mutation_id: &str) -> String {
+    format!(
+        "mutation '{mutation_id}' is already registered with earlier-template content; \
+         the stored immutable package is kept"
+    )
+}
+
 fn write_mutation_proposal(
     writer: &mut impl Write,
     report: &MutationProposalReport,
 ) -> io::Result<()> {
+    for warning in &report.warnings {
+        writeln!(writer, "warning: {warning}")?;
+    }
     if report.generated.is_empty() {
         writeln!(writer, "no mutation candidates above evidence threshold")?;
     }

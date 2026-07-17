@@ -2634,3 +2634,86 @@ fn command(database: &Path) -> Command {
     }
     command
 }
+
+#[test]
+fn propose_and_synthesize_survive_immutable_template_conflicts() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+
+    // Preview the exact candidate generation would register today.
+    let preview = run_json(&database, ["mutations", "propose", "--dry-run"]);
+    let mut package: autophagy_mutations::MutationPackage =
+        serde_json::from_value(preview["result"]["generated"][0]["package"].clone())
+            .expect("generated package");
+    let mutation_id = package.mutation_id.clone();
+
+    // Register it as an earlier template revision would have: identical
+    // identity and evidence, different exclusion phrasing. The registry is
+    // immutable, so a later propose regenerating today's phrasing cannot
+    // overwrite it — and must not abort the batch over it either.
+    package.exclusions[0] = autophagy_mutations::LEGACY_ADVISORY_UNTIL_REPLAY_EXCLUSION.to_owned();
+    let mut store = autophagy_store::EventStore::open(&database).expect("store");
+    store
+        .register_mutation(&autophagy_store::MutationRegistration {
+            mutation_id: package.mutation_id.clone(),
+            source_finding_id: package.source_finding_id.clone(),
+            source_detector: package.source_detector.as_str().to_owned(),
+            equivalence_key: autophagy_mutations::equivalence_key(&package),
+            spec_version: package.spec_version.as_str().to_owned(),
+            semantic_version: package.version.clone(),
+            package: serde_json::to_value(&package).expect("package JSON"),
+            supporting_event_ids: package.hypothesis.supporting_event_ids.clone(),
+            counterexample_event_ids: package.hypothesis.counterexample_event_ids.clone(),
+        })
+        .expect("register earlier-template package");
+    drop(store);
+
+    // Text mode: the run succeeds, warns about the one conflict, and still
+    // lists every candidate with its real stored state.
+    let output = command(&database)
+        .args(["mutations", "propose"])
+        .output()
+        .expect("propose");
+    assert!(
+        output.status.success(),
+        "propose failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("earlier-template content"),
+        "missing conflict warning: {stdout}"
+    );
+
+    // JSON mode: the warning is machine-visible and the conflicted mutation
+    // still reports its current stored state.
+    let proposed = run_json(&database, ["mutations", "propose"]);
+    let warnings = proposed["result"]["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .expect("warning text")
+            .contains(&mutation_id)),
+        "warnings missing conflicted id: {warnings:?}"
+    );
+    assert_eq!(
+        proposed["result"]["current_states"][mutation_id.as_str()],
+        "candidate"
+    );
+
+    // The deterministic synthesize path takes the same non-fatal branch.
+    let synthesized = run_json(&database, ["mutations", "synthesize"]);
+    assert!(
+        synthesized["result"]["warnings"]
+            .as_array()
+            .expect("synthesis warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .expect("warning text")
+                .contains(&mutation_id))
+    );
+}
