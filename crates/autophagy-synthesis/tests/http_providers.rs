@@ -85,6 +85,7 @@ fn manifest(format: ModelFormat, endpoint: &str, timeout_ms: Option<u64>) -> Mod
             request_ms: Some(request_ms),
         }),
         api_key_env: None,
+        model: None,
     }
 }
 

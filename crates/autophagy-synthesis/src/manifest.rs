@@ -20,6 +20,10 @@ pub enum ManifestSpecVersion {
     /// `api_key_env` field for HTTP-backed providers.
     #[serde(rename = "synthesis-manifest/0.2")]
     V0_2,
+    /// Additive revision adding the `claude_cli` and `codex_cli` formats and an
+    /// optional `model` field for agent-CLI-backed providers.
+    #[serde(rename = "synthesis-manifest/0.3")]
+    V0_3,
 }
 
 impl ManifestSpecVersion {
@@ -29,6 +33,7 @@ impl ManifestSpecVersion {
         match self {
             Self::V0_1 => "synthesis-manifest/0.1",
             Self::V0_2 => "synthesis-manifest/0.2",
+            Self::V0_3 => "synthesis-manifest/0.3",
         }
     }
 }
@@ -48,6 +53,12 @@ pub enum ModelFormat {
     /// A local OpenAI-compatible server endpoint.
     #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
+    /// The authenticated Claude Code CLI, run as a subprocess.
+    #[serde(rename = "claude_cli")]
+    ClaudeCli,
+    /// The authenticated Codex CLI, run as a subprocess.
+    #[serde(rename = "codex_cli")]
+    CodexCli,
     /// A deterministic, model-free reference provider.
     Deterministic,
 }
@@ -61,6 +72,8 @@ impl ModelFormat {
             Self::Ollama => "ollama",
             Self::Mlx => "mlx",
             Self::OpenAiCompatible => "openai_compatible",
+            Self::ClaudeCli => "claude_cli",
+            Self::CodexCli => "codex_cli",
             Self::Deterministic => "deterministic",
         }
     }
@@ -150,6 +163,12 @@ pub struct ModelManifest {
     /// manifest; only the variable name is. Requires `synthesis-manifest/0.2`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// Optional model identifier passed to an agent-CLI provider via its
+    /// `--model` flag (`claude_cli`/`codex_cli`). When absent, the CLI's own
+    /// configured default model is used. The manifest `name` stays a
+    /// human-readable label. Requires `synthesis-manifest/0.3`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl ModelManifest {
@@ -217,6 +236,26 @@ impl ModelManifest {
                     "`api_key_env` requires spec_version `synthesis-manifest/0.2`".to_owned(),
                 );
             }
+        }
+        // The agent-CLI formats and the `model` field are v0.3 additions; a
+        // manifest that uses either must declare `synthesis-manifest/0.3`.
+        if self.spec_version != ManifestSpecVersion::V0_3 {
+            if matches!(self.format, ModelFormat::ClaudeCli | ModelFormat::CodexCli) {
+                reasons.push(format!(
+                    "format `{}` requires spec_version `synthesis-manifest/0.3`",
+                    self.format.as_str()
+                ));
+            }
+            if self.model.is_some() {
+                reasons.push("`model` requires spec_version `synthesis-manifest/0.3`".to_owned());
+            }
+        }
+        if self
+            .model
+            .as_deref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            reasons.push("`model`, when present, must not be blank".to_owned());
         }
         if self
             .api_key_env

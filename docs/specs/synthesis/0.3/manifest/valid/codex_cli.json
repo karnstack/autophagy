@@ -1,0 +1,11 @@
+{
+  "spec_version": "synthesis-manifest/0.3",
+  "name": "codex-cli-login",
+  "format": "codex_cli",
+  "path": "/opt/homebrew/bin/codex",
+  "revision": "cli-0.x",
+  "capabilities": ["mutation_synthesis"],
+  "resource_hints": { "min_memory_mb": 512 },
+  "timeouts": { "request_ms": 180000 },
+  "model": "gpt-5-codex"
+}

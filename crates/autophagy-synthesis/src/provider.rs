@@ -206,6 +206,27 @@ pub enum ProviderError {
         /// A transport-derived, secret-free description of the failure.
         reason: String,
     },
+    /// The configured agent-CLI binary could not be launched — most often it is
+    /// not installed or not on `PATH`. The reason names the binary and the
+    /// underlying cause but never the prompt.
+    #[error("agent CLI '{binary}' could not be launched: {reason}")]
+    CliSpawn {
+        /// The configured binary path or bare name.
+        binary: String,
+        /// A secret-free description of why the launch failed.
+        reason: String,
+    },
+    /// The agent CLI launched but did not yield a usable response: it exited
+    /// non-zero, exceeded the wall-clock timeout and was killed, or produced an
+    /// envelope with no assistant message. The reason carries only a bounded,
+    /// sanitized diagnostic snippet, never the prompt or a secret.
+    #[error("agent CLI '{binary}' did not produce a usable response: {reason}")]
+    CliFailure {
+        /// The configured binary path or bare name.
+        binary: String,
+        /// A bounded, sanitized, secret-free description of the failure.
+        reason: String,
+    },
 }
 
 /// A source of enriched mutation proposals.

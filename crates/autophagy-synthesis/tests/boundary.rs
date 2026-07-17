@@ -183,6 +183,7 @@ fn missing_capability_refuses_without_consulting_a_provider() {
         },
         timeouts: None,
         api_key_env: None,
+        model: None,
     };
     // Tripwire provider must not be consulted when the capability is absent.
     let outcome = synthesize_candidate(&finding, &manifest, &TripwireProvider);
@@ -478,6 +479,121 @@ fn v0_1_manifest_rejects_v0_2_only_fields() {
         },
         timeouts: None,
         api_key_env: Some("SOME_VAR".to_owned()),
+        model: None,
+    };
+    assert!(matches!(
+        manifest.validate(),
+        Err(ManifestError::Invalid(_))
+    ));
+}
+
+#[test]
+fn manifest_v0_3_schema_accepts_valid_and_rejects_invalid_fixtures() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/specs/synthesis/0.3/manifest.schema.json"
+    ))
+    .expect("schema JSON");
+    let validator = jsonschema::validator_for(&schema).expect("compile schema");
+    let base =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/synthesis/0.3/manifest");
+    for name in [
+        "claude_cli.json",
+        "codex_cli.json",
+        "ollama_carried_forward.json",
+    ] {
+        let instance = read_json(&base.join("valid").join(name));
+        assert!(
+            validator.is_valid(&instance),
+            "schema rejected valid {name}"
+        );
+    }
+    for name in [
+        "wrong_spec_version.json",
+        "model_requires_v0_3.json",
+        "blank_model.json",
+        "unknown_field.json",
+    ] {
+        let instance = read_json(&base.join("invalid").join(name));
+        assert!(
+            !validator.is_valid(&instance),
+            "schema accepted invalid {name}"
+        );
+    }
+}
+
+#[test]
+fn manifest_v0_3_fields_load_and_are_validated() {
+    let base =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/synthesis/0.3/manifest");
+
+    let claude = ModelManifest::from_path(&base.join("valid/claude_cli.json"))
+        .expect("claude_cli manifest loads");
+    assert_eq!(claude.spec_version, ManifestSpecVersion::V0_3);
+    assert_eq!(claude.format, ModelFormat::ClaudeCli);
+    assert_eq!(claude.path, "claude");
+    assert!(claude.model.is_none());
+
+    let codex = ModelManifest::from_path(&base.join("valid/codex_cli.json"))
+        .expect("codex_cli manifest loads");
+    assert_eq!(codex.format, ModelFormat::CodexCli);
+    assert_eq!(codex.model.as_deref(), Some("gpt-5-codex"));
+    assert_eq!(codex.timeouts.and_then(|t| t.request_ms), Some(180_000));
+
+    // An agent-CLI format under an older spec version is semantically invalid.
+    assert!(matches!(
+        ModelManifest::from_path(&base.join("invalid/wrong_spec_version.json")),
+        Err(ManifestError::Invalid(_))
+    ));
+    // A `model` field under an older spec version is semantically invalid.
+    assert!(matches!(
+        ModelManifest::from_path(&base.join("invalid/model_requires_v0_3.json")),
+        Err(ManifestError::Invalid(_))
+    ));
+    // A blank `model` is semantically invalid.
+    assert!(matches!(
+        ModelManifest::from_path(&base.join("invalid/blank_model.json")),
+        Err(ManifestError::Invalid(_))
+    ));
+    // An inline api_key (or any unknown field) fails to deserialize.
+    assert!(matches!(
+        ModelManifest::from_path(&base.join("invalid/unknown_field.json")),
+        Err(ManifestError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn older_manifests_still_load_under_the_v0_3_rust_types() {
+    // Additive compatibility: v0.1 and v0.2 manifests keep loading unchanged
+    // through the same Rust types that now understand v0.3.
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/synthesis");
+    let v0_1 = ModelManifest::from_path(&base.join("0.1/manifest/valid/ollama_minimal.json"))
+        .expect("v0.1 manifest still loads");
+    assert_eq!(v0_1.spec_version, ManifestSpecVersion::V0_1);
+    assert!(v0_1.model.is_none());
+    let v0_2 = ModelManifest::from_path(&base.join("0.2/manifest/valid/ollama_endpoint.json"))
+        .expect("v0.2 manifest still loads");
+    assert_eq!(v0_2.spec_version, ManifestSpecVersion::V0_2);
+    assert!(v0_2.model.is_none());
+}
+
+#[test]
+fn pre_v0_3_manifest_rejects_the_model_field() {
+    let manifest = ModelManifest {
+        spec_version: ManifestSpecVersion::V0_2,
+        name: "m".to_owned(),
+        format: ModelFormat::Ollama,
+        path: "http://localhost:11434".to_owned(),
+        revision: "v1".to_owned(),
+        digest: None,
+        capabilities: vec![Capability::MutationSynthesis],
+        resource_hints: ResourceHints {
+            min_memory_mb: 1,
+            recommended_memory_mb: None,
+            context_window_tokens: None,
+        },
+        timeouts: None,
+        api_key_env: None,
+        model: Some("some-model".to_owned()),
     };
     assert!(matches!(
         manifest.validate(),
