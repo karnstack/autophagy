@@ -498,7 +498,7 @@ enum MutationAction {
         #[arg(long, value_enum, default_value_t = SynthesisProviderChoice::Deterministic)]
         provider: SynthesisProviderChoice,
 
-        /// Local model manifest (synthesis-manifest/0.1 or 0.2) JSON file.
+        /// Local model manifest (synthesis-manifest/0.1, 0.2, or 0.3) JSON file.
         /// Defaults to `synthesis.manifest_path` in config when omitted.
         #[arg(long, value_name = "PATH")]
         manifest: Option<PathBuf>,
@@ -1535,6 +1535,8 @@ fn execute_mutation_action(
                 match config.synthesis_provider.as_deref() {
                     Some("ollama") => SynthesisProviderChoice::Ollama,
                     Some("openai-compatible") => SynthesisProviderChoice::OpenaiCompatible,
+                    Some("claude-cli") => SynthesisProviderChoice::ClaudeCli,
+                    Some("codex-cli") => SynthesisProviderChoice::CodexCli,
                     _ => provider,
                 }
             };

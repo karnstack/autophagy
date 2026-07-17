@@ -183,7 +183,13 @@ const KEYS: &[KeySpec] = &[
 /// Known top-level sections (plus the bare `config_version` header key).
 const SECTIONS: &[&str] = &["import", "detect", "watch", "synthesis"];
 
-const PROVIDERS: &[&str] = &["deterministic", "ollama", "openai-compatible"];
+const PROVIDERS: &[&str] = &[
+    "deterministic",
+    "ollama",
+    "openai-compatible",
+    "claude-cli",
+    "codex-cli",
+];
 
 fn spec(dotted: &str) -> Option<&'static KeySpec> {
     KEYS.iter().find(|spec| spec.dotted == dotted)
