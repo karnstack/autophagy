@@ -368,28 +368,53 @@ enum RunError {
     Wait(std::io::Error),
 }
 
-/// Run a command with a hard wall-clock timeout, killing the child if it
-/// exceeds the deadline. Uses only `std`: reader threads drain stdout and stderr
-/// (so a full pipe buffer can never deadlock the wait), and the main thread
-/// polls `try_wait` until exit or deadline.
+/// How long to wait for a reader thread to deliver its drained buffer after the
+/// child is reaped. A leaked grandchild can hold a pipe open past the child's
+/// exit, so this wait is time-boxed: on expiry we proceed with whatever arrived.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Run a command with a hard wall-clock timeout, killing the child if it exceeds
+/// the deadline. Uses only `std`.
+///
+/// Two hazards drive the design, because both vendor CLIs spawn helper
+/// subprocesses that inherit the child's stdout/stderr pipe write-ends:
+///
+/// - On timeout, killing only the direct child leaves those grandchildren alive
+///   holding the pipe open, so the reader threads never see EOF. On unix the
+///   child is therefore placed in its own process group and the whole group is
+///   killed at the deadline.
+/// - As defense in depth, the reader threads deliver their buffers over channels
+///   and are never joined. After the child is reaped we `recv_timeout` each
+///   stream; if a leaked reader is still blocked it stays detached rather than
+///   hanging the caller forever.
 fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<CliOutput, RunError> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Lead a new process group so the whole tree can be signalled on timeout.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command.spawn().map_err(RunError::Spawn)?;
 
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr piped");
-    let stdout_reader = std::thread::spawn(move || {
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    // Detached readers: they own the read-end and send the drained buffer at EOF.
+    // We never join them — a reader blocked on a leaked pipe must not hang us.
+    std::thread::spawn(move || {
         let mut buffer = Vec::new();
         let _ = stdout_pipe.read_to_end(&mut buffer);
-        buffer
+        let _ = stdout_tx.send(buffer);
     });
-    let stderr_reader = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut buffer = Vec::new();
         let _ = stderr_pipe.read_to_end(&mut buffer);
-        buffer
+        let _ = stderr_tx.send(buffer);
     });
 
     let deadline = Instant::now() + timeout;
@@ -399,9 +424,7 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<CliOutput
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    // Kill and reap so the reader threads see EOF and finish.
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_process_tree(&mut child);
                     timed_out = true;
                     break None;
                 }
@@ -411,14 +434,37 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<CliOutput
         }
     };
 
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
+    // The child is reaped. Collect whatever the readers drained without ever
+    // blocking forever: on the (post-group-kill) rare chance a grandchild still
+    // holds a pipe, the recv times out and we proceed with what arrived.
+    let stdout = stdout_rx.recv_timeout(DRAIN_TIMEOUT).unwrap_or_default();
+    let stderr = stderr_rx.recv_timeout(DRAIN_TIMEOUT).unwrap_or_default();
     Ok(CliOutput {
         status,
         stdout,
         stderr,
         timed_out,
     })
+}
+
+/// Kill the child and any inherited helper subprocesses, then reap the direct
+/// child. On unix the child leads its own process group (see `run_with_timeout`),
+/// so the whole group is signalled first with `kill -9 -<pgid>`; otherwise a
+/// grandchild would survive and keep the stdout/stderr pipes open. Non-unix
+/// falls back to killing only the direct child.
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // The child's PID is its process-group id because it was spawned with
+        // `process_group(0)`. `kill -9 -<pgid>` signals every process in it.
+        let pgid = child.id();
+        let _ = Command::new("kill")
+            .arg("-9")
+            .arg(format!("-{pgid}"))
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Turn a spawn error into an actionable, secret-free description.

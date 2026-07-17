@@ -303,6 +303,42 @@ fn a_hung_cli_is_killed_and_surfaces_a_timeout_provider_error() {
 }
 
 #[test]
+fn a_leaked_grandchild_holding_stdout_does_not_hang_propose() {
+    // Regression: both vendor CLIs spawn helpers that inherit the stdout pipe.
+    // If, on timeout, only the direct child is killed, a surviving grandchild
+    // keeps the pipe open, the reader never sees EOF, and propose() hangs. The
+    // provider must kill the whole process group and return within the timeout.
+    let dir = TempDir::new().expect("tempdir");
+    // Grandchild `sleep 300` inherits stdout; the foreground `sleep 300` keeps
+    // the direct child alive so the provider must time out and kill the group.
+    let script = "#!/bin/sh\nsleep 300 &\nsleep 300\n";
+    let script_path = dir.path().join("codex");
+    fs::write(&script_path, script).expect("write script");
+    let mut perms = fs::metadata(&script_path).expect("meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms).expect("chmod");
+
+    let manifest = cli_manifest(ModelFormat::CodexCli, &script_path, Some(500));
+
+    // Bound the whole thing with an outer watchdog so a regression fails fast
+    // instead of hanging the test suite forever.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let finding = candidate_fixture().finding;
+    std::thread::spawn(move || {
+        let provider = AgentCliProvider::codex_from_manifest(&manifest);
+        let outcome = synthesize_candidate(&finding, &manifest, &provider);
+        let _ = tx.send(outcome);
+    });
+    let outcome = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("propose() must return within the timeout, not hang on a leaked grandchild");
+    let SynthesisOutcome::ProviderError { message, .. } = outcome else {
+        panic!("expected a provider error, got {outcome:?}");
+    };
+    assert!(message.contains("timed out"), "message: {message}");
+}
+
+#[test]
 fn a_missing_binary_is_a_clean_provider_error() {
     let fixture = candidate_fixture();
     let manifest = cli_manifest(
