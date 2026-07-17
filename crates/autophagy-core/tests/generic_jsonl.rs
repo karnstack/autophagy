@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use autophagy_core::{ImportDiagnosticCode, ImportOptions, import_jsonl};
+use autophagy_core::{ImportDiagnosticCode, ImportOptions, ReindexOptions, import_jsonl, reindex};
 use autophagy_store::{EventStore, RetrievalMatchKind, RetrievalQuery, StoreStats};
 
 const MIXED: &str = include_str!("fixtures/mixed.jsonl");
@@ -12,6 +12,58 @@ const BUILD_SIG: &str = "operation/v1|shell|cargo build";
 
 fn hit_ids(hits: &[autophagy_store::RetrievalHit]) -> Vec<String> {
     hits.iter().map(|hit| hit.event_id.clone()).collect()
+}
+
+#[test]
+fn reindex_heals_a_corpus_imported_without_indexing() {
+    // Import the retrieval corpus WITHOUT indexing, exactly as history ingested
+    // before signature indexing existed: canonical events land, but the exact
+    // signature index is empty and tool input is not searchable.
+    let mut store = EventStore::open_in_memory().expect("store");
+    let options = ImportOptions::new("fixture:reindex");
+    let summary = import_jsonl(Cursor::new(RETRIEVAL), Some(&mut store), &options).expect("import");
+    assert_eq!(summary.inserted, 4);
+    assert_eq!(store.signature_count().expect("signatures"), 0);
+    assert!(
+        store
+            .retrieve(&RetrievalQuery {
+                signature: Some(BUILD_SIG.to_owned()),
+                limit: 10,
+                ..RetrievalQuery::default()
+            })
+            .expect("exact")
+            .is_empty(),
+        "reimport cannot heal this; signatures must start empty"
+    );
+
+    // Reindex with the indexing gate rebuilds the exact-signature index from the
+    // stored events without re-reading any transcript.
+    let reindex_options = ReindexOptions {
+        index_tool_input: true,
+        ..ReindexOptions::default()
+    };
+    let first = reindex(&mut store, &reindex_options).expect("reindex");
+    assert_eq!(first.events_scanned, 4);
+    assert_eq!(first.search_rows_written, 4);
+    assert_eq!(first.signatures_written, 4);
+    assert_eq!(store.signature_count().expect("signatures"), 4);
+    assert_eq!(
+        hit_ids(
+            &store
+                .retrieve(&RetrievalQuery {
+                    signature: Some(BUILD_SIG.to_owned()),
+                    limit: 10,
+                    ..RetrievalQuery::default()
+                })
+                .expect("exact after reindex")
+        ),
+        ["evt_r3", "evt_r2", "evt_r1"]
+    );
+
+    // Idempotent: a second rebuild produces identical counts and state.
+    let second = reindex(&mut store, &reindex_options).expect("re-reindex");
+    assert_eq!(second, first);
+    assert_eq!(store.signature_count().expect("signatures"), 4);
 }
 
 #[test]

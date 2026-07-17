@@ -49,6 +49,20 @@ mise install
 mise exec -- cargo build --release -p autophagy-cli
 ```
 
+Then let it set itself up — one guided command detects your coding agents,
+imports the ones you pick, shows you the first results, and offers to keep
+watching:
+
+```sh
+mise exec -- cargo run -p autophagy-cli -- setup
+```
+
+That is the way in. It is interactive, local, and never deletes anything; see
+the [setup guide](docs/guides/setup.md). With no terminal it runs from flags:
+`autophagy setup --adapter claude-code --index-tool-input --monitor --yes`.
+
+### Or drive it by hand
+
 Point it at a sample history and see what it finds:
 
 ```sh
@@ -62,22 +76,19 @@ mise exec -- cargo run -p autophagy-cli -- --database /tmp/autophagy-demo.db pat
 The first command imports a small anonymized transcript; the second lists the
 repeated problems it detected, each with exact evidence.
 
-Import your own real history from Claude Code or Codex instead:
+Import your own real history, keep watching in the background, or rebuild the
+search index for history imported before indexing existed:
 
 ```sh
 mise exec -- cargo run -p autophagy-cli -- import --adapter claude-code
-mise exec -- cargo run -p autophagy-cli -- import --adapter codex
-```
-
-Let it keep watching in the background instead of re-running import by hand:
-
-```sh
 mise exec -- cargo run -p autophagy-cli -- watch
+mise exec -- cargo run -p autophagy-cli -- reindex --index-tool-input
 ```
 
-This checks for new activity on an interval and imports only what's new; see
+`watch` checks for new activity on an interval and imports only what's new; see
 the [watch and daemon guide](docs/guides/watch-and-daemon.md) for installing it
-as a proper background service on macOS or Linux.
+as a proper background service on macOS or Linux. `reindex` rebuilds search from
+events already stored, which reimport cannot do.
 
 Prefer a window over a terminal? Build the native macOS app (read-only, no
 Xcode required):

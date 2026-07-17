@@ -914,6 +914,274 @@ fn claude_code_install_and_uninstall_round_trip_through_cli() {
     assert_eq!(shown["result"]["installations"][0]["state"], "uninstalled");
 }
 
+#[test]
+fn reindex_rebuilds_search_from_history_imported_without_indexing() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../adapters/claude-code/tests/fixtures/projects");
+
+    // Import native history WITHOUT indexing: canonical events land, but the
+    // exact-signature index is empty and tool input is not searchable.
+    let imported = run_json(
+        &database,
+        [
+            "import",
+            fixture.to_str().expect("UTF-8 path"),
+            "--adapter",
+            "claude-code",
+        ],
+    );
+    assert_eq!(imported["result"]["inserted"], 8);
+    assert!(
+        run_json(&database, ["search", "check"])["result"]
+            .as_array()
+            .expect("hits")
+            .is_empty(),
+        "commands must not be searchable before reindex"
+    );
+
+    // Reindexing without the gate rebuilds only the baseline projection.
+    let baseline = run_json(&database, ["reindex"]);
+    assert_eq!(baseline["result"]["events_scanned"], 8);
+    assert_eq!(baseline["result"]["search_rows_written"], 8);
+    assert_eq!(baseline["result"]["signatures_written"], 0);
+
+    // Reindexing with the gate makes commands searchable and populates the
+    // exact-signature index — something reimport can never do.
+    let rebuilt = run_json(&database, ["reindex", "--index-tool-input"]);
+    assert_eq!(rebuilt["result"]["events_scanned"], 8);
+    assert!(
+        rebuilt["result"]["signatures_written"]
+            .as_u64()
+            .expect("signatures")
+            > 0
+    );
+    assert!(
+        !run_json(&database, ["search", "check"])["result"]
+            .as_array()
+            .expect("hits")
+            .is_empty(),
+        "commands must be searchable after reindex --index-tool-input"
+    );
+
+    // Idempotent: a second identical rebuild yields identical counts.
+    let again = run_json(&database, ["reindex", "--index-tool-input"]);
+    assert_eq!(
+        again["result"]["events_scanned"],
+        rebuilt["result"]["events_scanned"]
+    );
+    assert_eq!(
+        again["result"]["signatures_written"],
+        rebuilt["result"]["signatures_written"]
+    );
+    assert_eq!(
+        again["result"]["search_rows_written"],
+        rebuilt["result"]["search_rows_written"]
+    );
+}
+
+#[test]
+fn reindex_exclude_path_drops_matching_projects_from_the_search_index() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let input = directory.path().join("two-projects.jsonl");
+    fs::write(
+        &input,
+        concat!(
+            "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_keep\",\"session_id\":\"ses_keep\",",
+            "\"timestamp\":\"2026-07-16T09:00:00Z\",\"source\":\"generic-jsonl\",\"type\":\"tool.called\",",
+            "\"project\":\"/repo/keep\",\"tool\":{\"name\":\"shell\",\"input\":{\"command\":\"keepneedle build\"}}}\n",
+            "{\"spec_version\":\"aep/0.1\",\"event_id\":\"evt_drop\",\"session_id\":\"ses_drop\",",
+            "\"timestamp\":\"2026-07-16T09:01:00Z\",\"source\":\"generic-jsonl\",\"type\":\"tool.called\",",
+            "\"project\":\"/repo/drop\",\"tool\":{\"name\":\"shell\",\"input\":{\"command\":\"dropneedle deploy\"}}}\n"
+        ),
+    )
+    .expect("two-project fixture");
+
+    // Import both projects with indexing so both are searchable to begin with.
+    let imported = run_json(
+        &database,
+        [
+            "import",
+            input.to_str().expect("UTF-8 path"),
+            "--index-tool-input",
+        ],
+    );
+    assert_eq!(imported["result"]["inserted"], 2);
+    assert_eq!(
+        run_json(&database, ["search", "keepneedle"])["result"]
+            .as_array()
+            .expect("hits")
+            .len(),
+        1
+    );
+    assert_eq!(
+        run_json(&database, ["search", "dropneedle"])["result"]
+            .as_array()
+            .expect("hits")
+            .len(),
+        1
+    );
+
+    // Reindex excluding one project: its rows must leave the index entirely,
+    // including the structural project path and tool name, while the kept
+    // project stays searchable.
+    let rebuilt = run_json(
+        &database,
+        ["reindex", "--index-tool-input", "--exclude-path", "**/drop"],
+    );
+    assert_eq!(rebuilt["result"]["events_scanned"], 2);
+    assert_eq!(rebuilt["result"]["search_rows_written"], 1);
+    assert_eq!(rebuilt["result"]["signatures_written"], 1);
+
+    assert_eq!(
+        run_json(&database, ["search", "keepneedle"])["result"]
+            .as_array()
+            .expect("hits")
+            .len(),
+        1,
+        "the included project must remain searchable"
+    );
+    assert!(
+        run_json(&database, ["search", "dropneedle"])["result"]
+            .as_array()
+            .expect("hits")
+            .is_empty(),
+        "the excluded project must not be searchable after reindex"
+    );
+    // Even the excluded project's path must not surface via free text.
+    assert!(
+        run_json(&database, ["search", "drop"])["result"]
+            .as_array()
+            .expect("hits")
+            .is_empty(),
+        "the excluded project path must not stay in the index"
+    );
+}
+
+#[test]
+fn setup_non_interactive_imports_runs_digest_and_leaves_monitoring_off() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let config_dir = directory.path().join("claude-config");
+    let project_dir = config_dir.join("projects").join("-workspace-demo");
+    fs::create_dir_all(&project_dir).expect("create projects dir");
+    fs::write(project_dir.join("session.jsonl"), CLAUDE_TRANSCRIPT).expect("write transcript");
+    let database = directory.path().join("setup.db");
+
+    let output = command(&database)
+        .args(["--output", "json"])
+        .args([
+            "setup",
+            "--adapter",
+            "claude-code",
+            "--index-tool-input",
+            "--yes",
+        ])
+        .env("CLAUDE_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("run setup");
+    assert!(
+        output.status.success(),
+        "setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("setup JSON");
+    assert_eq!(report["command"], "setup");
+    assert_eq!(report["result"]["index_tool_input"], true);
+    assert_eq!(report["result"]["monitor_installed"], false);
+
+    let adapter = report["result"]["adapters"]
+        .as_array()
+        .expect("adapters")
+        .iter()
+        .find(|entry| entry["adapter"] == "claude-code")
+        .expect("claude-code adapter entry");
+    assert_eq!(adapter["present"], true);
+    assert!(adapter["inserted"].as_u64().expect("inserted") > 0);
+    assert!(
+        report["result"]["digest_events_scanned"]
+            .as_u64()
+            .expect("scanned")
+            > 0
+    );
+    // The digest report carries #28's diagnostics; the observation count is
+    // always present so a zero-finding scan is never a silent nothing.
+    assert!(report["result"]["digest_observations"].is_u64());
+
+    // Setup wired the indexing gate, so search returns hits immediately.
+    assert!(
+        !run_json(&database, ["search", "check"])["result"]
+            .as_array()
+            .expect("hits")
+            .is_empty()
+    );
+}
+
+#[test]
+fn setup_digest_surfaces_scan_stats_and_observations_when_nothing_qualifies() {
+    // A single session with two identical command failures crosses no finding
+    // threshold (needs three occurrences across two sessions), so the digest
+    // must fall back to scan stats plus the near-threshold observation rather
+    // than printing nothing — surfaced through the shared digest renderer.
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let config_dir = directory.path().join("claude-config");
+    let project_dir = config_dir.join("projects").join("-workspace-demo");
+    fs::create_dir_all(&project_dir).expect("create projects dir");
+    fs::write(project_dir.join("session.jsonl"), CLAUDE_NEAR_THRESHOLD).expect("write transcript");
+    let database = directory.path().join("setup.db");
+
+    let output = command(&database)
+        .args([
+            "setup",
+            "--adapter",
+            "claude-code",
+            "--index-tool-input",
+            "--yes",
+        ])
+        .env("CLAUDE_CONFIG_DIR", &config_dir)
+        .output()
+        .expect("run setup");
+    assert!(
+        output.status.success(),
+        "setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(
+        stdout.contains("candidate signatures") && stdout.contains("0 findings"),
+        "digest scan stats missing from setup output:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("near-threshold observations"),
+        "zero-finding digest must surface observations:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("unmet: min_occurrences"),
+        "each observation must name the exact gate it missed:\n{stdout}"
+    );
+}
+
+#[test]
+fn setup_without_terminal_or_flags_points_at_the_non_interactive_flags() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("setup.db");
+
+    // No terminal (test harness stdin is not a TTY) and no `--yes`: setup must
+    // refuse with guidance rather than hang waiting for input.
+    let output = command(&database).arg("setup").output().expect("run setup");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--yes"),
+        "stderr should name the flags: {stderr}"
+    );
+    assert!(
+        !database.exists(),
+        "a refused setup must not create a database"
+    );
+}
+
 const CLAUDE_TRANSCRIPT: &str = concat!(
     "{\"type\":\"user\",\"uuid\":\"r1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",",
     "\"timestamp\":\"2026-07-16T08:00:00Z\",\"cwd\":\"/workspace/demo\",",
@@ -926,6 +1194,28 @@ const CLAUDE_TRANSCRIPT: &str = concat!(
     "\"timestamp\":\"2026-07-16T08:00:02Z\",\"cwd\":\"/workspace/demo\",",
     "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",",
     "\"is_error\":true,\"content\":\"Exit code 1\\nfixture failure\"}]}}\n"
+);
+
+/// Two identical command failures in one session: enough to be a recurring
+/// candidate signature, but below the finding thresholds, so the digest reports
+/// it as a near-threshold observation.
+const CLAUDE_NEAR_THRESHOLD: &str = concat!(
+    "{\"type\":\"assistant\",\"uuid\":\"n1\",\"sessionId\":\"22222222-2222-4222-8222-222222222222\",",
+    "\"timestamp\":\"2026-07-16T08:00:00Z\",\"cwd\":\"/workspace/demo\",",
+    "\"message\":{\"role\":\"assistant\",\"content\":[",
+    "{\"type\":\"tool_use\",\"id\":\"n-tool-1\",\"name\":\"Bash\",\"input\":{\"command\":\"mise run check\"}}]}}\n",
+    "{\"type\":\"user\",\"uuid\":\"n2\",\"sessionId\":\"22222222-2222-4222-8222-222222222222\",",
+    "\"timestamp\":\"2026-07-16T08:00:01Z\",\"cwd\":\"/workspace/demo\",",
+    "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"n-tool-1\",",
+    "\"is_error\":true,\"content\":\"Exit code 1\\nboom\"}]}}\n",
+    "{\"type\":\"assistant\",\"uuid\":\"n3\",\"sessionId\":\"22222222-2222-4222-8222-222222222222\",",
+    "\"timestamp\":\"2026-07-16T08:00:02Z\",\"cwd\":\"/workspace/demo\",",
+    "\"message\":{\"role\":\"assistant\",\"content\":[",
+    "{\"type\":\"tool_use\",\"id\":\"n-tool-2\",\"name\":\"Bash\",\"input\":{\"command\":\"mise run check\"}}]}}\n",
+    "{\"type\":\"user\",\"uuid\":\"n4\",\"sessionId\":\"22222222-2222-4222-8222-222222222222\",",
+    "\"timestamp\":\"2026-07-16T08:00:03Z\",\"cwd\":\"/workspace/demo\",",
+    "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"n-tool-2\",",
+    "\"is_error\":true,\"content\":\"Exit code 1\\nboom\"}]}}\n"
 );
 
 /// One watch cycle imports the fixture; a second cycle inserts nothing because

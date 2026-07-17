@@ -8,9 +8,9 @@ use autophagy_events::{
 use autophagy_store::{
     DeleteAllSummary, DeleteSummary, EventStore, InsertOutcome, InstallationRegistration,
     InstallationTransitionOutcome, MutationRegisterOutcome, MutationRegistration, PruneSummary,
-    ReplayRegisterOutcome, ReplayRegistration, RetrievalMatchKind, RetrievalOutcome,
-    RetrievalQuery, SearchProjection, ShadowRegisterOutcome, ShadowRegistration, SourceCursor,
-    SourceIdentity, StoreError, StoreStats,
+    RebuildSummary, ReplayRegisterOutcome, ReplayRegistration, RetrievalMatchKind,
+    RetrievalOutcome, RetrievalQuery, SearchProjection, ShadowRegisterOutcome, ShadowRegistration,
+    SourceCursor, SourceIdentity, StoreError, StoreStats,
 };
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -183,6 +183,135 @@ fn insertion_rolls_up_sessions_and_indexes_only_approved_text() {
             conflicts: 0,
         }
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn rebuild_search_projection_is_gated_idempotent_and_ignores_removed_events() {
+    let mut store = EventStore::open_in_memory().expect("store should open");
+    let source = source("instance-a");
+
+    // Import three events with NO approved projection, exactly as history
+    // ingested before signature indexing existed would look: canonical rows
+    // present, but the derived search index empty.
+    store
+        .insert_event(
+            &source,
+            &session_event(
+                "evt_start",
+                "ses_reindex",
+                EventKind::SessionStarted,
+                "2026-07-16T01:00:00Z",
+                0,
+            ),
+            &SearchProjection::default(),
+        )
+        .expect("start insert");
+    store
+        .insert_event(
+            &source,
+            &tool_failure("evt_fail", "ses_reindex", "2026-07-16T01:10:00Z", 1),
+            &SearchProjection::default(),
+        )
+        .expect("failure insert");
+    // A quarantined conflict must never be resurrected into the rebuilt index:
+    // reuse an existing event ID with different content.
+    let mut conflict = tool_failure("evt_fail", "ses_reindex", "2026-07-16T01:10:00Z", 1);
+    conflict
+        .metadata
+        .insert("changed".to_owned(), Value::Bool(true));
+    store
+        .insert_event(&source, &conflict, &SearchProjection::default())
+        .expect("conflict quarantined");
+
+    assert_eq!(store.signature_count().expect("signatures"), 0);
+    assert!(
+        store
+            .search("command", 10)
+            .expect("pre-rebuild search")
+            .is_empty(),
+        "raw tool input must not be searchable before rebuild"
+    );
+
+    // Gated OFF: rebuilding with empty projections writes one baseline row per
+    // event and no signatures.
+    let disabled = store
+        .rebuild_search_projection(|_event| Some(SearchProjection::default()))
+        .expect("gated-off rebuild");
+    assert_eq!(
+        disabled,
+        RebuildSummary {
+            events_scanned: 2,
+            search_rows_written: 2,
+            signatures_written: 0,
+        },
+        "quarantined conflict has no canonical row, so it is not scanned"
+    );
+    assert_eq!(store.signature_count().expect("signatures"), 0);
+
+    // Gated ON: project the redaction-approved tool input and signature. This
+    // mirrors what `autophagy reindex --index-tool-input` derives per event.
+    let project = |event: &Event| {
+        let tool_input_text = event
+            .tool
+            .as_ref()
+            .and_then(|tool| tool.input.as_ref())
+            .map(|input| {
+                input
+                    .as_str()
+                    .map_or_else(|| input.to_string(), str::to_owned)
+            });
+        Some(SearchProjection {
+            tool_input_text,
+            searchable_text: None,
+            signature: autophagy_events::signature::normalize_operation(event)
+                .map(|operation| operation.operation_key()),
+        })
+    };
+    let enabled = store
+        .rebuild_search_projection(project)
+        .expect("gated-on rebuild");
+    assert_eq!(
+        enabled,
+        RebuildSummary {
+            events_scanned: 2,
+            search_rows_written: 2,
+            signatures_written: 1,
+        }
+    );
+    assert_eq!(store.signature_count().expect("signatures"), 1);
+    let hits = store.search("command", 10).expect("post-rebuild search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].event_id, "evt_fail");
+
+    // Idempotent: an identical rebuild yields identical counts and state.
+    let again = store
+        .rebuild_search_projection(project)
+        .expect("re-rebuild");
+    assert_eq!(again, enabled);
+    assert_eq!(store.signature_count().expect("signatures"), 1);
+    assert_eq!(store.search("command", 10).expect("stable search").len(), 1);
+
+    // Canonical rows, sessions, and quarantine are untouched by the rebuild.
+    assert_eq!(
+        store.stats().expect("stats"),
+        StoreStats {
+            sources: 1,
+            sessions: 1,
+            events: 2,
+            artifacts: 0,
+            conflicts: 1,
+        }
+    );
+
+    // Deleting a session cascades its projection rows; a rebuild then never
+    // re-creates them because the canonical events are gone.
+    store.delete_session("ses_reindex").expect("delete session");
+    let after_delete = store
+        .rebuild_search_projection(project)
+        .expect("rebuild after delete");
+    assert_eq!(after_delete, RebuildSummary::default());
+    assert_eq!(store.signature_count().expect("signatures"), 0);
 }
 
 #[test]
