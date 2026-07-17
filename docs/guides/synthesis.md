@@ -14,7 +14,11 @@ authenticated coding-agent CLI — against `claude` or `codex` with no API key a
 no server to run.
 
 ```sh
-# Offline, no model — the default path.
+# Offline, no model — the default path. The built-in deterministic provider
+# needs no manifest; it falls back to a built-in reference manifest.
+autophagy mutations synthesize
+
+# Passing an explicit --manifest still works and is validated strictly.
 autophagy mutations synthesize --provider deterministic \
   --manifest docs/specs/synthesis/0.1/manifest/valid/deterministic.json
 

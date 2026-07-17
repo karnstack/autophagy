@@ -290,6 +290,7 @@ name = "autophagy-shadow"
 version = "0.1.0"
 dependencies = [
  "autophagy-core",
+ "autophagy-events",
  "autophagy-mutations",
  "autophagy-patterns",
  "autophagy-store",

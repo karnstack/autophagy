@@ -1,11 +1,14 @@
 //! Contract and deterministic metric tests for shadow v0.1.
 
-use std::io::Cursor;
+use std::{collections::BTreeSet, io::Cursor};
 
 use autophagy_core::{ImportOptions, import_jsonl};
+use autophagy_events::Event;
 use autophagy_mutations::{GenerationOutcome, MutationPackage, generate_candidates};
 use autophagy_patterns::{DetectorConfig, detect};
-use autophagy_shadow::{ShadowDisposition, ShadowSuite, ShadowThresholdFailure, evaluate};
+use autophagy_shadow::{
+    ShadowDisposition, ShadowSuite, ShadowThresholdFailure, evaluate, extract_observation_draft,
+};
 use autophagy_store::EventStore;
 
 const CORPUS: &str = include_str!("../../../evals/fixtures/findings/deterministic.jsonl");
@@ -71,6 +74,76 @@ fn suite_schema_and_semantic_independence_are_enforced() {
     assert!(errors.iter().any(|error| error.code == "duplicate"));
 }
 
+#[test]
+fn evidence_extraction_produces_stable_schema_valid_shadow_draft() {
+    let (package, events) = command_failure_package_and_events();
+    let draft = extract_observation_draft(&package, &events, 1).expect("shadow draft");
+    draft.validate().expect("structurally valid draft");
+
+    // Deterministic across repeated runs and independent of event input order.
+    assert_eq!(
+        draft,
+        extract_observation_draft(&package, &events, 1).expect("stable draft")
+    );
+    let mut reversed = events.clone();
+    reversed.reverse();
+    assert_eq!(
+        draft,
+        extract_observation_draft(&package, &reversed, 1).expect("stable reversed draft")
+    );
+
+    // The draft covers both would-help and legitimate no-op annotations.
+    assert!(
+        draft
+            .observations
+            .iter()
+            .any(|observation| observation.intervention_would_help)
+    );
+    assert!(
+        draft
+            .observations
+            .iter()
+            .any(|observation| !observation.intervention_would_help)
+    );
+
+    // Every observation carries a stable shd_ identity and a review note.
+    assert!(
+        draft
+            .observations
+            .iter()
+            .all(|observation| observation.observation_id.starts_with("shd_"))
+    );
+    assert!(
+        draft
+            .observations
+            .iter()
+            .all(|observation| observation.note.is_some())
+    );
+
+    // Source event ids are globally unique across observations, as the suite
+    // contract requires.
+    let total: usize = draft
+        .observations
+        .iter()
+        .map(|observation| observation.source_event_ids.len())
+        .sum();
+    let unique = draft
+        .observations
+        .iter()
+        .flat_map(|observation| observation.source_event_ids.iter())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(total, unique.len());
+
+    // The draft is a legal input to shadow evaluation.
+    evaluate(&package, &draft).expect("draft evaluates");
+
+    validate_schema(
+        "../../../docs/specs/shadow/0.1/suite.schema.json",
+        include_str!("../../../docs/specs/shadow/0.1/suite.schema.json"),
+        &serde_json::to_value(&draft).expect("draft JSON"),
+    );
+}
+
 fn validate_schema(_path: &str, schema: &str, instance: &serde_json::Value) {
     let schema: serde_json::Value = serde_json::from_str(schema).expect("schema JSON");
     let validator = jsonschema::validator_for(&schema).expect("compile schema");
@@ -78,6 +151,10 @@ fn validate_schema(_path: &str, schema: &str, instance: &serde_json::Value) {
 }
 
 fn command_failure_package() -> MutationPackage {
+    command_failure_package_and_events().0
+}
+
+fn command_failure_package_and_events() -> (MutationPackage, Vec<Event>) {
     let mut store = EventStore::open_in_memory().expect("store");
     import_jsonl(
         Cursor::new(CORPUS),
@@ -85,11 +162,9 @@ fn command_failure_package() -> MutationPackage {
         &ImportOptions::new("fixture:shadow"),
     )
     .expect("import");
-    let findings = detect(
-        &store.list_events_for_detection(None).expect("events"),
-        DetectorConfig::default(),
-    );
-    generate_candidates(&findings)
+    let events = store.list_events_for_detection(None).expect("events");
+    let findings = detect(&events, DetectorConfig::default());
+    let package = generate_candidates(&findings)
         .into_iter()
         .find_map(|outcome| match outcome {
             GenerationOutcome::Candidate { package }
@@ -100,5 +175,6 @@ fn command_failure_package() -> MutationPackage {
             }
             _ => None,
         })
-        .expect("command failure package")
+        .expect("command failure package");
+    (package, events)
 }

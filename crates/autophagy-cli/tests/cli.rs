@@ -327,6 +327,7 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
             .count(),
         3
     );
+    // `--scenarios` still works as a hidden alias for the canonical `--suite`.
     let unreviewed = command(&database)
         .args([
             "mutations",
@@ -338,8 +339,25 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
         .output()
         .expect("unreviewed replay");
     assert!(!unreviewed.status.success());
+    let unreviewed_stderr = String::from_utf8_lossy(&unreviewed.stderr);
+    // The error names the unreviewed scenarios and the exact remedy, pointing at
+    // the suite file the user must edit.
     assert!(
-        String::from_utf8_lossy(&unreviewed.stderr).contains("unreviewed counterfactual outcomes")
+        unreviewed_stderr.contains("unreviewed scenario"),
+        "missing scenario count: {unreviewed_stderr}"
+    );
+    assert!(
+        unreviewed_stderr.contains("rps_"),
+        "missing scenario ids: {unreviewed_stderr}"
+    );
+    assert!(
+        unreviewed_stderr
+            .contains("set counterfactual_outcome to \"expected_result\" or \"contradiction\""),
+        "missing remedy: {unreviewed_stderr}"
+    );
+    assert!(
+        unreviewed_stderr.contains(review_draft.to_str().expect("UTF-8 path")),
+        "missing suite path: {unreviewed_stderr}"
     );
 
     let incomplete = command(&database)
@@ -1966,6 +1984,233 @@ fn setup_omits_global_notice_when_config_dir_is_isolated() {
     assert!(
         !stderr.contains("saved globally"),
         "isolated runs must not print the global-config notice: {stderr}"
+    );
+}
+
+#[test]
+fn deterministic_synthesis_needs_no_manifest() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+
+    // The built-in `deterministic` provider synthesizes with no --manifest and
+    // no config manifest path: it falls back to its reference manifest.
+    let synthesized = run_json(&database, ["mutations", "synthesize"]);
+    assert_eq!(synthesized["command"], "mutations_synthesize");
+    assert_eq!(synthesized["result"]["provider"], "deterministic");
+    assert_eq!(synthesized["result"]["model_used"], false);
+    assert_eq!(synthesized["result"]["network_used"], false);
+    assert_eq!(
+        synthesized["result"]["manifest_path"],
+        "builtin://deterministic"
+    );
+    assert!(
+        !synthesized["result"]["registrations"]
+            .as_array()
+            .expect("registrations")
+            .is_empty()
+    );
+
+    // A non-deterministic provider still requires a manifest, and the error now
+    // points at a complete example manifest.
+    let missing = command(&database)
+        .args(["mutations", "synthesize", "--provider", "ollama"])
+        .output()
+        .expect("missing manifest");
+    assert!(!missing.status.success());
+    let missing_stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        missing_stderr.contains("needs a manifest"),
+        "missing manifest hint: {missing_stderr}"
+    );
+    assert!(
+        missing_stderr.contains("docs/specs/synthesis/0.3/manifest/valid/claude_cli.json"),
+        "missing example pointer: {missing_stderr}"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn mutation_pipeline_ergonomics_are_smooth_end_to_end() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let database = directory.path().join("autophagy.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    run_json(&database, ["import", fixture.to_str().expect("UTF-8 path")]);
+
+    // propose (text mode) prints a next-step challenge hint to stderr.
+    let proposed = command(&database)
+        .args(["mutations", "propose"])
+        .output()
+        .expect("propose");
+    assert!(proposed.status.success());
+    let proposed_stderr = String::from_utf8_lossy(&proposed.stderr);
+    assert!(
+        proposed_stderr.contains("next: autophagy mutations challenge"),
+        "missing propose hint: {proposed_stderr}"
+    );
+
+    // The same propose under JSON output keeps stdout a clean report and prints
+    // no hint at all.
+    let proposed_json = command(&database)
+        .args(["--output", "json", "mutations", "propose"])
+        .output()
+        .expect("propose json");
+    assert!(proposed_json.status.success());
+    assert!(
+        !String::from_utf8_lossy(&proposed_json.stderr).contains("next:"),
+        "JSON stdout must not carry a next-step hint on stderr"
+    );
+    serde_json::from_slice::<Value>(&proposed_json.stdout).expect("clean JSON stdout");
+
+    let registry = run_json(&database, ["mutations", "list"]);
+    let failure_id = registry["result"]
+        .as_array()
+        .expect("registry")
+        .iter()
+        .find(|mutation| mutation["source_detector"] == "repeated_command_failure")
+        .expect("failure mutation")["mutation_id"]
+        .as_str()
+        .expect("mutation ID")
+        .to_owned();
+
+    // challenge (text mode) prints a next-step replay-draft hint.
+    let challenged = command(&database)
+        .args([
+            "mutations",
+            "challenge",
+            &failure_id,
+            "--check",
+            "coincidence-considered",
+            "--check",
+            "sessions-comparable",
+            "--check",
+            "trigger-observable",
+            "--check",
+            "legitimate-uses-bounded",
+            "--check",
+            "equivalent-searched",
+            "--check",
+            "counterexamples-reviewed",
+        ])
+        .output()
+        .expect("challenge");
+    assert!(challenged.status.success());
+    assert!(
+        String::from_utf8_lossy(&challenged.stderr)
+            .contains("next: autophagy mutations replay-draft"),
+        "missing challenge hint"
+    );
+
+    // replay accepts the canonical --suite name; on pass it hints shadow-draft.
+    let passing_replay = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/replay/command-preflight-pass.json");
+    let replayed = command(&database)
+        .args([
+            "mutations",
+            "replay",
+            &failure_id,
+            "--suite",
+            passing_replay.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("replay --suite");
+    assert!(replayed.status.success(), "replay --suite must succeed");
+    assert!(
+        String::from_utf8_lossy(&replayed.stderr)
+            .contains("next: autophagy mutations shadow-draft"),
+        "missing replay hint"
+    );
+
+    // shadow-draft exports a schema-valid, deterministic Shadow Suite draft.
+    let shadow_suite = directory.path().join("shadow-suite.json");
+    let drafted = run_json(
+        &database,
+        [
+            "mutations",
+            "shadow-draft",
+            &failure_id,
+            "--suite",
+            shadow_suite.to_str().expect("UTF-8 path"),
+            "--context-events",
+            "1",
+        ],
+    );
+    assert_eq!(drafted["command"], "mutations_shadow_draft");
+    assert!(
+        drafted["result"]["observations"]
+            .as_u64()
+            .expect("observation count")
+            >= 1
+    );
+    let written_draft: Value =
+        serde_json::from_slice(&fs::read(&shadow_suite).expect("read shadow draft"))
+            .expect("shadow draft JSON");
+    assert_eq!(written_draft, drafted["result"]["draft"]);
+    assert_eq!(written_draft["spec_version"], "shadow-suite/0.1");
+    assert_eq!(written_draft["mutation_id"], failure_id.as_str());
+    assert!(
+        written_draft["observations"]
+            .as_array()
+            .expect("observations")
+            .iter()
+            .all(|observation| observation["observation_id"]
+                .as_str()
+                .expect("observation id")
+                .starts_with("shd_"))
+    );
+
+    // Re-drafting without --force refuses to clobber the existing file.
+    let refused = command(&database)
+        .args([
+            "mutations",
+            "shadow-draft",
+            &failure_id,
+            "--suite",
+            shadow_suite.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("shadow-draft no force");
+    assert!(
+        !refused.status.success(),
+        "shadow-draft must not overwrite without --force"
+    );
+
+    // With --force it overwrites and the content is byte-for-byte deterministic.
+    let redrafted = run_json(
+        &database,
+        [
+            "mutations",
+            "shadow-draft",
+            &failure_id,
+            "--suite",
+            shadow_suite.to_str().expect("UTF-8 path"),
+            "--context-events",
+            "1",
+            "--force",
+        ],
+    );
+    assert_eq!(redrafted["result"]["draft"], drafted["result"]["draft"]);
+
+    // shadow accepts the canonical --suite name; on pass it hints install.
+    let passing_shadow = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/shadow/command-preflight-pass.json");
+    let shadowed = command(&database)
+        .args([
+            "mutations",
+            "shadow",
+            &failure_id,
+            "--suite",
+            passing_shadow.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("shadow --suite");
+    assert!(shadowed.status.success(), "shadow --suite must pass");
+    assert!(
+        String::from_utf8_lossy(&shadowed.stderr).contains("next: autophagy mutations install"),
+        "missing shadow install hint"
     );
 }
 

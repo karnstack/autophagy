@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+autophagy-events = { path = "../autophagy-events" }
 autophagy-mutations = { path = "../autophagy-mutations" }
 serde.workspace = true
 serde_json.workspace = true
