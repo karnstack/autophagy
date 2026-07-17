@@ -328,6 +328,27 @@ pub struct StoreStats {
     pub conflicts: i64,
 }
 
+/// Cheap content fingerprint of the events a detection pass would scan.
+///
+/// Computed from indexed columns only — never by deserializing event JSON — so
+/// it is orders of magnitude cheaper than a detection pass. Any import, delete,
+/// or prune changes at least one field, which is what lets the derived
+/// findings cache key make an unchanged corpus a hit and a changed corpus a
+/// miss without explicit invalidation.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct DetectionFingerprint {
+    /// Events in scope (after the optional project filter).
+    pub event_count: i64,
+    /// Highest `row_id` in scope, or zero when empty.
+    pub max_row_id: i64,
+    /// Distinct sessions in scope, for human-facing progress only.
+    pub session_count: i64,
+    /// Latest `imported_at` in scope — a monotonic import watermark that
+    /// advances on every insert, distinguishing a delete-then-reimport from the
+    /// original corpus even when the count and max row id happen to coincide.
+    pub import_watermark: String,
+}
+
 /// Per-adapter import activity, for status reporting.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct AdapterActivity {

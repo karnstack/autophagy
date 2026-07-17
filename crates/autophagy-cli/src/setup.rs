@@ -31,7 +31,7 @@ use autophagy_adapter_pi::{
     PiImportOptions, default_sessions_root as pi_sessions_root, discover as pi_discover, import_pi,
 };
 use autophagy_core::{ReindexOptions, ReindexSummary, reindex};
-use autophagy_patterns::{DetectorConfig, detect_with_report};
+use autophagy_patterns::DetectorConfig;
 use autophagy_store::EventStore;
 use clap::ValueEnum;
 use serde::Serialize;
@@ -351,8 +351,12 @@ pub fn run(
     // still shows the scan stats and near-threshold observations rather than a
     // silent nothing.
     ui.say("");
-    let events = store.list_events_for_detection(None)?;
-    let digest = digest_report(detect_with_report(&events, DetectorConfig::default()))?;
+    let digest = digest_report(crate::detection::detect_cached(
+        &store,
+        None,
+        DetectorConfig::default(),
+        false,
+    )?)?;
     let digest_events_scanned = digest.events_scanned;
     let digest_findings = digest.findings.len();
     let digest_observations = digest.observations.len();

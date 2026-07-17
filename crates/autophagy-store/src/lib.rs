@@ -12,13 +12,14 @@ mod util;
 
 pub use error::StoreError;
 pub use model::{
-    AdapterActivity, DeleteAllSummary, DeleteSummary, InsertOutcome, InstallationRegistration,
-    InstallationTransitionOutcome, MutationDetails, MutationInstallationRecord, MutationRecord,
-    MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
-    MutationTransition, MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal,
-    RankingSignalKind, RebuildSummary, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
-    RetrievalFilterField, RetrievalHit, RetrievalMatchKind, RetrievalOutcome, RetrievalQuery,
-    SearchHit, SearchProjection, SessionSummary, ShadowRegisterOutcome, ShadowRegistration,
-    SourceCursor, SourceIdentity, StoreStats,
+    AdapterActivity, DeleteAllSummary, DeleteSummary, DetectionFingerprint, InsertOutcome,
+    InstallationRegistration, InstallationTransitionOutcome, MutationDetails,
+    MutationInstallationRecord, MutationRecord, MutationRegisterOutcome, MutationRegistration,
+    MutationReplayRecord, MutationShadowRecord, MutationTransition, MutationTransitionOutcome,
+    PruneSummary, RankingExplanation, RankingSignal, RankingSignalKind, RebuildSummary,
+    ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter, RetrievalFilterField, RetrievalHit,
+    RetrievalMatchKind, RetrievalOutcome, RetrievalQuery, SearchHit, SearchProjection,
+    SessionSummary, ShadowRegisterOutcome, ShadowRegistration, SourceCursor, SourceIdentity,
+    StoreStats,
 };
 pub use store::EventStore;
