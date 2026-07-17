@@ -12,7 +12,7 @@ use crate::{
     InstallationTransitionOutcome, MutationDetails, MutationInstallationRecord, MutationRecord,
     MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
     MutationTransition, MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal,
-    RankingSignalKind, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
+    RankingSignalKind, RebuildSummary, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
     RetrievalFilterField, RetrievalHit, RetrievalMatchKind, RetrievalQuery, SearchHit,
     SearchProjection, SessionSummary, ShadowRegisterOutcome, ShadowRegistration, SourceCursor,
     SourceIdentity, StoreError, StoreStats, migration, util,
@@ -422,6 +422,120 @@ impl EventStore {
             Event::from_json_str(&json).map_err(StoreError::from)
         })
         .collect()
+    }
+
+    /// Number of rows currently in the exact normalized-signature index.
+    ///
+    /// Zero against a non-empty `events` table means the retrieval index was
+    /// never built (for example, history imported before signature indexing
+    /// existed, or imported without `--index-tool-input`); such a database is a
+    /// candidate for [`EventStore::rebuild_search_projection`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn signature_count(&self) -> Result<u64, StoreError> {
+        let count: i64 =
+            self.connection
+                .query_row("SELECT count(*) FROM event_signatures", [], |row| {
+                    row.get(0)
+                })?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// Rebuild the derived search projections from every stored event's
+    /// canonical `event_json`, applying the caller-supplied redaction-approved
+    /// projection.
+    ///
+    /// This deletes and rewrites **only** the derived projection tables — the
+    /// free-text `events_search` mirror (whose triggers keep the external-content
+    /// `events_fts` index in sync) and the exact `event_signatures` index. It
+    /// never touches `events`, sessions, sources, source cursors, quarantined
+    /// conflicts, or any evidence. The whole rebuild runs in one immediate
+    /// transaction, so a failure leaves the previous projection intact and
+    /// running it twice with the same `project` closure yields identical state.
+    ///
+    /// The store never derives searchable text from raw JSON itself: the
+    /// `project` closure receives each revalidated canonical event and returns
+    /// the redaction-approved [`SearchProjection`] to index, or `None` to
+    /// exclude the event from the search index entirely. `None` writes no
+    /// `events_search` row at all — not even the structural project path and
+    /// tool name — so a path the current policy excludes stays out of
+    /// `events_fts`, mirroring import's privacy-skip semantics. Quarantined
+    /// conflicts (which have no `events` row) and previously deleted events are
+    /// naturally excluded too, so none are ever resurrected into the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when a stored event no longer satisfies the AEP
+    /// contract or a transactional `SQLite` operation fails.
+    pub fn rebuild_search_projection<F>(
+        &mut self,
+        mut project: F,
+    ) -> Result<RebuildSummary, StoreError>
+    where
+        F: FnMut(&Event) -> Option<SearchProjection>,
+    {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Derived rows only. The `events_search` delete trigger issues the
+        // matching FTS5 external-content 'delete' for each row, so clearing the
+        // mirror keeps `events_fts` consistent without a direct FTS write.
+        transaction.execute("DELETE FROM events_search", [])?;
+        transaction.execute("DELETE FROM event_signatures", [])?;
+
+        // Materialize the row set before running per-row inserts so the
+        // prepared-statement borrow is released against the same transaction.
+        let rows: Vec<(i64, String)> = {
+            let mut statement =
+                transaction.prepare("SELECT row_id, event_json FROM events ORDER BY row_id")?;
+            let mapped = statement.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            mapped.collect::<Result<_, _>>()?
+        };
+
+        let mut summary = RebuildSummary::default();
+        for (row_id, event_json) in rows {
+            let event = Event::from_json_str(&event_json)?;
+            summary.events_scanned += 1;
+            // `None` excludes the event from the index entirely (current path
+            // policy), so no `events_search` row is written and nothing reaches
+            // `events_fts` for it.
+            let Some(projection) = project(&event) else {
+                continue;
+            };
+            let tool_name = event.tool.as_ref().map(|tool| tool.name.as_str());
+            transaction.execute(
+                "INSERT INTO events_search(
+                    event_row_id, project_path, tool_name, tool_input_text, searchable_text
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    row_id,
+                    event.project.as_deref(),
+                    tool_name,
+                    projection.tool_input_text.as_deref(),
+                    projection.searchable_text.as_deref().unwrap_or_default(),
+                ],
+            )?;
+            summary.search_rows_written += 1;
+            if let Some(signature) = projection
+                .signature
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                transaction.execute(
+                    "INSERT INTO event_signatures(event_row_id, signature) VALUES (?1, ?2)",
+                    params![row_id, signature],
+                )?;
+                summary.signatures_written += 1;
+            }
+        }
+
+        transaction.commit()?;
+        Ok(summary)
     }
 
     /// Search the explicit redaction-approved FTS5 projection.

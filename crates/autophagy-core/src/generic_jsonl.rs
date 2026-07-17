@@ -278,7 +278,23 @@ fn project_selected(event: &Event, projects: &[String]) -> bool {
 }
 
 fn search_projection(event: &Event, options: &ImportOptions) -> SearchProjection {
-    let tool_input_text = if options.index_tool_input {
+    search_projection_from(event, options.index_tool_input, &options.index_metadata)
+}
+
+/// Derive the redaction-approved search projection for one canonical event.
+///
+/// Shared by streaming import and by the `reindex` rebuild so that both derive
+/// exactly the same free-text and exact-signature projection from the same
+/// gates: `index_tool_input` (searchable tool input plus the normalized
+/// operation signature) and `index_metadata` (already-redacted metadata keys
+/// promoted to searchable text). The event is assumed already redaction
+/// processed by the caller.
+pub(crate) fn search_projection_from(
+    event: &Event,
+    index_tool_input: bool,
+    index_metadata: &[String],
+) -> SearchProjection {
+    let tool_input_text = if index_tool_input {
         event
             .tool
             .as_ref()
@@ -287,8 +303,7 @@ fn search_projection(event: &Event, options: &ImportOptions) -> SearchProjection
     } else {
         None
     };
-    let searchable_text = options
-        .index_metadata
+    let searchable_text = index_metadata
         .iter()
         .filter_map(|key| event.metadata.get(key))
         .map(value_as_text)
@@ -299,7 +314,7 @@ fn search_projection(event: &Event, options: &ImportOptions) -> SearchProjection
     SearchProjection {
         tool_input_text,
         searchable_text: (!searchable_text.is_empty()).then_some(searchable_text),
-        signature: signature_projection(event, options.index_tool_input),
+        signature: signature_projection(event, index_tool_input),
     }
 }
 

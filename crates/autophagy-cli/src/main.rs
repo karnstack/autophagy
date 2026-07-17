@@ -1,6 +1,7 @@
 //! Command-line entry point for importing and querying local agent activity.
 
 mod daemon;
+mod setup;
 mod watch;
 
 use std::{
@@ -24,7 +25,10 @@ use autophagy_adapter_opencode::{
 use autophagy_adapter_pi::{
     PiImportOptions, PiImportSummary, default_sessions_root as default_pi_sessions_root, import_pi,
 };
-use autophagy_core::{ImportOptions, ImportSummary, import_jsonl};
+use autophagy_core::{
+    ImportOptions, ImportSummary, ReindexError, ReindexOptions, ReindexSummary, import_jsonl,
+    reindex,
+};
 use autophagy_events::Event;
 use autophagy_install::{
     InstallError, InstallTarget, InstalledArtifact, SkillPlan, SupervisorError, materialize,
@@ -32,7 +36,8 @@ use autophagy_install::{
 };
 use autophagy_mutations::{GenerationOutcome, equivalence_key, generate_candidates};
 use autophagy_patterns::{
-    DetectionDiagnostics, DetectorConfig, EvidencePacket, Observation, detect, detect_with_report,
+    DetectionDiagnostics, DetectionReport, DetectorConfig, EvidencePacket, Observation, detect,
+    detect_with_report,
 };
 use autophagy_replay::{
     CounterfactualOutcome, ExpectedAction, ReplayDraftError, ReplayEvaluationError, ReplayReport,
@@ -289,6 +294,70 @@ enum Commands {
     Daemon {
         #[command(subcommand)]
         action: DaemonCommand,
+    },
+
+    /// Rebuild the derived search index from already-stored events.
+    ///
+    /// Heals a database imported before signature indexing existed, or without
+    /// `--index-tool-input`: reimport is an idempotent no-op, so this rebuilds
+    /// the free-text and exact-signature projections in place from the stored
+    /// events. It never alters events, cursors, or evidence.
+    Reindex {
+        /// Rebuild the exact-signature index and make redacted tool input
+        /// searchable. Mirrors `import --index-tool-input`; without it, only
+        /// project paths and tool names stay searchable.
+        #[arg(long)]
+        index_tool_input: bool,
+
+        /// Index an already-redacted event metadata key as searchable text.
+        /// Repeatable. Mirrors `import --index-metadata`.
+        #[arg(long = "index-metadata", value_name = "KEY")]
+        index_metadata: Vec<String>,
+
+        /// Exclude project or artifact paths matching this glob from the rebuilt
+        /// index under current policy. Repeatable.
+        #[arg(long = "exclude-path", value_name = "GLOB")]
+        exclude_paths: Vec<String>,
+    },
+
+    /// Guided first-run: pick what to import and monitor, then see results.
+    ///
+    /// Detects each local coding agent, imports the ones you choose, runs the
+    /// deterministic digest, and optionally installs background monitoring.
+    /// With no terminal, pass `--adapter`, `--index-tool-input`, `--monitor`,
+    /// and `--yes` to run the same flow non-interactively.
+    Setup {
+        /// Native adapter to set up. Repeatable. Restricts detection to these;
+        /// defaults to every native adapter.
+        #[arg(long = "adapter", value_enum, value_name = "ADAPTER")]
+        adapters: Vec<watch::NativeAdapter>,
+
+        /// Make the commands your agents ran searchable (exact recall). Secrets
+        /// are filtered by redaction rules. Selects the import indexing gate.
+        #[arg(long)]
+        index_tool_input: bool,
+
+        /// Also persist prompt, response, and tool-result text in event
+        /// metadata. Still local and redacted.
+        #[arg(long)]
+        include_content: bool,
+
+        /// Index an already-redacted event metadata key as searchable text.
+        /// Repeatable.
+        #[arg(long = "index-metadata", value_name = "KEY")]
+        index_metadata: Vec<String>,
+
+        /// Install background monitoring (a launchd/systemd user service).
+        #[arg(long)]
+        monitor: bool,
+
+        /// Seconds between discovery cycles for installed monitoring.
+        #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+        interval: u64,
+
+        /// Assume yes and run non-interactively without prompting.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -593,6 +662,15 @@ enum CommandReport {
     DeleteAll(DeleteAllSummary),
     Watch(watch::WatchRunReport),
     Daemon(daemon::DaemonReport),
+    Reindex(ReindexReport),
+    Setup(setup::SetupReport),
+}
+
+#[derive(Debug, Serialize)]
+struct ReindexReport {
+    index_tool_input: bool,
+    #[serde(flatten)]
+    summary: ReindexSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -606,6 +684,29 @@ struct DigestReport {
     network_used: bool,
     findings: Vec<EvidencePacket>,
     observations: Vec<Observation>,
+}
+
+/// Build a digest report from one deterministic detection pass. Shared by the
+/// `digest` command and `setup`'s immediate digest so both render the same
+/// deterministic, model-free report through the same path.
+fn digest_report(report: DetectionReport) -> Result<DigestReport, CliError> {
+    let DetectionDiagnostics {
+        events_scanned,
+        sessions_scanned,
+        candidate_signatures,
+        observations,
+    } = report.diagnostics;
+    Ok(DigestReport {
+        spec_version: "digest/0.1",
+        generated_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
+        events_scanned,
+        sessions_scanned,
+        candidate_signatures,
+        model_used: false,
+        network_used: false,
+        findings: report.findings,
+        observations,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -734,7 +835,9 @@ impl CommandReport {
             | Self::Prune(_)
             | Self::DeleteSession(_)
             | Self::DeleteAll(_)
-            | Self::Daemon(_) => false,
+            | Self::Daemon(_)
+            | Self::Reindex(_)
+            | Self::Setup(_) => false,
         }
     }
 }
@@ -816,6 +919,13 @@ enum CliError {
     InstallationAuditMismatch,
     #[error("audit update failed ({primary}); filesystem rollback also failed ({rollback})")]
     FilesystemAuditRollback { primary: String, rollback: String },
+    #[error(transparent)]
+    Reindex(#[from] ReindexError),
+    #[error(
+        "setup needs an interactive terminal; re-run with explicit flags to go non-interactive, \
+         e.g. `autophagy setup --adapter claude-code --index-tool-input --monitor --yes`"
+    )]
+    SetupNonInteractive,
 }
 
 fn main() -> ExitCode {
@@ -1011,23 +1121,7 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
             let store = open_store(&database)?;
             let events = store.list_events_for_detection(project.as_deref())?;
             let report = detect_with_report(&events, thresholds.into());
-            let DetectionDiagnostics {
-                events_scanned,
-                sessions_scanned,
-                candidate_signatures,
-                observations,
-            } = report.diagnostics;
-            Ok(CommandReport::Digest(DigestReport {
-                spec_version: "digest/0.1",
-                generated_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
-                events_scanned,
-                sessions_scanned,
-                candidate_signatures,
-                model_used: false,
-                network_used: false,
-                findings: report.findings,
-                observations,
-            }))
+            Ok(CommandReport::Digest(digest_report(report)?))
         }
         Commands::Patterns {
             project,
@@ -1118,6 +1212,48 @@ fn execute(cli: Cli) -> Result<CommandReport, CliError> {
                 DaemonCommand::Status => daemon::status(cli.database)?,
             };
             Ok(CommandReport::Daemon(report))
+        }
+        Commands::Reindex {
+            index_tool_input,
+            index_metadata,
+            exclude_paths,
+        } => {
+            let database = resolve_database_path(cli.database)?;
+            let mut store = open_store(&database)?;
+            let options = ReindexOptions {
+                index_tool_input,
+                index_metadata,
+                exclude_paths,
+            };
+            let summary = reindex(&mut store, &options)?;
+            Ok(CommandReport::Reindex(ReindexReport {
+                index_tool_input,
+                summary,
+            }))
+        }
+        Commands::Setup {
+            adapters,
+            index_tool_input,
+            include_content,
+            index_metadata,
+            monitor,
+            interval,
+            yes,
+        } => {
+            let report = setup::run(
+                cli.database,
+                cli.output,
+                setup::SetupPlan {
+                    adapters,
+                    index_tool_input,
+                    include_content,
+                    index_metadata,
+                    monitor,
+                    interval,
+                    yes,
+                },
+            )?;
+            Ok(CommandReport::Setup(report))
         }
     }
 }
@@ -1806,6 +1942,10 @@ fn write_report(
             CommandReport::Export(_) => unreachable!("export handled before format selection"),
             CommandReport::Watch(_) => unreachable!("watch streams its own output"),
             CommandReport::Daemon(report) => daemon::write_text(report, &mut writer)?,
+            CommandReport::Reindex(report) => write_reindex(&mut writer, report)?,
+            // Setup streams its own guided text during execution, so there is no
+            // deferred text to render here.
+            CommandReport::Setup(_) => {}
         },
     }
     Ok(())
@@ -1830,6 +1970,29 @@ fn write_detection(
     // candidates and the exact gate each missed so the scan explains itself.
     if findings.is_empty() {
         write_observations(writer, observations)?;
+    }
+    Ok(())
+}
+
+fn write_reindex(writer: &mut impl Write, report: &ReindexReport) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{} events scanned · {} search rows · {} signatures · {} fields redacted",
+        report.summary.events_scanned,
+        report.summary.search_rows_written,
+        report.summary.signatures_written,
+        report.summary.redacted_fields
+    )?;
+    if report.index_tool_input {
+        writeln!(
+            writer,
+            "commands are now searchable by exact signature and free text"
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "only project paths and tool names are searchable; pass --index-tool-input to rebuild the exact-command index"
+        )?;
     }
     Ok(())
 }

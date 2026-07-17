@@ -16,7 +16,7 @@ pub use model::{
     InstallationTransitionOutcome, MutationDetails, MutationInstallationRecord, MutationRecord,
     MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
     MutationTransition, MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal,
-    RankingSignalKind, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
+    RankingSignalKind, RebuildSummary, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
     RetrievalFilterField, RetrievalHit, RetrievalMatchKind, RetrievalOutcome, RetrievalQuery,
     SearchHit, SearchProjection, SessionSummary, ShadowRegisterOutcome, ShadowRegistration,
     SourceCursor, SourceIdentity, StoreStats,

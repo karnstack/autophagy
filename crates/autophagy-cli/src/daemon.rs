@@ -366,7 +366,10 @@ fn default_adapters() -> Vec<String> {
         .collect()
 }
 
-fn install_with(env: &DaemonEnv, supervisor: &dyn Supervisor) -> Result<DaemonReport, CliError> {
+pub(crate) fn install_with(
+    env: &DaemonEnv,
+    supervisor: &dyn Supervisor,
+) -> Result<DaemonReport, CliError> {
     let plan = plan_supervisor(&env.config());
     if let Some(parent) = env.log_path.parent() {
         fs::create_dir_all(parent)?;

@@ -328,6 +328,22 @@ pub struct StoreStats {
     pub conflicts: i64,
 }
 
+/// Effect of rebuilding the derived search projections from stored events.
+///
+/// Returned by [`EventStore::rebuild_search_projection`](crate::EventStore::rebuild_search_projection).
+/// Counts describe only the derived free-text and exact-signature index rows
+/// that were rewritten; the canonical `events` rows are never altered.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct RebuildSummary {
+    /// Canonical events scanned and reprojected.
+    pub events_scanned: u64,
+    /// Free-text search rows written (exactly one per scanned event, so that
+    /// project path and tool name stay searchable regardless of index flags).
+    pub search_rows_written: u64,
+    /// Exact normalized-signature index rows written.
+    pub signatures_written: u64,
+}
+
 /// Effect of deleting one session.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct DeleteSummary {
