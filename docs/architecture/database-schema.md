@@ -279,7 +279,7 @@ are never indexed blindly.
 
 `event_signatures` is the exact normalized-signature index behind hybrid
 retrieval. A row holds one event's normalized operation signature (for example
-`operation/v1|shell|cargo build`), supplied through the same redaction-approved
+`operation/v2|shell|cargo build`), supplied through the same redaction-approved
 search projection that gates free-text tool input, and written in the same
 transaction as the event. Because a signature embeds command text, it is indexed
 only when the source's tool input is approved for indexing. Rows cascade on event

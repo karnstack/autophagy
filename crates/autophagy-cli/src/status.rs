@@ -62,6 +62,10 @@ pub struct IndexStatus {
     pub signatures: u64,
     /// Whether redacted tool input has been indexed for exact recall.
     pub tool_input_indexed: bool,
+    /// Indexed signatures minted under a superseded signature grammar. When
+    /// non-zero, the index predates the current grammar and a
+    /// `reindex --index-tool-input` re-mints every row (ADR 0014).
+    pub stale_signatures: u64,
 }
 
 /// One adapter's import activity and freshness.
@@ -121,6 +125,15 @@ pub fn run(
     let size_bytes = std::fs::metadata(&db_path).ok().map(|meta| meta.len());
     let stats = store.stats()?;
     let signatures = store.signature_count()?;
+    // Every indexed signature is an `operation/<version>|…` key. Rows that do not
+    // carry the current grammar's prefix were minted under a superseded grammar
+    // and no longer match freshly minted signatures (ADR 0014); `reindex` heals
+    // them.
+    let stale_prefix = format!(
+        "operation/{}|",
+        autophagy_events::signature::SIGNATURE_SPEC_VERSION
+    );
+    let stale_signatures = store.signatures_below_version(&stale_prefix)?;
     let activity = store.adapter_activity()?;
     let candidates = store.mutation_state_counts()?;
     let schema_version = store.schema_version()?;
@@ -176,6 +189,7 @@ pub fn run(
         index: IndexStatus {
             signatures,
             tool_input_indexed: signatures > 0,
+            stale_signatures,
         },
         adapters,
         detector: DetectorStatus {
@@ -269,6 +283,16 @@ pub fn write_text(report: &StatusReport, writer: &mut impl Write) -> std::io::Re
         "commands not indexed — run `autophagy reindex --index-tool-input`".to_owned()
     };
     writeln!(writer, "{}", row("Search", &search))?;
+    if report.index.stale_signatures > 0 {
+        writeln!(
+            writer,
+            "{}",
+            cont(&format!(
+                "{} signatures use an older grammar — run `autophagy reindex --index-tool-input` to re-mint and detect recurring shapes",
+                group(i64::try_from(report.index.stale_signatures).unwrap_or(i64::MAX))
+            ))
+        )?;
+    }
     writeln!(writer)?;
 
     if report.adapters.is_empty() {

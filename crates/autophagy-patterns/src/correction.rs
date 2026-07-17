@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use autophagy_events::{Event, EventKind};
+use autophagy_events::{Event, EventKind, signature::SIGNATURE_SPEC_VERSION};
 
 use crate::{
     Candidate, DetectorConfig, DetectorKind, EvidencePacket, EvidenceReference,
@@ -36,7 +36,7 @@ pub(crate) fn detect(
         let Some(recurrence) = score(&evidence, opposite) else {
             continue;
         };
-        let packet_signature = format!("correction/v1|{signature}");
+        let packet_signature = format!("correction/{SIGNATURE_SPEC_VERSION}|{signature}");
         let title = format!("Repeated user correction: {signature}");
         if qualifies(&recurrence, config) {
             findings.push(EvidencePacket {

@@ -95,8 +95,12 @@ pub fn equivalence_key(package: &MutationPackage) -> String {
     format!("eqv_{encoded}")
 }
 
+// Selector prefixes track `autophagy_events::signature::SIGNATURE_SPEC_VERSION`
+// (currently `v2`). A finding minted under an older grammar (`failure/v1|…`)
+// simply does not parse here and yields no v2 candidate — the compatibility
+// story in ADR 0014: v1 records stay valid but are never re-derived as v2.
 fn failure_candidate(finding: &EvidencePacket) -> Option<MutationPackage> {
-    let signature = finding.signature.strip_prefix("failure/v1|")?;
+    let signature = finding.signature.strip_prefix("failure/v2|")?;
     let (operation, exit_code) = signature.rsplit_once("|exit:")?;
     let (tool, command) = operation.split_once('|')?;
     if tool.trim().is_empty() || command.trim().is_empty() || exit_code.parse::<i64>().is_err() {
@@ -130,7 +134,7 @@ fn failure_candidate(finding: &EvidencePacket) -> Option<MutationPackage> {
 }
 
 fn correction_candidate(finding: &EvidencePacket) -> Option<MutationPackage> {
-    let rule = finding.signature.strip_prefix("correction/v1|")?.trim();
+    let rule = finding.signature.strip_prefix("correction/v2|")?.trim();
     if rule.is_empty() {
         return None;
     }
@@ -156,7 +160,7 @@ fn correction_candidate(finding: &EvidencePacket) -> Option<MutationPackage> {
 }
 
 fn recovery_candidate(finding: &EvidencePacket) -> Option<MutationPackage> {
-    let signature = finding.signature.strip_prefix("recovery/v1|")?;
+    let signature = finding.signature.strip_prefix("recovery/v2|")?;
     let (target, recovery) = signature.split_once("|via|")?;
     let (target_operation, exit_code) = target.rsplit_once("|exit:")?;
     let (_target_tool, target_command) = target_operation.split_once('|')?;

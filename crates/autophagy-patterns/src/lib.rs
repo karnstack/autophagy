@@ -29,7 +29,11 @@ const OBSERVATION_LIMIT: usize = 5;
 /// Bump this whenever detector output or the signature normalization in
 /// `autophagy-events` changes, so every previously persisted cache entry is
 /// automatically treated as stale rather than served from an outdated pass.
-pub const DETECTION_SPEC_VERSION: &str = "detection/v1";
+///
+/// `v2` accompanies the `v2` signature grammar: detectors now group operations
+/// by their volatile-token-normalized shape (see `autophagy_events::signature`
+/// and ADR 0014), so every cache entry minted under the `v1` grammar must miss.
+pub const DETECTION_SPEC_VERSION: &str = "detection/v2";
 
 /// Thresholds shared by deterministic recurrence detectors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

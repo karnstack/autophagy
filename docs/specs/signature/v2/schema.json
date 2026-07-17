@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/signature/v2/schema.json",
+  "title": "Autophagy Signature Selector v2",
+  "description": "Normative envelope grammar for a v2 recurrence signature / mutation trigger selector. The command-text normalization rules (paths, urls, uuids, hex, digits) are documented in README.md and enforced by the minting code; this schema pins the versioned family envelope so a v1 selector or a malformed v2 selector is rejected.",
+  "type": "string",
+  "anyOf": [
+    { "pattern": "^operation/v2\\|[^|]+\\|.+$" },
+    { "pattern": "^failure/v2\\|[^|]+\\|.+\\|exit:-?[0-9]+$" },
+    { "pattern": "^recovery/v2\\|[^|]+\\|.+\\|exit:-?[0-9]+\\|via\\|[^|]+\\|.+$" },
+    { "pattern": "^correction/v2\\|.+$" }
+  ]
+}

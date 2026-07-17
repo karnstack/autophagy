@@ -3,7 +3,7 @@ set -eu
 
 database="${TMPDIR:-/tmp}/autophagy-milestone-1-$$.db"
 install_repository="${TMPDIR:-/tmp}/autophagy-install-target-$$"
-failure_mutation="mut_d6b7a340eb2fb6f18bee4a20932b9c954adb4975f3ea8136bf0bd264b3ec431c"
+failure_mutation="mut_6b51ef819f54c0275db19b15907b0b23c39598241c912828bb64cd5bf824a0ee"
 replay_draft="${TMPDIR:-/tmp}/autophagy-replay-draft-$$.json"
 trap 'rm -f "$database" "$database-shm" "$database-wal" "$replay_draft"; rm -rf "$install_repository"' EXIT HUP INT TERM
 mkdir -p "$install_repository"

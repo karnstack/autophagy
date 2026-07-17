@@ -51,9 +51,20 @@ fn weak_or_malformed_findings_produce_insufficient_evidence() {
     ));
 
     let mut malformed = fixture_findings().remove(0);
-    malformed.signature = "failure/v1|missing-exit".to_owned();
+    malformed.signature = "failure/v2|missing-exit".to_owned();
     assert!(matches!(
         generate_candidate(&malformed),
+        GenerationOutcome::InsufficientEvidence { .. }
+    ));
+
+    // Compatibility (ADR 0014): a well-formed selector minted under the retired
+    // v1 grammar no longer parses as a v2 selector, so it generates no candidate.
+    // Already-registered v1 mutations stay valid records; they are simply never
+    // re-derived under v2.
+    let mut legacy = fixture_findings().remove(0);
+    legacy.signature = "failure/v1|shell|cargo build|exit:101".to_owned();
+    assert!(matches!(
+        generate_candidate(&legacy),
         GenerationOutcome::InsufficientEvidence { .. }
     ));
 }

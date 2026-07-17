@@ -557,6 +557,30 @@ impl EventStore {
         Ok(u64::try_from(count).unwrap_or(0))
     }
 
+    /// Number of indexed signatures **not** minted under `current_prefix`.
+    ///
+    /// Every indexed signature is an `operation/<version>|…` key, so passing the
+    /// caller's current operation prefix (for example `operation/v2|`) counts the
+    /// rows left over from a superseded signature grammar. A non-zero result
+    /// means the exact-signature index was built under an older grammar and no
+    /// longer matches freshly minted signatures; rebuilding it with
+    /// `reindex --index-tool-input` re-mints every row under the current grammar.
+    /// The count is diagnostic only — the stale rows stay usable for exact recall
+    /// of their own (old) signature until a rebuild replaces them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn signatures_below_version(&self, current_prefix: &str) -> Result<u64, StoreError> {
+        let pattern = format!("{}%", escape_like(current_prefix));
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM event_signatures WHERE signature NOT LIKE ?1 ESCAPE '\\'",
+            params![pattern],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
     /// Rebuild the derived search projections from every stored event's
     /// canonical `event_json`, applying the caller-supplied redaction-approved
     /// projection.
@@ -2664,4 +2688,17 @@ fn compare_bm25(left: Option<f64>, right: Option<f64>) -> std::cmp::Ordering {
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     }
+}
+
+/// Escape the SQL `LIKE` metacharacters (`\`, `%`, `_`) in a literal prefix so it
+/// matches only itself. Paired with an explicit `ESCAPE '\'` clause.
+fn escape_like(literal: &str) -> String {
+    let mut escaped = String::with_capacity(literal.len());
+    for ch in literal.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }

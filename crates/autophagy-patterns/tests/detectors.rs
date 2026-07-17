@@ -117,7 +117,7 @@ fn repeated_successful_recovery_preserves_composite_lineage() {
     assert_eq!(recovery.counterexamples.len(), 2);
     assert_eq!(
         recovery.signature,
-        "recovery/v1|shell|mise run check|exit:1|via|shell|mise run codegen"
+        "recovery/v2|shell|mise run check|exit:1|via|shell|mise run codegen"
     );
     assert!(
         recovery
@@ -163,6 +163,52 @@ fn shell_event(index: u32, session: &str, kind: EventKind, command: &str, exit: 
         artifacts: Vec::new(),
         metadata: BTreeMap::new(),
     }
+}
+
+/// Cross-path recurrence: the v2 signature grammar (ADR 0014) normalizes
+/// volatile absolute paths, so the *same* failing command shape recurring under
+/// three different scratchpad paths across three sessions now qualifies as one
+/// repeated-command-failure finding. Under the v1 literal grammar these three
+/// byte-distinct commands never grouped and produced zero findings — the exact
+/// yield gap this change closes.
+#[test]
+fn volatile_paths_recur_as_one_failure_under_v2() {
+    let commands = [
+        (
+            "ses_a",
+            "cat /private/tmp/session-11112222/notes.txt && go build ./...",
+        ),
+        (
+            "ses_b",
+            "cat /private/tmp/session-33334444/notes.txt && go build ./...",
+        ),
+        (
+            "ses_c",
+            "cat /private/tmp/session-55556666/notes.txt && go build ./...",
+        ),
+    ];
+    let events = commands
+        .iter()
+        .enumerate()
+        .map(|(index, (session, command))| {
+            #[allow(clippy::cast_possible_truncation)]
+            shell_event(index as u32, session, EventKind::ToolFailed, command, 1)
+        })
+        .collect::<Vec<_>>();
+
+    let findings = detect(&events, DetectorConfig::default());
+    let failure = findings
+        .iter()
+        .find(|finding| finding.detector == DetectorKind::RepeatedCommandFailure)
+        .expect("distinct-path failures share one normalized signature and qualify");
+    assert_eq!(failure.score.occurrences, 3);
+    assert_eq!(failure.score.distinct_sessions, 3);
+    assert_eq!(
+        failure.signature,
+        "failure/v2|shell|cat «path» && go build ./...|exit:1"
+    );
+    // The three byte-distinct raw commands are all retained as exact evidence.
+    assert_eq!(failure.evidence.len(), 3);
 }
 
 /// Regression for the real-data threshold bug: an operation that succeeds far

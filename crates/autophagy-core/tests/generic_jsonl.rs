@@ -8,7 +8,7 @@ use autophagy_store::{EventStore, RetrievalMatchKind, RetrievalQuery, StoreStats
 const MIXED: &str = include_str!("fixtures/mixed.jsonl");
 const RETRIEVAL: &str = include_str!("../../../evals/fixtures/retrieval/deterministic.jsonl");
 
-const BUILD_SIG: &str = "operation/v1|shell|cargo build";
+const BUILD_SIG: &str = "operation/v2|shell|cargo build";
 
 fn hit_ids(hits: &[autophagy_store::RetrievalHit]) -> Vec<String> {
     hits.iter().map(|hit| hit.event_id.clone()).collect()

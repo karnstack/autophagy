@@ -1278,8 +1278,8 @@ fn hit_ids(hits: &[autophagy_store::RetrievalHit]) -> Vec<&str> {
     hits.iter().map(|hit| hit.event_id.as_str()).collect()
 }
 
-const BUILD_SIG: &str = "operation/v1|shell|cargo build";
-const TEST_SIG: &str = "operation/v1|shell|npm test";
+const BUILD_SIG: &str = "operation/v2|shell|cargo build";
+const TEST_SIG: &str = "operation/v2|shell|npm test";
 
 fn seed_retrieval_store() -> EventStore {
     let mut store = EventStore::open_in_memory().expect("store");
@@ -1346,6 +1346,26 @@ fn seed_retrieval_store() -> EventStore {
             .expect("insert retrieval event");
     }
     store
+}
+
+#[test]
+fn signatures_below_version_counts_only_superseded_grammar() {
+    let store = seed_retrieval_store();
+    // The seeded index is entirely `operation/v2|…`, so none are stale under v2.
+    assert_eq!(
+        store
+            .signatures_below_version("operation/v2|")
+            .expect("v2 count"),
+        0
+    );
+    // Against a newer grammar prefix, every indexed row is superseded. The store
+    // seeds three `cargo build` rows plus one `npm test` row.
+    assert_eq!(
+        store
+            .signatures_below_version("operation/v3|")
+            .expect("v3 count"),
+        4
+    );
 }
 
 #[test]
@@ -1612,7 +1632,7 @@ fn signature_index_preserves_idempotency_quarantine_and_deletion() {
             .insert_event(
                 &source,
                 &conflicting,
-                &retrieval_projection("conflicting", "operation/v1|shell|cargo build --release"),
+                &retrieval_projection("conflicting", "operation/v2|shell|cargo build --release"),
             )
             .expect("conflict insert"),
         InsertOutcome::ConflictQuarantined { .. }
@@ -1624,7 +1644,7 @@ fn signature_index_preserves_idempotency_quarantine_and_deletion() {
     assert!(
         store
             .retrieve(&RetrievalQuery {
-                signature: Some("operation/v1|shell|cargo build --release".to_owned()),
+                signature: Some("operation/v2|shell|cargo build --release".to_owned()),
                 limit: 10,
                 ..RetrievalQuery::default()
             })

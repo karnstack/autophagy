@@ -1,12 +1,12 @@
 {
   "spec_version": "replay-suite/0.1",
-  "mutation_id": "mut_d6b7a340eb2fb6f18bee4a20932b9c954adb4975f3ea8136bf0bd264b3ec431c",
+  "mutation_id": "mut_6b51ef819f54c0275db19b15907b0b23c39598241c912828bb64cd5bf824a0ee",
   "scenarios": [
     {
       "spec_version": "replay-scenario/0.1",
       "scenario_id": "rps_failure_preconditions",
       "source_event_ids": ["evt_failure_1"],
-      "observed_trigger_selectors": ["failure/v1|shell|mise run check|exit:1"],
+      "observed_trigger_selectors": ["failure/v2|shell|mise run check|exit:1"],
       "expected_action": "intervene",
       "counterfactual_outcome": "expected_result"
     },
@@ -14,7 +14,7 @@
       "spec_version": "replay-scenario/0.1",
       "scenario_id": "rps_failure_unchanged_retry",
       "source_event_ids": ["evt_failure_2"],
-      "observed_trigger_selectors": ["failure/v1|shell|mise run check|exit:1"],
+      "observed_trigger_selectors": ["failure/v2|shell|mise run check|exit:1"],
       "expected_action": "intervene",
       "counterfactual_outcome": "expected_result"
     },
@@ -22,7 +22,7 @@
       "spec_version": "replay-scenario/0.1",
       "scenario_id": "rps_failure_changed_hypothesis",
       "source_event_ids": ["evt_failure_3"],
-      "observed_trigger_selectors": ["failure/v1|shell|mise run check|exit:1"],
+      "observed_trigger_selectors": ["failure/v2|shell|mise run check|exit:1"],
       "expected_action": "intervene",
       "counterfactual_outcome": "expected_result"
     },
@@ -30,14 +30,14 @@
       "spec_version": "replay-scenario/0.1",
       "scenario_id": "rps_noop_different_command",
       "source_event_ids": ["evt_success_1"],
-      "observed_trigger_selectors": ["failure/v1|shell|mise run test|exit:1"],
+      "observed_trigger_selectors": ["failure/v2|shell|mise run test|exit:1"],
       "expected_action": "no_op"
     },
     {
       "spec_version": "replay-scenario/0.1",
       "scenario_id": "rps_noop_successful_command",
       "source_event_ids": ["evt_correction_counterexample"],
-      "observed_trigger_selectors": ["correction/v1|run codegen before tests"],
+      "observed_trigger_selectors": ["correction/v2|run codegen before tests"],
       "expected_action": "no_op"
     }
   ]
