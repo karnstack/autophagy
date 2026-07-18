@@ -37,6 +37,10 @@ use autophagy_efficacy::{
     InsufficientReason, MatchingRule, Verdict, WindowBounds, evaluate as evaluate_efficacy,
 };
 use autophagy_events::Event;
+use autophagy_genome::{
+    AttestationInput, AttestationKind, GenomeBundle, GenomeSource, GenomeTransition,
+    build as build_genome, parse as parse_genome,
+};
 use autophagy_install::{
     InstallError, InstallTarget, InstalledArtifact, SkillPlan, SupervisorError, materialize,
     plan_skill, unmaterialize,
@@ -47,6 +51,7 @@ use autophagy_mutations::{
 use autophagy_patterns::{
     DetectionDiagnostics, DetectionReport, DetectorConfig, EvidencePacket, Observation, UnmetGate,
 };
+use autophagy_redaction::PrivacyPolicy;
 use autophagy_replay::{
     CounterfactualOutcome, ExpectedAction, ReplayDraftError, ReplayEvaluationError, ReplayReport,
     ReplaySuite, evaluate, extract_review_draft,
@@ -56,11 +61,13 @@ use autophagy_shadow::{
     evaluate as evaluate_shadow, extract_observation_draft,
 };
 use autophagy_store::{
-    DeleteAllSummary, DeleteSummary, EfficacyRegisterOutcome, EfficacyRegistration, EventStore,
-    InstallationRegistration, InstallationTransitionOutcome, MutationDetails, MutationRecord,
-    MutationRegisterOutcome, MutationRegistration, MutationTransitionOutcome, PruneSummary,
-    ReplayRegisterOutcome, ReplayRegistration, RetrievalHit, RetrievalOutcome, RetrievalQuery,
-    SessionSummary, ShadowRegisterOutcome, ShadowRegistration, StoreError,
+    AttestationRegisterOutcome, AttestationRegistration, DeleteAllSummary, DeleteSummary,
+    EfficacyRegisterOutcome, EfficacyRegistration, EventStore, InsertOutcome,
+    InstallationRegistration, InstallationTransitionOutcome, MutationAttestationRecord,
+    MutationDetails, MutationRecord, MutationRegisterOutcome, MutationRegistration,
+    MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome, ReplayRegistration,
+    RetrievalHit, RetrievalOutcome, RetrievalQuery, SearchProjection, SessionSummary,
+    ShadowRegisterOutcome, ShadowRegistration, SourceIdentity, StoreError,
 };
 use autophagy_synthesis::{
     AgentCliProvider, Capability, DeterministicReferenceProvider, EndpointLocality, ManifestError,
@@ -252,6 +259,18 @@ enum Commands {
     Mutations {
         #[command(subcommand)]
         action: MutationAction,
+    },
+
+    /// Export and import portable mutation genomes between machines.
+    ///
+    /// A genome is a self-contained, redaction-gated file carrying one verified
+    /// mutation, its redacted evidence, and the origin's verification reports as
+    /// display-only attestations. Trust is never transplanted: an imported
+    /// mutation always lands as a fresh review-only candidate that must be
+    /// re-verified locally.
+    Genome {
+        #[command(subcommand)]
+        action: GenomeAction,
     },
 
     /// Export redacted canonical AEP events as JSONL to standard output.
@@ -664,6 +683,32 @@ enum MutationAction {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum GenomeAction {
+    /// Export one mutation as a redaction-gated genome file.
+    Export {
+        /// Stable mutation identity (accepts a unique `mut_` short-id prefix).
+        mutation_id: String,
+
+        /// Destination path for the `.genome.json` bundle.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+
+        /// Replace an existing destination file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Import a genome as a fresh review-only candidate with attestations.
+    Import {
+        /// Path to the `.genome.json` bundle to import.
+        path: PathBuf,
+
+        /// Show the full import plan and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 /// Coding-agent installation target selectable on the command line.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -766,7 +811,7 @@ enum CommandReport {
     #[serde(rename = "mutations_synthesize")]
     MutationSynthesis(MutationSynthesisReport),
     #[serde(rename = "mutations_list")]
-    MutationList(Vec<MutationRecord>),
+    MutationList(MutationListReport),
     #[serde(rename = "mutations_show")]
     MutationShow(MutationDetails),
     #[serde(rename = "mutations_transition")]
@@ -785,6 +830,10 @@ enum CommandReport {
     MutationInstall(MutationInstallReport),
     #[serde(rename = "mutations_uninstall")]
     MutationUninstall(InstallationTransitionOutcome),
+    #[serde(rename = "genome_export")]
+    GenomeExport(GenomeExportReport),
+    #[serde(rename = "genome_import")]
+    GenomeImport(GenomeImportReport),
     Export(Vec<Event>),
     Prune(PruneSummary),
     DeleteSession(DeleteSummary),
@@ -813,6 +862,22 @@ struct SearchReport {
 impl Serialize for SearchReport {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.hits.serialize(serializer)
+    }
+}
+
+/// Registered candidates plus the set of ids carrying imported attestations.
+///
+/// The imported flag is a text-only affordance: the JSON surface stays the bare
+/// record array (like [`SearchReport`]), so machine consumers are unchanged.
+#[derive(Debug)]
+struct MutationListReport {
+    mutations: Vec<MutationRecord>,
+    imported: BTreeSet<String>,
+}
+
+impl Serialize for MutationListReport {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.mutations.serialize(serializer)
     }
 }
 
@@ -1012,6 +1077,55 @@ struct MutationInstallReport {
 }
 
 #[derive(Debug, Serialize)]
+struct GenomeExportReport {
+    path: String,
+    genome_id: String,
+    mutation_id: String,
+    event_count: usize,
+    attestation_count: usize,
+    redacted_fields: u64,
+}
+
+/// Import outcome for the mutation itself, mirroring the store's registration
+/// verdicts plus a dry-run preview form.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GenomeMutationOutcome {
+    /// The candidate was newly registered (or would be, in a dry run).
+    Registered,
+    /// The identical package already existed: a no-op.
+    Duplicate,
+    /// An equivalent candidate already exists under another id; nothing written.
+    EquivalentExisting,
+    /// The same id exists with different content; nothing written.
+    ContentConflict,
+}
+
+#[derive(Debug, Serialize)]
+struct ImportedAttestation {
+    kind: String,
+    id: String,
+    passed: bool,
+    hash_verified: bool,
+    /// Whether it was newly stored (false for a duplicate or a dry run).
+    stored: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct GenomeImportReport {
+    dry_run: bool,
+    genome_id: String,
+    origin_instance: String,
+    mutation_id: String,
+    mutation_outcome: GenomeMutationOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    equivalent_mutation_id: Option<String>,
+    events_inserted: usize,
+    events_duplicate: usize,
+    attestations: Vec<ImportedAttestation>,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum ImportReport {
     Generic(ImportSummary),
@@ -1056,6 +1170,8 @@ impl CommandReport {
             | Self::MutationShadowDraft(_)
             | Self::MutationInstall(_)
             | Self::MutationUninstall(_)
+            | Self::GenomeExport(_)
+            | Self::GenomeImport(_)
             | Self::Export(_)
             | Self::Prune(_)
             | Self::DeleteSession(_)
@@ -1246,6 +1362,27 @@ enum CliError {
     },
     #[error("id prefix '{query}' is ambiguous; it matches {matches}")]
     AmbiguousId { query: String, matches: String },
+    #[error(transparent)]
+    GenomeBuild(#[from] autophagy_genome::GenomeBuildError),
+    #[error(transparent)]
+    GenomeParse(#[from] autophagy_genome::GenomeParseError),
+    #[error(transparent)]
+    Redaction(#[from] autophagy_redaction::PrivacyError),
+    #[error(
+        "genome evidence event '{event_id}' conflicts with a different local event of the same id; \
+         its evidence integrity cannot be satisfied, so the import was aborted with nothing written"
+    )]
+    GenomeEvidenceConflict {
+        /// The conflicting evidence event's identity.
+        event_id: String,
+    },
+    #[error(
+        "genome evidence event '{0}' is excluded by the local path policy; \
+         its evidence cannot be stored under import.exclude_paths, so the import was aborted"
+    )]
+    GenomeExcludedEvidence(String),
+    #[error("genome cites evidence event '{0}', which is not present locally to export")]
+    GenomeMissingEvidence(String),
 }
 
 /// The built-in reference manifest for the offline `deterministic` provider.
@@ -1420,6 +1557,99 @@ fn write_mutation_efficacy(
             ""
         },
     )
+}
+
+/// Render the origin-claimed attestation section of `mutations show`.
+///
+/// The wording is deliberately blunt: these reports were produced by the
+/// genome's origin, not reproduced locally, and they do not advance the
+/// lifecycle. `integrity` reports only whether the carried report bytes still
+/// hash to their carried fingerprint (a transit check), never a re-verification.
+fn write_mutation_attestations(
+    writer: &mut impl Write,
+    attestations: &[MutationAttestationRecord],
+) -> io::Result<()> {
+    if attestations.is_empty() {
+        return Ok(());
+    }
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "attestations (origin-claimed, not locally verified — re-run challenge, replay, and shadow locally to activate):"
+    )?;
+    for attestation in attestations {
+        writeln!(
+            writer,
+            "  {} from {}\tclaimed_passed={} · integrity={}",
+            attestation.kind,
+            attestation.origin_instance,
+            attestation.passed,
+            if attestation.hash_verified {
+                "ok"
+            } else {
+                "FAILED"
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Render the `genome import` result: mutation verdict, event counts, and each
+/// origin-claimed attestation with its honest status.
+fn write_genome_import(writer: &mut impl Write, report: &GenomeImportReport) -> io::Result<()> {
+    let plan = if report.dry_run { " (dry run)" } else { "" };
+    let verdict = match report.mutation_outcome {
+        GenomeMutationOutcome::Registered => {
+            if report.dry_run {
+                "would register as a fresh candidate".to_owned()
+            } else {
+                "registered as a fresh candidate".to_owned()
+            }
+        }
+        GenomeMutationOutcome::Duplicate => "already present (no-op)".to_owned(),
+        GenomeMutationOutcome::EquivalentExisting => {
+            report.equivalent_mutation_id.as_deref().map_or_else(
+                || "equivalent candidate already exists; nothing written".to_owned(),
+                |id| format!("equivalent to {}; nothing written", short_id(id)),
+            )
+        }
+        GenomeMutationOutcome::ContentConflict => {
+            "same id exists with different content; nothing written".to_owned()
+        }
+    };
+    writeln!(
+        writer,
+        "{}\tfrom {}\t{verdict}{plan}",
+        short_id(&report.mutation_id),
+        report.origin_instance,
+    )?;
+    writeln!(
+        writer,
+        "  evidence: {} new · {} already present",
+        report.events_inserted, report.events_duplicate
+    )?;
+    for attestation in &report.attestations {
+        writeln!(
+            writer,
+            "  {} attestation {}\tclaimed_passed={} · integrity={} · {}",
+            attestation.kind,
+            short_id(&attestation.id),
+            attestation.passed,
+            if attestation.hash_verified {
+                "ok"
+            } else {
+                "FAILED"
+            },
+            if attestation.stored {
+                "stored (origin-claimed, not verified locally)"
+            } else if report.dry_run {
+                "would be stored (origin-claimed)"
+            } else {
+                "not stored"
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Rewrite an absolute project path into a `~`-relative form when it lives under
@@ -1933,6 +2163,7 @@ fn execute(
         Commands::Mutations { action } => {
             execute_mutation_action(cli.database, action, leaf, config)
         }
+        Commands::Genome { action } => execute_genome_action(cli.database, action, config),
         Commands::Export { project } => {
             let database = resolve_database_path(cli.database)?;
             let store = open_store(&database)?;
@@ -2331,7 +2562,10 @@ fn execute_mutation_action(
                 current_states,
             }))
         }
-        MutationAction::List => Ok(CommandReport::MutationList(store.list_mutations()?)),
+        MutationAction::List => Ok(CommandReport::MutationList(MutationListReport {
+            mutations: store.list_mutations()?,
+            imported: store.mutations_with_attestations()?,
+        })),
         MutationAction::Show { mutation_id } => {
             let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
             Ok(CommandReport::MutationShow(
@@ -2734,6 +2968,343 @@ fn execute_mutation_action(
     }
 }
 
+/// Every exact evidence id a report cites, gathered from its `results` array.
+fn report_event_ids(report: &serde_json::Value) -> impl Iterator<Item = String> + '_ {
+    report
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|result| {
+            result
+                .get("source_event_ids")
+                .and_then(serde_json::Value::as_array)
+        })
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Compile the redaction policy used to gate both genome export and import from
+/// the effective `import.exclude_paths`.
+fn genome_policy(config: &config::Config) -> Result<PrivacyPolicy, CliError> {
+    let exclude = config.import_exclude_paths.clone().unwrap_or_default();
+    Ok(PrivacyPolicy::new(&exclude)?)
+}
+
+/// Origin identity for an exported genome: the distinct source instance keys the
+/// evidence came from, joined stably. A single-source mutation (the common case)
+/// yields exactly that source's key.
+fn origin_instance_key(store: &EventStore, events: &[Event]) -> Result<String, CliError> {
+    let mut sessions = BTreeSet::new();
+    for event in events {
+        sessions.insert(event.session_id.as_str().to_owned());
+    }
+    let mut instances = BTreeSet::new();
+    for session_id in &sessions {
+        if let Some(summary) = store.get_session(session_id)? {
+            instances.insert(summary.instance_key);
+        }
+    }
+    if instances.is_empty() {
+        Ok("unknown".to_owned())
+    } else {
+        Ok(instances.into_iter().collect::<Vec<_>>().join("+"))
+    }
+}
+
+/// Write a genome bundle as pretty JSON with a trailing newline, refusing to
+/// clobber an existing file unless `force` (the draft-export house style).
+fn write_bundle(path: &Path, bundle: &GenomeBundle, force: bool) -> Result<(), CliError> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut destination = options.open(path)?;
+    serde_json::to_writer_pretty(&mut destination, bundle)?;
+    writeln!(destination)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn execute_genome_action(
+    database: Option<PathBuf>,
+    action: GenomeAction,
+    config: &config::Config,
+) -> Result<CommandReport, CliError> {
+    let database = resolve_database_path(database)?;
+    match action {
+        GenomeAction::Export {
+            mutation_id,
+            out,
+            force,
+        } => {
+            let store = open_store(&database)?;
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
+            let details = store.get_mutation(&mutation_id)?;
+            let package: MutationPackage =
+                serde_json::from_value(details.mutation.package.clone())?;
+
+            // The union of every exact evidence id the hypothesis and the
+            // verification reports cite. These events must travel so the FK wall
+            // and content-hash-locked reports stay valid on the receiver.
+            let mut event_ids: BTreeSet<String> = BTreeSet::new();
+            event_ids.extend(package.hypothesis.supporting_event_ids.iter().cloned());
+            event_ids.extend(package.hypothesis.counterexample_event_ids.iter().cloned());
+            for replay in &details.replays {
+                event_ids.extend(report_event_ids(&replay.report));
+            }
+            for shadow in &details.shadows {
+                event_ids.extend(report_event_ids(&shadow.report));
+            }
+            let mut events = Vec::with_capacity(event_ids.len());
+            for event_id in &event_ids {
+                let event = store
+                    .get_event(event_id)?
+                    .ok_or_else(|| CliError::GenomeMissingEvidence(event_id.clone()))?;
+                events.push(event);
+            }
+
+            let mut attestations = Vec::new();
+            for replay in &details.replays {
+                attestations.push(AttestationInput {
+                    kind: AttestationKind::Replay,
+                    id: replay.replay_id.clone(),
+                    set_hash: replay.scenario_set_hash.clone(),
+                    report: replay.report.clone(),
+                    passed: replay.passed,
+                    created_at: replay.created_at.clone(),
+                });
+            }
+            for shadow in &details.shadows {
+                attestations.push(AttestationInput {
+                    kind: AttestationKind::Shadow,
+                    id: shadow.shadow_id.clone(),
+                    set_hash: shadow.observation_set_hash.clone(),
+                    report: shadow.report.clone(),
+                    passed: shadow.passed,
+                    created_at: shadow.created_at.clone(),
+                });
+            }
+            let transitions = details
+                .transitions
+                .iter()
+                .map(|transition| GenomeTransition {
+                    from_state: transition.from_state.clone(),
+                    to_state: transition.to_state.clone(),
+                    reason: transition.reason.clone(),
+                    occurred_at: transition.occurred_at.clone(),
+                })
+                .collect();
+
+            let policy = genome_policy(config)?;
+            let source = GenomeSource {
+                origin_instance_key: origin_instance_key(&store, &events)?,
+                autophagy_version: env!("CARGO_PKG_VERSION").to_owned(),
+                exported_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
+                package,
+                events,
+                attestations,
+                transitions,
+            };
+            let bundle = build_genome(source, &policy)?;
+            write_bundle(&out, &bundle, force)?;
+            Ok(CommandReport::GenomeExport(GenomeExportReport {
+                path: out.to_string_lossy().into_owned(),
+                genome_id: bundle.genome_id.clone(),
+                mutation_id,
+                event_count: bundle.evidence_events.len(),
+                attestation_count: bundle.attestations.len(),
+                redacted_fields: bundle.redaction.redacted_fields,
+            }))
+        }
+        GenomeAction::Import { path, dry_run } => {
+            let bytes = fs::read(&path)?;
+            let bundle = parse_genome(&bytes)?;
+            let policy = genome_policy(config)?;
+            let mut store = open_store(&database)?;
+
+            // Re-run the local redaction policy over every event before it is
+            // stored — the receiver never trusts that the sender redacted
+            // correctly. A path-excluded event aborts the import.
+            let mut sanitized = Vec::with_capacity(bundle.evidence_events.len());
+            for event in &bundle.evidence_events {
+                match policy.apply(event).event {
+                    Some(event) => sanitized.push(event),
+                    None => {
+                        return Err(CliError::GenomeExcludedEvidence(
+                            event.event_id.as_str().to_owned(),
+                        ));
+                    }
+                }
+            }
+
+            let package: MutationPackage = bundle.mutation.clone();
+            let attestation_previews = bundle
+                .attestations
+                .iter()
+                .map(|attestation| ImportedAttestation {
+                    kind: attestation.kind.as_str().to_owned(),
+                    id: attestation.id.clone(),
+                    passed: attestation.passed,
+                    hash_verified: attestation.hash_matches(),
+                    stored: false,
+                })
+                .collect::<Vec<_>>();
+
+            if dry_run {
+                let (outcome, equivalent) = preview_mutation_outcome(&store, &package)?;
+                let mut events_inserted = 0;
+                let mut events_duplicate = 0;
+                for event in &sanitized {
+                    if store.get_event(event.event_id.as_str())?.is_some() {
+                        events_duplicate += 1;
+                    } else {
+                        events_inserted += 1;
+                    }
+                }
+                return Ok(CommandReport::GenomeImport(GenomeImportReport {
+                    dry_run: true,
+                    genome_id: bundle.genome_id,
+                    origin_instance: bundle.origin.instance_key,
+                    mutation_id: package.mutation_id,
+                    mutation_outcome: outcome,
+                    equivalent_mutation_id: equivalent,
+                    events_inserted,
+                    events_duplicate,
+                    attestations: attestation_previews,
+                }));
+            }
+
+            // Ingest evidence through the normal path: validation, idempotency,
+            // and quarantine semantics are preserved. A conflicting reuse of an
+            // event id aborts the import cleanly.
+            let mut events_inserted = 0;
+            let mut events_duplicate = 0;
+            for event in &sanitized {
+                let identity = SourceIdentity::new(
+                    event.source.clone(),
+                    genome_instance(&bundle.origin.instance_key),
+                );
+                match store.insert_event(&identity, event, &SearchProjection::default())? {
+                    InsertOutcome::Inserted { .. } => events_inserted += 1,
+                    InsertOutcome::Duplicate { .. } => events_duplicate += 1,
+                    InsertOutcome::ConflictQuarantined { .. } => {
+                        return Err(CliError::GenomeEvidenceConflict {
+                            event_id: event.event_id.as_str().to_owned(),
+                        });
+                    }
+                }
+            }
+
+            let registration = MutationRegistration {
+                mutation_id: package.mutation_id.clone(),
+                source_finding_id: package.source_finding_id.clone(),
+                source_detector: package.source_detector.as_str().to_owned(),
+                equivalence_key: equivalence_key(&package),
+                spec_version: package.spec_version.as_str().to_owned(),
+                semantic_version: package.version.clone(),
+                package: serde_json::to_value(&package)?,
+                supporting_event_ids: package.hypothesis.supporting_event_ids.clone(),
+                counterexample_event_ids: package.hypothesis.counterexample_event_ids.clone(),
+            };
+            let (outcome, equivalent, attach) = match store.register_mutation(&registration) {
+                Ok(MutationRegisterOutcome::Inserted { .. }) => {
+                    (GenomeMutationOutcome::Registered, None, true)
+                }
+                Ok(MutationRegisterOutcome::Duplicate { .. }) => {
+                    (GenomeMutationOutcome::Duplicate, None, true)
+                }
+                Ok(MutationRegisterOutcome::EquivalentExisting {
+                    existing_mutation_id,
+                    ..
+                }) => (
+                    GenomeMutationOutcome::EquivalentExisting,
+                    Some(existing_mutation_id),
+                    false,
+                ),
+                Err(StoreError::MutationContentConflict { .. }) => {
+                    (GenomeMutationOutcome::ContentConflict, None, false)
+                }
+                Err(error) => return Err(error.into()),
+            };
+
+            // Attestations only attach when the bundle's own mutation now exists
+            // locally (registered fresh or an identical duplicate). They are
+            // display-only and never advance the lifecycle.
+            let mut attestations = attestation_previews;
+            if attach {
+                for (index, attestation) in bundle.attestations.iter().enumerate() {
+                    let content_hash: [u8; 32] =
+                        Sha256::digest(serde_json::to_vec(&attestation.report_json)?).into();
+                    let stored = matches!(
+                        store.register_attestation(&AttestationRegistration {
+                            mutation_id: package.mutation_id.clone(),
+                            kind: attestation.kind.as_str().to_owned(),
+                            origin_instance: bundle.origin.instance_key.clone(),
+                            set_hash: attestation.set_hash.clone(),
+                            report: attestation.report_json.clone(),
+                            content_hash,
+                            passed: attestation.passed,
+                            hash_verified: attestation.hash_matches(),
+                        })?,
+                        AttestationRegisterOutcome::Inserted { .. }
+                    );
+                    attestations[index].stored = stored;
+                }
+            }
+
+            Ok(CommandReport::GenomeImport(GenomeImportReport {
+                dry_run: false,
+                genome_id: bundle.genome_id,
+                origin_instance: bundle.origin.instance_key,
+                mutation_id: package.mutation_id,
+                mutation_outcome: outcome,
+                equivalent_mutation_id: equivalent,
+                events_inserted,
+                events_duplicate,
+                attestations,
+            }))
+        }
+    }
+}
+
+/// The genome source instance key for imported evidence: `genome:<origin>`.
+fn genome_instance(origin_instance_key: &str) -> String {
+    format!("genome:{origin_instance_key}")
+}
+
+/// Predict, without writing, which registration verdict a package would receive,
+/// mirroring `register_mutation`'s exact precedence (id match first, then
+/// equivalence-key / source-finding collision).
+fn preview_mutation_outcome(
+    store: &EventStore,
+    package: &MutationPackage,
+) -> Result<(GenomeMutationOutcome, Option<String>), CliError> {
+    let equivalence = equivalence_key(package);
+    let package_value = serde_json::to_value(package)?;
+    for record in store.list_mutations()? {
+        if record.mutation_id == package.mutation_id {
+            if record.package == package_value {
+                return Ok((GenomeMutationOutcome::Duplicate, None));
+            }
+            return Ok((GenomeMutationOutcome::ContentConflict, None));
+        }
+        if record.equivalence_key == equivalence
+            || record.source_finding_id == package.source_finding_id
+        {
+            return Ok((
+                GenomeMutationOutcome::EquivalentExisting,
+                Some(record.mutation_id),
+            ));
+        }
+    }
+    Ok((GenomeMutationOutcome::Registered, None))
+}
+
 fn install_report(
     plan: &SkillPlan,
     dry_run: bool,
@@ -2882,14 +3453,23 @@ fn write_report(
             CommandReport::MutationSynthesis(report) => {
                 write_mutation_synthesis(&mut writer, report)?;
             }
-            CommandReport::MutationList(mutations) => {
-                if mutations.is_empty() {
+            CommandReport::MutationList(report) => {
+                if report.mutations.is_empty() {
                     writeln!(writer, "no registered mutation candidates")?;
                 }
-                for mutation in mutations {
+                for mutation in &report.mutations {
+                    // An "(imported)" tag marks candidates carrying origin-claimed
+                    // attestations, so a reviewer knows the reports were not
+                    // produced locally and the candidate still needs local
+                    // re-verification.
+                    let imported = if report.imported.contains(&mutation.mutation_id) {
+                        "\t(imported)"
+                    } else {
+                        ""
+                    };
                     writeln!(
                         writer,
-                        "{}\t{}\t{}",
+                        "{}\t{}\t{}{imported}",
                         mutation.mutation_id,
                         mutation.state,
                         mutation.package["title"].as_str().unwrap_or("untitled")
@@ -2956,7 +3536,19 @@ fn write_report(
                         latest.efficacy_id,
                     )?;
                 }
+                write_mutation_attestations(&mut writer, &details.attestations)?;
             }
+            CommandReport::GenomeExport(report) => writeln!(
+                writer,
+                "{}\texported {}\t{} events · {} attestations · {} fields redacted\t{}",
+                report.genome_id,
+                short_id(&report.mutation_id),
+                report.event_count,
+                report.attestation_count,
+                report.redacted_fields,
+                report.path,
+            )?,
+            CommandReport::GenomeImport(report) => write_genome_import(&mut writer, report)?,
             CommandReport::MutationTransition(report) => writeln!(
                 writer,
                 "{}\t{} -> {}\tchanged={}",

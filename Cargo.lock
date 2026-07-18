@@ -173,9 +173,11 @@ dependencies = [
  "autophagy-core",
  "autophagy-efficacy",
  "autophagy-events",
+ "autophagy-genome",
  "autophagy-install",
  "autophagy-mutations",
  "autophagy-patterns",
+ "autophagy-redaction",
  "autophagy-replay",
  "autophagy-shadow",
  "autophagy-store",
@@ -227,6 +229,20 @@ dependencies = [
  "serde_json",
  "thiserror",
  "time",
+]
+
+[[package]]
+name = "autophagy-genome"
+version = "0.1.0"
+dependencies = [
+ "autophagy-events",
+ "autophagy-mutations",
+ "autophagy-redaction",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

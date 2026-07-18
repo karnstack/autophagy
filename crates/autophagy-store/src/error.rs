@@ -179,6 +179,12 @@ pub enum StoreError {
         /// Conflicting efficacy identity.
         efficacy_id: String,
     },
+    /// An attestation carried an unsupported evaluation kind.
+    #[error("attestation kind '{kind}' is not one of 'replay' or 'shadow'")]
+    InvalidAttestationKind {
+        /// Rejected attestation kind.
+        kind: String,
+    },
     /// Installation registration violated the supported target contract.
     #[error("installation registration is invalid")]
     InvalidInstallationRegistration,

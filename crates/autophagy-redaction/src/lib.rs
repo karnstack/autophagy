@@ -101,6 +101,37 @@ impl PrivacyPolicy {
             redacted_fields,
         }
     }
+
+    /// Scrub recognized secret material from an arbitrary JSON value in place.
+    ///
+    /// Applies the same conservative secret rules as [`apply`](Self::apply), but
+    /// over any [`serde_json::Value`] rather than a normalized event, and without
+    /// consulting path policy (a bare value carries no project or artifact path
+    /// to exclude). Every string reachable in the value — object values, array
+    /// elements, and nested combinations — is scrubbed. Returns the number of
+    /// string fields the rules changed, so a caller can report exactly how much
+    /// was redacted.
+    ///
+    /// This is the projection used to scrub the reviewable free text carried by
+    /// a mutation package (title, hypothesis, intervention instruction) before it
+    /// leaves the machine in an exported genome, so no credential accidentally
+    /// travels inside prose the secret rules would otherwise catch in event
+    /// payloads.
+    pub fn scrub_value(&self, value: &mut Value) -> u64 {
+        let mut redacted_fields = 0;
+        redact_value(value, &self.rules, &mut redacted_fields);
+        redacted_fields
+    }
+
+    /// Scrub recognized secret material from a single string in place.
+    ///
+    /// The string-level counterpart to [`scrub_value`](Self::scrub_value).
+    /// Returns `1` when the rules changed the string and `0` otherwise.
+    pub fn scrub_string(&self, value: &mut String) -> u64 {
+        let mut redacted_fields = 0;
+        redact_string(value, &self.rules, &mut redacted_fields);
+        redacted_fields
+    }
 }
 
 fn default_rules() -> Vec<SecretRule> {
@@ -208,6 +239,47 @@ mod tests {
                 .is_none()
         );
         assert!(policy.apply(&fixture_event("/repo/public")).event.is_some());
+    }
+
+    #[test]
+    fn scrub_value_redacts_nested_secrets_and_counts_changes() {
+        let policy = PrivacyPolicy::new(&[]).expect("policy");
+        let mut value = json!({
+            "title": "Prevent repeated failure of curl -H 'Authorization: Bearer abcdef0123456789abcdef'",
+            "steps": ["export API_KEY=abcdefgh12345678", "run sk-abcdefghijklmnop now"],
+            "count": 3,
+            "nested": { "token": "ghp_abcdefghijklmnopqrstuvwxyz" }
+        });
+        let redacted = policy.scrub_value(&mut value);
+        assert_eq!(redacted, 4);
+        let encoded = serde_json::to_string(&value).expect("JSON");
+        assert!(!encoded.contains("sk-abcdefghijklmnop"));
+        assert!(!encoded.contains("ghp_abcdefghijklmnopqrstuvwxyz"));
+        assert!(!encoded.contains("Bearer abcdef0123456789abcdef"));
+        assert!(encoded.contains(REDACTED));
+        // Non-string leaves are untouched.
+        assert_eq!(value["count"], json!(3));
+    }
+
+    #[test]
+    fn scrub_value_leaves_clean_text_and_returns_zero() {
+        let policy = PrivacyPolicy::new(&[]).expect("policy");
+        let mut value = json!({ "title": "Prevent repeated command failure: cargo test" });
+        assert_eq!(policy.scrub_value(&mut value), 0);
+        assert_eq!(
+            value["title"],
+            json!("Prevent repeated command failure: cargo test")
+        );
+    }
+
+    #[test]
+    fn scrub_string_reports_whether_it_changed() {
+        let policy = PrivacyPolicy::new(&[]).expect("policy");
+        let mut clean = "cargo build --release".to_owned();
+        assert_eq!(policy.scrub_string(&mut clean), 0);
+        let mut secret = "token=sk-abcdefghijklmnop".to_owned();
+        assert_eq!(policy.scrub_string(&mut secret), 1);
+        assert!(!secret.contains("sk-abcdefghijklmnop"));
     }
 
     fn fixture_event(project: &str) -> Event {

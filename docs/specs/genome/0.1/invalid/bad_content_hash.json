@@ -1,0 +1,107 @@
+{
+  "spec_version": "genome/0.1",
+  "genome_id": "gen_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "exported_at": "2026-07-19T12:00:00Z",
+  "origin": {
+    "instance_key": "laptop-abc",
+    "autophagy_version": "0.1.0"
+  },
+  "mutation": {
+    "spec_version": "mutation/0.1",
+    "mutation_id": "mut_a87b7c83aa9bf78169c01c2ad73b02c1ad7705f976fc2c94194f397a3091ce9d",
+    "version": "0.1.0",
+    "state": "candidate",
+    "generated_by": "deterministic_template_v1",
+    "source_finding_id": "find_examplefinding",
+    "source_detector": "repeated_command_failure",
+    "title": "Prevent repeated command failure: shell: go build ./...",
+    "hypothesis": {
+      "statement": "The recurring go build failure is caused by missing preconditions.",
+      "expected_result": "Matching go build attempts avoid repeated exit-code-1 failures.",
+      "supporting_event_ids": [
+        "evt_support_one",
+        "evt_support_two"
+      ],
+      "counterexample_event_ids": [],
+      "failure_cases": [
+        "The command can fail transiently even when preconditions hold."
+      ]
+    },
+    "triggers": [
+      {
+        "type": "tool_call",
+        "selector": "failure/v2|shell|go build ./...|exit:1"
+      }
+    ],
+    "exclusions": [
+      "Do not block execution; this instruction is advisory."
+    ],
+    "intervention": {
+      "type": "agent_instruction",
+      "instruction": "Before running `go build ./...`, verify its required preconditions."
+    },
+    "permissions": {
+      "filesystem_read": [],
+      "filesystem_write": [],
+      "commands": [],
+      "environment": [],
+      "network": false
+    },
+    "promotion": {
+      "minimum_replays": 5,
+      "minimum_success_rate_bps": 8000,
+      "maximum_false_positive_rate_bps": 1000
+    }
+  },
+  "evidence_events": [
+    {
+      "spec_version": "aep/0.1",
+      "event_id": "evt_support_one",
+      "session_id": "ses_alpha",
+      "timestamp": "2026-06-01T09:00:00Z",
+      "source": "claude-code",
+      "type": "tool.failed"
+    },
+    {
+      "spec_version": "aep/0.1",
+      "event_id": "evt_support_two",
+      "session_id": "ses_beta",
+      "timestamp": "2026-06-02T09:00:00Z",
+      "source": "claude-code",
+      "type": "tool.failed"
+    }
+  ],
+  "attestations": [
+    {
+      "kind": "replay",
+      "id": "rep_examplereplay",
+      "set_hash": "scenarioset0001",
+      "report_json": {
+        "spec_version": "replay/0.1",
+        "replay_id": "rep_examplereplay",
+        "passed": true
+      },
+      "content_hash": "tooshort",
+      "passed": true,
+      "created_at": "2026-07-10T10:00:00Z"
+    }
+  ],
+  "transitions": [
+    {
+      "from_state": null,
+      "to_state": "candidate",
+      "reason": "generated from evidence",
+      "occurred_at": "2026-06-03T09:00:00Z"
+    },
+    {
+      "from_state": "candidate",
+      "to_state": "challenged",
+      "reason": "challenge checklist completed",
+      "occurred_at": "2026-06-04T09:00:00Z"
+    }
+  ],
+  "redaction": {
+    "redacted_fields": 0,
+    "policy": "built-in secret rules + import.exclude_paths"
+  }
+}
