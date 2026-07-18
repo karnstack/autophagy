@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use autophagy_store::EfficacyStatusSummary;
 use serde::Serialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -36,6 +37,10 @@ pub struct StatusReport {
     pub findings: Option<usize>,
     /// Mutation candidates grouped by lifecycle state.
     pub candidates: BTreeMap<String, i64>,
+    /// Post-install efficacy coverage across installed mutations. `None` unless
+    /// at least one mutation is currently installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub efficacy: Option<EfficacyStatusSummary>,
     /// Background daemon state.
     pub daemon: DaemonStatus,
     /// Resolved config file path.
@@ -140,6 +145,10 @@ pub fn run(
     let stale_signatures = store.signatures_below_version(&stale_prefix)?;
     let activity = store.adapter_activity()?;
     let candidates = store.mutation_state_counts()?;
+    // Efficacy is a cheap COUNT-style aggregate; only surface it once something
+    // is actually installed to measure.
+    let efficacy_summary = store.efficacy_status_summary()?;
+    let efficacy = (efficacy_summary.installed > 0).then_some(efficacy_summary);
     let schema_version = store.schema_version()?;
 
     let now = OffsetDateTime::now_utc();
@@ -203,6 +212,7 @@ pub fn run(
         },
         findings,
         candidates,
+        efficacy,
         daemon: DaemonStatus {
             platform: daemon_report.platform,
             supported: daemon_report.supported,
@@ -395,6 +405,25 @@ pub fn write_text(report: &StatusReport, writer: &mut impl Write) -> std::io::Re
             .join(" · ")
     };
     writeln!(writer, "{}", row("Lessons", &lessons))?;
+    if let Some(efficacy) = &report.efficacy {
+        let measured = efficacy.improved + efficacy.regressed + efficacy.unchanged;
+        let detail = if measured == 0 && efficacy.insufficient_data == 0 {
+            "none measured yet — run `autophagy mutations efficacy <id>`".to_owned()
+        } else {
+            format!(
+                "{} improved · {} regressed · {} unchanged · {} inconclusive",
+                efficacy.improved,
+                efficacy.regressed,
+                efficacy.unchanged,
+                efficacy.insufficient_data,
+            )
+        };
+        writeln!(
+            writer,
+            "{}",
+            cont(&format!("{} installed · {detail}", efficacy.installed))
+        )?;
+    }
     writeln!(writer)?;
 
     let daemon = if report.daemon.supported {

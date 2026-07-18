@@ -6,11 +6,12 @@ use autophagy_events::{
     Artifact, ArtifactKind, Event, EventId, EventKind, SessionId, SpecVersion, ToolCall,
 };
 use autophagy_store::{
-    DeleteAllSummary, DeleteSummary, EventStore, InsertOutcome, InstallationRegistration,
-    InstallationTransitionOutcome, MutationRegisterOutcome, MutationRegistration, PruneSummary,
-    RebuildSummary, ReplayRegisterOutcome, ReplayRegistration, RetrievalMatchKind,
-    RetrievalOutcome, RetrievalQuery, SearchProjection, ShadowRegisterOutcome, ShadowRegistration,
-    SourceCursor, SourceIdentity, StoreError, StoreStats,
+    DeleteAllSummary, DeleteSummary, EfficacyRegisterOutcome, EfficacyRegistration, EventStore,
+    InsertOutcome, InstallationRegistration, InstallationTransitionOutcome,
+    MutationRegisterOutcome, MutationRegistration, PruneSummary, RebuildSummary,
+    ReplayRegisterOutcome, ReplayRegistration, RetrievalMatchKind, RetrievalOutcome,
+    RetrievalQuery, SearchProjection, ShadowRegisterOutcome, ShadowRegistration, SourceCursor,
+    SourceIdentity, StoreError, StoreStats,
 };
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -30,7 +31,7 @@ fn migrations_persist_and_reopen_cleanly() {
 
     {
         let mut store = EventStore::open(&database).expect("store should open");
-        assert_eq!(store.schema_version().expect("schema version"), 2);
+        assert_eq!(store.schema_version().expect("schema version"), 3);
         assert!(matches!(
             store
                 .insert_event(&source, &event, &SearchProjection::default())
@@ -40,7 +41,7 @@ fn migrations_persist_and_reopen_cleanly() {
     }
 
     let reopened = EventStore::open(&database).expect("store should reopen");
-    assert_eq!(reopened.schema_version().expect("schema version"), 2);
+    assert_eq!(reopened.schema_version().expect("schema version"), 3);
     assert_eq!(
         reopened
             .get_event(event.event_id.as_str())
@@ -1680,4 +1681,385 @@ fn signature_index_preserves_idempotency_quarantine_and_deletion() {
         hit_ids(&store.retrieve(&query).expect("after delete")),
         ["evt_b1"]
     );
+}
+
+// -- Post-install efficacy tracking ------------------------------------------
+
+const EFF_OP_SIG: &str = "operation/v2|shell|go build";
+const EFF_SELECTOR: &str = "failure/v2|shell|go build|exit:1";
+
+/// Seed a store with an installed mutation and failure/success events indexed
+/// under one operation signature, for efficacy-occurrence tests.
+fn seed_efficacy_store() -> EventStore {
+    let mut store = EventStore::open_in_memory().expect("store");
+    let source = source("instance-efficacy");
+    let events = [
+        // Matching failure (exit 1), indexed.
+        (
+            retrieval_event(
+                "evt_ef_fail1",
+                "ses_pre",
+                EventKind::ToolFailed,
+                "go build",
+                Some(1),
+                "/workspace/project",
+                "2026-03-01T00:00:00Z",
+                0,
+            ),
+            retrieval_projection("build failed", EFF_OP_SIG),
+        ),
+        // Same operation, exit 2: not a selector match, but a classifiable failure.
+        (
+            retrieval_event(
+                "evt_ef_fail2",
+                "ses_pre",
+                EventKind::ToolFailed,
+                "go build",
+                Some(2),
+                "/workspace/project",
+                "2026-03-02T00:00:00Z",
+                1,
+            ),
+            retrieval_projection("build failed differently", EFF_OP_SIG),
+        ),
+        // Success under the same operation: never a failure occurrence.
+        (
+            retrieval_event(
+                "evt_ef_ok",
+                "ses_pre",
+                EventKind::ToolCompleted,
+                "go build",
+                Some(0),
+                "/workspace/project",
+                "2026-03-03T00:00:00Z",
+                2,
+            ),
+            retrieval_projection("build ok", EFF_OP_SIG),
+        ),
+        // Matching failure in a second session, but never indexed (no signature).
+        (
+            retrieval_event(
+                "evt_ef_fail3",
+                "ses_post",
+                EventKind::ToolFailed,
+                "go build",
+                Some(1),
+                "/workspace/project",
+                "2026-03-04T00:00:00Z",
+                0,
+            ),
+            SearchProjection::default(),
+        ),
+    ];
+    for (event, projection) in &events {
+        store
+            .insert_event(&source, event, projection)
+            .expect("insert efficacy event");
+    }
+    store
+}
+
+fn span(start: &str, end: &str) -> (OffsetDateTime, OffsetDateTime) {
+    (
+        OffsetDateTime::parse(start, &Rfc3339).expect("start"),
+        OffsetDateTime::parse(end, &Rfc3339).expect("end"),
+    )
+}
+
+/// Register `mut_registry` through its full lifecycle into the `active` state.
+fn seed_installed_mutation(store: &mut EventStore) {
+    for (event_id, session_id, timestamp, sequence) in [
+        (
+            "evt_mutation-support-a",
+            "ses_reg_a",
+            "2026-02-01T00:00:00Z",
+            0,
+        ),
+        (
+            "evt_mutation-support-b",
+            "ses_reg_b",
+            "2026-02-01T00:01:00Z",
+            0,
+        ),
+        (
+            "evt_mutation-counter",
+            "ses_reg_c",
+            "2026-02-01T00:02:00Z",
+            0,
+        ),
+        ("evt_replay-only", "ses_reg_d", "2026-02-01T00:03:00Z", 0),
+    ] {
+        store
+            .insert_event(
+                &source("instance-efficacy"),
+                &session_event(
+                    event_id,
+                    session_id,
+                    EventKind::DecisionRecorded,
+                    timestamp,
+                    sequence,
+                ),
+                &SearchProjection::default(),
+            )
+            .expect("evidence event");
+    }
+    store
+        .register_mutation(&mutation_registration(
+            "mut_registry",
+            "fnd_registry",
+            "eqv_registry",
+        ))
+        .expect("register");
+    store
+        .challenge_mutation("mut_registry", &json!({"checks":["sessions_comparable"]}))
+        .expect("challenge");
+    store
+        .register_replay(&replay_registration("rpl_passing", "rsh_passing", true))
+        .expect("replay");
+    store
+        .register_shadow(&shadow_registration("shr_passing", "shh_passing", true))
+        .expect("shadow");
+    store
+        .register_installation(&claude_code_installation_registration())
+        .expect("install");
+}
+
+fn efficacy_registration(
+    efficacy_id: &str,
+    verdict: &str,
+    pre_event_ids: &[&str],
+    post_event_ids: &[&str],
+) -> EfficacyRegistration {
+    let source_event_ids: Vec<String> = pre_event_ids
+        .iter()
+        .chain(post_event_ids)
+        .map(|id| (*id).to_owned())
+        .collect();
+    EfficacyRegistration {
+        efficacy_id: efficacy_id.to_owned(),
+        mutation_id: "mut_registry".to_owned(),
+        verdict: verdict.to_owned(),
+        report: json!({
+            "efficacy_id": efficacy_id,
+            "mutation_id": "mut_registry",
+            "verdict": verdict,
+            "evidence": {
+                "pre_event_ids": pre_event_ids,
+                "post_event_ids": post_event_ids,
+                "pre_event_count": pre_event_ids.len(),
+                "post_event_count": post_event_ids.len(),
+                "listing_cap": 50,
+            },
+        }),
+        source_event_ids,
+    }
+}
+
+#[test]
+fn efficacy_occurrences_apply_the_failure_matching_rule_and_report_coverage() {
+    let store = seed_efficacy_store();
+    let (start, end) = span("2026-01-01T00:00:00Z", "2026-12-31T00:00:00Z");
+    let occurrences = store
+        .efficacy_occurrences(&[EFF_SELECTOR.to_owned()], start, end)
+        .expect("occurrences");
+
+    // Only the exit-1 failure indexed under the operation signature matches. The
+    // exit-2 failure, the success, and the unindexed failure are all excluded.
+    let ids: Vec<&str> = occurrences
+        .occurrences
+        .iter()
+        .map(|occurrence| occurrence.event_id.as_str())
+        .collect();
+    assert_eq!(ids, ["evt_ef_fail1"]);
+    assert!(occurrences.unparsed_selectors.is_empty());
+
+    // Coverage counts every in-span tool.failed event (3) and how many carry an
+    // index row (2): the unindexed failure lowers coverage without vanishing.
+    assert_eq!(occurrences.total_failures, 3);
+    assert_eq!(occurrences.classifiable_failures, 2);
+}
+
+#[test]
+fn efficacy_occurrences_bound_by_span_and_flag_unparsed_selectors() {
+    let store = seed_efficacy_store();
+    // A tight span excludes the March failure entirely.
+    let (start, end) = span("2026-06-01T00:00:00Z", "2026-06-30T00:00:00Z");
+    let occurrences = store
+        .efficacy_occurrences(
+            &[EFF_SELECTOR.to_owned(), "not-a-signature".to_owned()],
+            start,
+            end,
+        )
+        .expect("occurrences");
+    assert!(occurrences.occurrences.is_empty());
+    assert_eq!(occurrences.total_failures, 0);
+    assert_eq!(occurrences.unparsed_selectors, ["not-a-signature"]);
+}
+
+#[test]
+fn register_efficacy_is_append_only_immutable_and_lifecycle_free() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    seed_installed_mutation(&mut store);
+    let state_before = store
+        .get_mutation("mut_registry")
+        .expect("details")
+        .mutation
+        .state;
+
+    let registration =
+        efficacy_registration("eff_one", "improved", &["evt_mutation-support-a"], &[]);
+    assert_eq!(
+        store.register_efficacy(&registration).expect("insert"),
+        EfficacyRegisterOutcome::Inserted {
+            efficacy_id: "eff_one".to_owned(),
+        }
+    );
+
+    // Re-registering identical content is a no-op.
+    assert_eq!(
+        store.register_efficacy(&registration).expect("duplicate"),
+        EfficacyRegisterOutcome::Duplicate {
+            efficacy_id: "eff_one".to_owned(),
+        }
+    );
+
+    // Reusing the id for different content conflicts.
+    let conflicting =
+        efficacy_registration("eff_one", "regressed", &["evt_mutation-support-b"], &[]);
+    assert!(matches!(
+        store.register_efficacy(&conflicting),
+        Err(StoreError::EfficacyContentConflict { .. })
+    ));
+
+    // Efficacy never touches the lifecycle: the mutation stays exactly as it was.
+    let state_after = store
+        .get_mutation("mut_registry")
+        .expect("details")
+        .mutation
+        .state;
+    assert_eq!(state_before, "active");
+    assert_eq!(state_after, "active");
+
+    // A second, distinct report accumulates — history, not replacement.
+    let second = efficacy_registration("eff_two", "unchanged", &["evt_mutation-support-b"], &[]);
+    store.register_efficacy(&second).expect("second");
+    let listed = store.list_efficacy("mut_registry").expect("list");
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].efficacy_id, "eff_one");
+    assert_eq!(listed[1].efficacy_id, "eff_two");
+}
+
+#[test]
+fn register_efficacy_rejects_reports_inconsistent_with_the_registration() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    seed_installed_mutation(&mut store);
+    let mut registration =
+        efficacy_registration("eff_bad", "improved", &["evt_mutation-support-a"], &[]);
+    // The declared count no longer matches the source events.
+    registration
+        .source_event_ids
+        .push("evt_mutation-support-b".to_owned());
+    assert!(matches!(
+        store.register_efficacy(&registration),
+        Err(StoreError::InvalidEfficacyRegistration)
+    ));
+}
+
+#[test]
+fn efficacy_evidence_removal_drops_the_report_but_keeps_the_mutation() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    // Register a candidate mutation with its own evidence, then a separate
+    // efficacy-only event the report will cite.
+    for (event_id, session_id) in [
+        ("evt_mutation-support-a", "ses_ev_a"),
+        ("evt_mutation-support-b", "ses_ev_b"),
+        ("evt_mutation-counter", "ses_ev_c"),
+        ("evt_eff_only", "ses_eff_only"),
+    ] {
+        store
+            .insert_event(
+                &source("instance-efficacy"),
+                &session_event(
+                    event_id,
+                    session_id,
+                    EventKind::DecisionRecorded,
+                    "2026-02-01T00:00:00Z",
+                    0,
+                ),
+                &SearchProjection::default(),
+            )
+            .expect("evidence event");
+    }
+    store
+        .register_mutation(&mutation_registration(
+            "mut_registry",
+            "fnd_registry",
+            "eqv_registry",
+        ))
+        .expect("register");
+    store
+        .register_efficacy(&efficacy_registration(
+            "eff_cascade",
+            "improved",
+            &["evt_eff_only"],
+            &[],
+        ))
+        .expect("insert");
+    assert_eq!(store.list_efficacy("mut_registry").expect("list").len(), 1);
+
+    // Deleting the cited event's session cascades to the efficacy evidence row,
+    // whose trigger drops the report — but the mutation candidate, whose own
+    // evidence is untouched, survives (efficacy gates no lifecycle state).
+    store
+        .delete_session("ses_eff_only")
+        .expect("delete session");
+    assert!(
+        store
+            .list_efficacy("mut_registry")
+            .expect("list")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .get_mutation("mut_registry")
+            .expect("details")
+            .mutation
+            .state,
+        "candidate"
+    );
+}
+
+#[test]
+fn efficacy_status_summary_counts_latest_verdict_per_installed_mutation() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    seed_installed_mutation(&mut store);
+
+    // Before any report, the single installed mutation is not measured.
+    let summary = store.efficacy_status_summary().expect("summary");
+    assert_eq!(summary.installed, 1);
+    assert_eq!(summary.not_measured, 1);
+    assert_eq!(summary.improved, 0);
+
+    // The latest report wins: register unchanged, then improved.
+    store
+        .register_efficacy(&efficacy_registration(
+            "eff_1_unchanged",
+            "unchanged",
+            &["evt_mutation-support-a"],
+            &[],
+        ))
+        .expect("older");
+    store
+        .register_efficacy(&efficacy_registration(
+            "eff_2_improved",
+            "improved",
+            &["evt_mutation-support-b"],
+            &[],
+        ))
+        .expect("newer");
+    let summary = store.efficacy_status_summary().expect("summary");
+    assert_eq!(summary.installed, 1);
+    assert_eq!(summary.improved, 1);
+    assert_eq!(summary.unchanged, 0);
+    assert_eq!(summary.not_measured, 0);
 }

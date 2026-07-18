@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/efficacy/0.1/result.schema.json",
+  "title": "Autophagy Efficacy Result v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version",
+    "efficacy_id",
+    "mutation_id",
+    "mutation_version",
+    "signature_selectors",
+    "matching_rule",
+    "installed_at",
+    "evaluated_at",
+    "windows",
+    "coverage",
+    "verdict",
+    "insufficient_reasons",
+    "evidence",
+    "model_used"
+  ],
+  "properties": {
+    "spec_version": { "const": "efficacy/0.1" },
+    "efficacy_id": { "type": "string", "pattern": "^eff_[a-f0-9]{64}$" },
+    "mutation_id": { "type": "string", "pattern": "^mut_[A-Za-z0-9._:-]+$" },
+    "mutation_version": { "type": "string", "minLength": 1 },
+    "signature_selectors": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "matching_rule": { "enum": ["failure_signature_recurrence"] },
+    "installed_at": { "type": "string", "format": "date-time" },
+    "evaluated_at": { "type": "string", "format": "date-time" },
+    "windows": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pre", "post"],
+      "properties": {
+        "pre": { "$ref": "#/$defs/window" },
+        "post": { "$ref": "#/$defs/window" }
+      }
+    },
+    "rate_delta_bps": { "type": "integer" },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classifiable_failures", "total_failures", "coverage_bps", "complete"],
+      "properties": {
+        "classifiable_failures": { "type": "integer", "minimum": 0 },
+        "total_failures": { "type": "integer", "minimum": 0 },
+        "coverage_bps": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "complete": { "type": "boolean" }
+      }
+    },
+    "verdict": {
+      "enum": ["improved", "regressed", "unchanged", "insufficient_data"]
+    },
+    "insufficient_reasons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "post_window_too_short",
+          "sparse_occurrences",
+          "partial_index_coverage"
+        ]
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pre_event_ids",
+        "post_event_ids",
+        "pre_event_count",
+        "post_event_count",
+        "listing_cap"
+      ],
+      "properties": {
+        "pre_event_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]+$" }
+        },
+        "post_event_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]+$" }
+        },
+        "pre_event_count": { "type": "integer", "minimum": 0 },
+        "post_event_count": { "type": "integer", "minimum": 0 },
+        "listing_cap": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "model_used": { "const": false }
+  },
+  "$defs": {
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end",
+        "duration_seconds",
+        "occurrences",
+        "distinct_sessions",
+        "rate_per_week_milli"
+      ],
+      "properties": {
+        "start": { "type": "string", "format": "date-time" },
+        "end": { "type": "string", "format": "date-time" },
+        "duration_seconds": { "type": "integer", "minimum": 0 },
+        "occurrences": { "type": "integer", "minimum": 0 },
+        "distinct_sessions": { "type": "integer", "minimum": 0 },
+        "rate_per_week_milli": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

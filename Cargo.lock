@@ -171,6 +171,7 @@ dependencies = [
  "autophagy-adapter-opencode",
  "autophagy-adapter-pi",
  "autophagy-core",
+ "autophagy-efficacy",
  "autophagy-events",
  "autophagy-install",
  "autophagy-mutations",
@@ -202,6 +203,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "autophagy-efficacy"
+version = "0.1.0"
+dependencies = [
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "time",
 ]
 
 [[package]]

@@ -1,0 +1,49 @@
+{
+  "spec_version": "efficacy/0.1",
+  "efficacy_id": "eff_8cd0afb35166df2ffa12898b16bccbdd5d5b730f71fd02bd8d23c19acce4b84c",
+  "mutation_id": "mut_b13f28789cdae90dd6837572975bca5b",
+  "mutation_version": "0.1.0",
+  "signature_selectors": [
+    "failure/v2|shell|cd zuzoto && go build ./... 2>&1|exit:1"
+  ],
+  "matching_rule": "failure_signature_recurrence",
+  "installed_at": "2026-07-14T00:00:00Z",
+  "evaluated_at": "2026-07-15T00:00:00Z",
+  "windows": {
+    "pre": {
+      "start": "2026-07-13T00:00:00Z",
+      "end": "2026-07-14T00:00:00Z",
+      "duration_seconds": 86400,
+      "occurrences": 0,
+      "distinct_sessions": 0,
+      "rate_per_week_milli": 0
+    },
+    "post": {
+      "start": "2026-07-14T00:00:00Z",
+      "end": "2026-07-15T00:00:00Z",
+      "duration_seconds": 86400,
+      "occurrences": 0,
+      "distinct_sessions": 0,
+      "rate_per_week_milli": 0
+    }
+  },
+  "coverage": {
+    "classifiable_failures": 0,
+    "total_failures": 0,
+    "coverage_bps": 10000,
+    "complete": true
+  },
+  "verdict": "insufficient_data",
+  "insufficient_reasons": [
+    "post_window_too_short",
+    "sparse_occurrences"
+  ],
+  "evidence": {
+    "pre_event_ids": [],
+    "post_event_ids": [],
+    "pre_event_count": 0,
+    "post_event_count": 0,
+    "listing_cap": 50
+  },
+  "model_used": false
+}

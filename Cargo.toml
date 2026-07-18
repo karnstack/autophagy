@@ -8,6 +8,7 @@ members = [
   "crates/autophagy-adapter-test-support",
   "crates/autophagy-cli",
   "crates/autophagy-core",
+  "crates/autophagy-efficacy",
   "crates/autophagy-events",
   "crates/autophagy-install",
   "crates/autophagy-mutations",

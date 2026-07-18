@@ -534,6 +534,8 @@ pub struct MutationDetails {
     pub shadows: Vec<MutationShadowRecord>,
     /// Installation and rollback audit records.
     pub installations: Vec<MutationInstallationRecord>,
+    /// Post-install efficacy reports in creation order (oldest first).
+    pub efficacies: Vec<MutationEfficacyRecord>,
 }
 
 /// Idempotent lifecycle transition result.
@@ -659,6 +661,99 @@ pub enum ShadowRegisterOutcome {
         /// Current mutation registry state.
         mutation_state: String,
     },
+}
+
+/// Owned post-install efficacy report ready for persistence.
+///
+/// Registration is append-only and, unlike replay and shadow, performs no
+/// lifecycle transition: efficacy observes recurrence, it never gates promotion.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EfficacyRegistration {
+    /// Stable content-derived efficacy identity.
+    pub efficacy_id: String,
+    /// Measured mutation identity.
+    pub mutation_id: String,
+    /// Deterministic verdict (`improved`, `regressed`, `unchanged`, or
+    /// `insufficient_data`).
+    pub verdict: String,
+    /// Complete versioned efficacy report.
+    pub report: Value,
+    /// Exact failure-occurrence events cited across both windows, deduplicated.
+    pub source_event_ids: Vec<String>,
+}
+
+/// One persisted immutable efficacy report.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MutationEfficacyRecord {
+    /// Stable efficacy report identity.
+    pub efficacy_id: String,
+    /// Measured mutation identity.
+    pub mutation_id: String,
+    /// Deterministic verdict.
+    pub verdict: String,
+    /// Complete versioned efficacy report.
+    pub report: Value,
+    /// Canonical persistence timestamp.
+    pub created_at: String,
+}
+
+/// Idempotent efficacy persistence result. No lifecycle field: efficacy never
+/// changes mutation state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum EfficacyRegisterOutcome {
+    /// A new efficacy report was stored.
+    Inserted {
+        /// Stable efficacy report identity.
+        efficacy_id: String,
+    },
+    /// The identical report was already stored.
+    Duplicate {
+        /// Stable efficacy report identity.
+        efficacy_id: String,
+    },
+}
+
+/// One matched failure occurrence gathered for efficacy evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EfficacyOccurrence {
+    /// Exact AEP event identity.
+    pub event_id: String,
+    /// Session the failure occurred in.
+    pub session_id: String,
+    /// Canonical event timestamp (RFC 3339 UTC).
+    pub occurred_at: String,
+}
+
+/// Failure occurrences and index-coverage counts for one evaluated span,
+/// gathered from the event store for the pure efficacy evaluator to consume.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EfficacyOccurrences {
+    /// Matched failure occurrences within the span, deduplicated by event.
+    pub occurrences: Vec<EfficacyOccurrence>,
+    /// In-span `tool.failed` events carrying an exact-signature index row.
+    pub classifiable_failures: u32,
+    /// All in-span `tool.failed` events.
+    pub total_failures: u32,
+    /// Selectors that could not be parsed into the failure-matching rule.
+    pub unparsed_selectors: Vec<String>,
+}
+
+/// Efficacy coverage of the installed mutations, for the `status` summary.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct EfficacyStatusSummary {
+    /// Currently-installed mutations.
+    pub installed: u32,
+    /// Installed mutations whose latest verdict is `improved`.
+    pub improved: u32,
+    /// Installed mutations whose latest verdict is `regressed`.
+    pub regressed: u32,
+    /// Installed mutations whose latest verdict is `unchanged`.
+    pub unchanged: u32,
+    /// Installed mutations whose latest verdict is `insufficient_data`.
+    pub insufficient_data: u32,
+    /// Installed mutations with no efficacy report yet.
+    pub not_measured: u32,
 }
 
 /// Audited input for a completed filesystem materialization.

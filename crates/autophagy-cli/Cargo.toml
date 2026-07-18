@@ -18,6 +18,7 @@ autophagy-adapter-codex = { path = "../../adapters/codex" }
 autophagy-adapter-opencode = { path = "../../adapters/opencode" }
 autophagy-adapter-pi = { path = "../../adapters/pi" }
 autophagy-core = { path = "../autophagy-core" }
+autophagy-efficacy = { path = "../autophagy-efficacy" }
 autophagy-events = { path = "../autophagy-events" }
 autophagy-install = { path = "../autophagy-install" }
 autophagy-mutations = { path = "../autophagy-mutations" }
