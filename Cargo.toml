@@ -48,3 +48,24 @@ unsafe_code = "forbid"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
+
+# Dependencies compiled with optimizations even in the dev profile. Signature
+# normalization (ADR 0014) runs several `regex` passes over every tool command,
+# and an unoptimized regex engine is a large part of what makes a cold detection
+# pass over a big history crawl (~130s on a 69k-event database in a fully
+# unoptimized build). Third-party dependencies change rarely, so optimizing them
+# costs a one-time longer build but not day-to-day incremental rebuilds.
+# Detection output is byte-identical regardless of opt level.
+[profile.dev.package."*"]
+opt-level = 2
+
+# The signature normalizer (`autophagy-events`) and the recurrence detectors
+# (`autophagy-patterns`) are the workspace's own hot path during detection.
+# Optimizing just these two crates recovers the rest of the gap (down to ~12s,
+# on par with a release build) without slowing incremental rebuilds of the rest
+# of the workspace.
+[profile.dev.package.autophagy-events]
+opt-level = 2
+
+[profile.dev.package.autophagy-patterns]
+opt-level = 2
