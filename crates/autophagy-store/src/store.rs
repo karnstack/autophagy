@@ -585,6 +585,43 @@ impl EventStore {
         Ok(u64::try_from(count).unwrap_or(0))
     }
 
+    /// The distinct signature grammar versions present in the exact-signature
+    /// index, as integers (`operation/v2|…` and `failure/v2|…` both contribute
+    /// `2`).
+    ///
+    /// Every indexed signature carries its grammar version as the first
+    /// `|`-delimited token after the kind (`operation/v<n>|…`). Efficacy uses
+    /// this to detect a selector whose grammar is older than the index's — after
+    /// `reindex --index-tool-input` re-mints every row under the current grammar,
+    /// a superseded selector matches nothing and its recurrence cannot be
+    /// measured. Empty when the index holds no signature rows. Rows whose grammar
+    /// token is unparseable are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when `SQLite` cannot execute the query.
+    pub fn signature_grammar_versions(&self) -> Result<BTreeSet<u32>, StoreError> {
+        // The version token is the substring between the first `/` and the first
+        // `|`; e.g. `operation/v2|shell|…` yields `v2`.
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT substr(
+                 signature,
+                 instr(signature, '/') + 1,
+                 instr(signature, '|') - instr(signature, '/') - 1
+             )
+             FROM event_signatures
+             WHERE instr(signature, '/') > 0 AND instr(signature, '|') > 0",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut versions = BTreeSet::new();
+        for token in rows {
+            if let Some(version) = token?.strip_prefix('v').and_then(|n| n.parse::<u32>().ok()) {
+                versions.insert(version);
+            }
+        }
+        Ok(versions)
+    }
+
     /// Rebuild the derived search projections from every stored event's
     /// canonical `event_json`, applying the caller-supplied redaction-approved
     /// projection.

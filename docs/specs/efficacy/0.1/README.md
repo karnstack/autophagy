@@ -71,6 +71,15 @@ computed by these exact, inspectable thresholds:
    - `sparse_occurrences` — fewer than **2** total occurrences across both
      windows.
    - `partial_index_coverage` — `coverage_bps` below **5000** (50%).
+   - `selector_grammar_mismatch` — a trigger selector's signature grammar is
+     older than the newest grammar present in the index, and the index holds no
+     rows of that older grammar (as after `reindex --index-tool-input` re-mints
+     every row under the current grammar). The selector's operation key then
+     matches zero events, so the counts are blind to the failures it was minted
+     against — not evidence they stopped. A selector cannot be silently
+     translated to the current grammar (the current grammar's normalization
+     cannot be derived from the old string), so the honest resolution is to
+     re-propose the mutation from current findings.
 2. Otherwise, from the change in weekly rate:
    - With no pre-window baseline (pre rate 0), a nonzero post rate is
      `regressed` (a new recurrence appeared); `rate_delta_bps` is omitted.

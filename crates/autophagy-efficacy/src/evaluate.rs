@@ -86,8 +86,17 @@ pub fn evaluate(
     let post_stats = window_stats(&post, bounds.installed_at, bounds.now, post_duration);
 
     let coverage = coverage(observations);
-    let insufficient_reasons =
-        insufficient_reasons(post_duration, &pre_stats, &post_stats, &coverage);
+    let grammar_mismatch = selector_grammar_mismatch(
+        &observations.signature_selectors,
+        &observations.index_grammar_versions,
+    );
+    let insufficient_reasons = insufficient_reasons(
+        post_duration,
+        &pre_stats,
+        &post_stats,
+        &coverage,
+        grammar_mismatch,
+    );
     let rate_delta_bps = rate_delta_bps(&pre_stats, &post_stats);
     let verdict = verdict(
         &insufficient_reasons,
@@ -205,8 +214,15 @@ fn insufficient_reasons(
     pre: &WindowStats,
     post: &WindowStats,
     coverage: &Coverage,
+    grammar_mismatch: bool,
 ) -> Vec<InsufficientReason> {
     let mut reasons = Vec::new();
+    // Listed first: a grammar mismatch is the dominant, actionable cause — the
+    // other reasons below are usually just consequences of the selector matching
+    // zero events.
+    if grammar_mismatch {
+        reasons.push(InsufficientReason::SelectorGrammarMismatch);
+    }
     if post_duration_seconds < MIN_POST_WINDOW_SECONDS {
         reasons.push(InsufficientReason::PostWindowTooShort);
     }
@@ -217,6 +233,38 @@ fn insufficient_reasons(
         reasons.push(InsufficientReason::PartialIndexCoverage);
     }
     reasons
+}
+
+/// Parse the signature grammar version out of a trigger selector.
+///
+/// Both selector grammars carry the version as the first `|`-delimited token
+/// after the kind: `failure/v1|…` and `operation/v2|…` yield `1` and `2`.
+/// Returns `None` for a selector that does not carry a `v<n>` grammar token.
+fn selector_grammar_version(selector: &str) -> Option<u32> {
+    let after_kind = selector.split_once('/')?.1;
+    let token = after_kind.split('|').next()?;
+    token.strip_prefix('v')?.parse::<u32>().ok()
+}
+
+/// Whether any selector's signature grammar is older than the index's.
+///
+/// The measurement can only see events indexed under a selector's own grammar.
+/// When the newest grammar present in the index is newer than a selector's, and
+/// the index holds no rows of that older grammar (as happens after
+/// `reindex --index-tool-input` re-mints every row under the current grammar),
+/// the selector matches nothing — the "0 → 0, no prior baseline" this would
+/// otherwise produce is misleading, so it is reported as insufficient data.
+///
+/// An index that still carries the selector's own grammar (a partial or skipped
+/// reindex) does not trip this: the selector can still match those rows.
+fn selector_grammar_mismatch(selectors: &[String], index_grammar_versions: &BTreeSet<u32>) -> bool {
+    let Some(&newest) = index_grammar_versions.iter().next_back() else {
+        return false;
+    };
+    selectors.iter().any(|selector| {
+        selector_grammar_version(selector)
+            .is_some_and(|version| version < newest && !index_grammar_versions.contains(&version))
+    })
 }
 
 /// Signed relative change in weekly rate, in basis points, when a nonzero

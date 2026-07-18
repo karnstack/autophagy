@@ -1475,6 +1475,46 @@ fn signatures_below_version_counts_only_superseded_grammar() {
 }
 
 #[test]
+fn signature_grammar_versions_reports_the_distinct_indexed_grammars() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    let source = source("instance-grammar");
+    let seed = |store: &mut EventStore, event_id: &str, sequence: u64, signature: &str| {
+        let event = tool_failure(event_id, "ses_grammar", "2026-07-16T01:00:00Z", sequence);
+        store
+            .insert_event(
+                &source,
+                &event,
+                &SearchProjection {
+                    tool_input_text: None,
+                    searchable_text: None,
+                    signature: Some(signature.to_owned()),
+                },
+            )
+            .expect("insert with signature");
+    };
+    // An empty index reports no grammar versions at all.
+    assert!(
+        store
+            .signature_grammar_versions()
+            .expect("empty versions")
+            .is_empty()
+    );
+    // Two grammars coexist (a skipped reindex): both are reported.
+    seed(
+        &mut store,
+        "evt_g1",
+        1,
+        "operation/v1|shell|cd zuzoto && go build|exit:1",
+    );
+    seed(&mut store, "evt_g2", 2, "operation/v2|shell|go test");
+    seed(&mut store, "evt_g3", 3, "operation/v2|shell|cargo build");
+    assert_eq!(
+        store.signature_grammar_versions().expect("mixed versions"),
+        std::collections::BTreeSet::from([1, 2])
+    );
+}
+
+#[test]
 fn exact_signature_lookup_orders_by_recency_then_id() {
     let store = seed_retrieval_store();
     let hits = store

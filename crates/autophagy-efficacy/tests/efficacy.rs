@@ -1,5 +1,7 @@
 //! Deterministic evaluation math, verdict thresholds, and schema conformance.
 
+use std::collections::BTreeSet;
+
 use autophagy_efficacy::{
     CoverageInput, EfficacyObservations, EfficacyReport, FailureOccurrence, InsufficientReason,
     MatchingRule, Verdict, WindowBounds, evaluate,
@@ -12,6 +14,7 @@ const VALID: &[&str] = &[
     include_str!("../../../docs/specs/efficacy/0.1/valid/improved.json"),
     include_str!("../../../docs/specs/efficacy/0.1/valid/regressed_no_baseline.json"),
     include_str!("../../../docs/specs/efficacy/0.1/valid/insufficient_data.json"),
+    include_str!("../../../docs/specs/efficacy/0.1/valid/selector_grammar_mismatch.json"),
 ];
 const INVALID: &[&str] = &[
     include_str!("../../../docs/specs/efficacy/0.1/invalid/bad_spec_version.json"),
@@ -39,13 +42,29 @@ fn observations(
     occurrences: Vec<FailureOccurrence>,
     coverage: CoverageInput,
 ) -> EfficacyObservations {
+    // Default: a current-grammar (v2) selector against a v2 index — no mismatch.
+    selectors_against_index(
+        vec!["failure/v2|shell|go build|exit:1".to_owned()],
+        occurrences,
+        coverage,
+        BTreeSet::from([2]),
+    )
+}
+
+fn selectors_against_index(
+    signature_selectors: Vec<String>,
+    occurrences: Vec<FailureOccurrence>,
+    coverage: CoverageInput,
+    index_grammar_versions: BTreeSet<u32>,
+) -> EfficacyObservations {
     EfficacyObservations {
         mutation_id: "mut_efficacy-fixture".to_owned(),
         mutation_version: "0.1.0".to_owned(),
-        signature_selectors: vec!["failure/v2|shell|go build|exit:1".to_owned()],
+        signature_selectors,
         matching_rule: MatchingRule::FailureSignatureRecurrence,
         occurrences,
         coverage,
+        index_grammar_versions,
     }
 }
 
@@ -203,6 +222,94 @@ fn partial_index_coverage_forces_insufficient_data() {
     );
     assert_eq!(report.coverage.coverage_bps, 1_000);
     assert!(!report.coverage.complete);
+}
+
+#[test]
+fn a_v1_selector_against_a_v2_index_is_a_grammar_mismatch() {
+    // The real defect: the mutation's trigger selector is grammar v1, but the
+    // index was re-minted to v2, so the v1 operation key matches zero rows. The
+    // eight pre-install failures exist — they are simply indexed under v2 — so
+    // "0 → 0, no prior baseline" would be misleading.
+    let report = evaluate(
+        &selectors_against_index(
+            vec!["failure/v1|shell|cd zuzoto && go build ./... 2>&1|exit:1".to_owned()],
+            Vec::new(),
+            CoverageInput {
+                classifiable_failures: 161,
+                total_failures: 200,
+            },
+            BTreeSet::from([2]),
+        ),
+        at("2026-07-18T00:00:00Z"),
+        at("2026-11-16T00:00:00Z"),
+    )
+    .expect("evaluate");
+    assert_eq!(report.verdict, Verdict::InsufficientData);
+    assert!(
+        report
+            .insufficient_reasons
+            .contains(&InsufficientReason::SelectorGrammarMismatch)
+    );
+}
+
+#[test]
+fn matching_grammars_do_not_trip_the_mismatch_reason() {
+    // A current-grammar selector against a current-grammar index measures
+    // normally: no grammar-mismatch reason regardless of the verdict.
+    let occurrences = vec![
+        occurrence("evt_m1", "ses_a", "2026-01-10T00:00:00Z"),
+        occurrence("evt_m2", "ses_b", "2026-02-01T00:00:00Z"),
+        occurrence("evt_m3", "ses_b", "2026-03-01T00:00:00Z"),
+    ];
+    let report = evaluate(
+        &selectors_against_index(
+            vec!["failure/v2|shell|go build|exit:1".to_owned()],
+            occurrences,
+            CoverageInput {
+                classifiable_failures: 50,
+                total_failures: 50,
+            },
+            BTreeSet::from([2]),
+        ),
+        at("2026-04-01T00:00:00Z"),
+        at("2026-07-01T00:00:00Z"),
+    )
+    .expect("evaluate");
+    assert_eq!(report.verdict, Verdict::Improved);
+    assert!(
+        !report
+            .insufficient_reasons
+            .contains(&InsufficientReason::SelectorGrammarMismatch)
+    );
+}
+
+#[test]
+fn an_old_selector_still_present_in_the_index_is_not_a_mismatch() {
+    // A partial or skipped reindex leaves the selector's own grammar in the
+    // index: it can still match those rows, so this is measured, not flagged.
+    let occurrences = vec![
+        occurrence("evt_o1", "ses_a", "2026-01-10T00:00:00Z"),
+        occurrence("evt_o2", "ses_b", "2026-02-01T00:00:00Z"),
+    ];
+    let report = evaluate(
+        &selectors_against_index(
+            vec!["failure/v1|shell|go build|exit:1".to_owned()],
+            occurrences,
+            CoverageInput {
+                classifiable_failures: 40,
+                total_failures: 40,
+            },
+            BTreeSet::from([1, 2]),
+        ),
+        at("2026-04-01T00:00:00Z"),
+        at("2026-07-01T00:00:00Z"),
+    )
+    .expect("evaluate");
+    assert!(
+        !report
+            .insufficient_reasons
+            .contains(&InsufficientReason::SelectorGrammarMismatch)
+    );
 }
 
 #[test]

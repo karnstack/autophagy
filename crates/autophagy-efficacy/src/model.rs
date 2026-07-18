@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -64,6 +66,14 @@ pub struct EfficacyObservations {
     pub occurrences: Vec<FailureOccurrence>,
     /// Index-coverage diagnostics over the span.
     pub coverage: CoverageInput,
+    /// Signature grammar versions present in the exact-signature index for this
+    /// evaluation (for example `{2}` when the index was re-minted under grammar
+    /// `v2`). Empty when the index holds no signature rows. A selector whose
+    /// grammar version is older than the newest present here, and for which the
+    /// index holds no rows of that older grammar, cannot match any events — the
+    /// evaluator reports [`InsufficientReason::SelectorGrammarMismatch`] rather
+    /// than a misleading "0 → 0, no prior baseline".
+    pub index_grammar_versions: BTreeSet<u32>,
 }
 
 impl EfficacyObservations {
@@ -159,6 +169,12 @@ pub enum InsufficientReason {
     SparseOccurrences,
     /// Too many in-span failures lack an index row to trust the counts.
     PartialIndexCoverage,
+    /// A trigger selector uses a signature grammar older than the index's, and
+    /// the index holds no rows of that older grammar, so the selector cannot
+    /// match the events it was minted against. The measurement is blind to those
+    /// occurrences (not evidence that they stopped): re-propose the mutation from
+    /// current findings to measure efficacy under the current grammar.
+    SelectorGrammarMismatch,
 }
 
 /// Complete deterministic post-install efficacy report.
