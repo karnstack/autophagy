@@ -17,7 +17,10 @@ jobs:
   check:
     name: mise run check
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Cold builds compile every dependency at opt-level 2 (dev-profile override
+    # in the root Cargo.toml) and do not fit in 20 minutes; warm runs restored
+    # from the Rust cache below finish well under it.
+    timeout-minutes: 40
 
     steps:
       - name: Check out repository
@@ -30,6 +33,13 @@ jobs:
         with:
           version: 2026.6.1
           cache: true
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Save the cache even when the quality gate fails or the job is
+          # cancelled, so one slow cold run still warms every later run.
+          cache-on-failure: true
 
       - name: Install Rust quality components
         run: mise exec -- rustup component add clippy rustfmt
