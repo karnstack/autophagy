@@ -133,3 +133,37 @@ persisted and nothing leaves the machine.
   told to `reindex` through the existing status hint (ADR 0014).
 - Migrations advance to schema v3; the table and its evidence cascade are
   immutable from here.
+
+## Addendum (2026-07-19): `selector_grammar_mismatch` insufficient-data reason
+
+A mutation installed under an older signature grammar exposed a misleading
+report. Its trigger selector embeds a grammar version
+(`failure/v1|shell|cd zuzoto && go build ./... 2>&1|exit:1`), but the database it
+was evaluated against had its `event_signatures` index re-minted to grammar `v2`
+by `reindex --index-tool-input`. The v1 operation key then matched zero rows even
+though the pre-install failures existed (indexed under v2), so the report read
+`insufficient data · 0 → 0 failures · no prior baseline · needs more observed
+occurrences` — as if the failures had never happened.
+
+The honest statement is that the selector's grammar is older than the index's and
+the measurement cannot see those events. A v1 selector cannot be silently
+translated to v2: the v2 normalization is not derivable from the v1 string.
+
+**Decision.** Add a fourth `insufficient_reasons` variant,
+`selector_grammar_mismatch`, to efficacy result **v0.1**. It fires when a
+selector's grammar version is older than the newest grammar present in the index
+*and* the index holds no rows of that older grammar (a partial or skipped reindex
+that still carries the old grammar does not trip it — the selector can still match
+those rows). The text output states the mismatch explicitly and directs the user
+to re-propose from current findings.
+
+**Why this is not a version bump.** The change is a purely additive enum member.
+Existing efficacy/0.1 reports never carried this value and remain valid; every
+existing fixture still passes. Per the repo rule that a behavior-changing schema
+edit needs a decision record plus updated schema, Rust types, and fixtures, this
+addendum is the decision record: `result.schema.json` gains the enum value,
+`InsufficientReason` gains the variant, and `valid/selector_grammar_mismatch.json`
+is added (a real report generated from the reindexed showcase database). A new
+`Store::signature_grammar_versions` supplies the index grammar versions the
+evaluator compares against; no migration is required (it is a read-only query over
+the existing `event_signatures` table).

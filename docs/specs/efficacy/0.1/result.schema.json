@@ -65,7 +65,8 @@
         "enum": [
           "post_window_too_short",
           "sparse_occurrences",
-          "partial_index_coverage"
+          "partial_index_coverage",
+          "selector_grammar_mismatch"
         ]
       }
     },

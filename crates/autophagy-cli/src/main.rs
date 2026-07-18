@@ -1491,6 +1491,11 @@ const fn efficacy_reason_phrase(reason: InsufficientReason) -> &'static str {
         InsufficientReason::PostWindowTooShort => "a longer post-install window",
         InsufficientReason::SparseOccurrences => "more observed occurrences",
         InsufficientReason::PartialIndexCoverage => "fuller command-index coverage",
+        // Rendered as its own actionable sentence by
+        // `selector_grammar_mismatch_phrase`, never folded into a "needs …" list.
+        InsufficientReason::SelectorGrammarMismatch => {
+            "a selector minted under the current signature grammar"
+        }
     }
 }
 
@@ -1515,15 +1520,63 @@ fn efficacy_summary_line(report: &EfficacyReport) -> String {
         percent(report.coverage.coverage_bps)
     ));
     if report.verdict == Verdict::InsufficientData && !report.insufficient_reasons.is_empty() {
-        let needs = report
+        // A grammar mismatch is the dominant, actionable cause: the selector
+        // matches zero rows, so the other reasons (sparse, short window) are just
+        // consequences of that blindness. Report only the mismatch sentence.
+        if report
             .insufficient_reasons
-            .iter()
-            .map(|reason| efficacy_reason_phrase(*reason))
-            .collect::<Vec<_>>()
-            .join(", ");
-        parts.push(format!("needs {needs}"));
+            .contains(&InsufficientReason::SelectorGrammarMismatch)
+        {
+            parts.push(selector_grammar_mismatch_phrase(
+                &report.signature_selectors,
+            ));
+        } else {
+            let needs = report
+                .insufficient_reasons
+                .iter()
+                .map(|reason| efficacy_reason_phrase(*reason))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("needs {needs}"));
+        }
     }
     parts.join(" · ")
+}
+
+/// The actionable sentence for a [`InsufficientReason::SelectorGrammarMismatch`]:
+/// which grammar the selector uses, which grammar the index now carries, and
+/// what to do about it. The index grammar is the current signature spec version
+/// (`reindex --index-tool-input` re-mints every row under it).
+fn selector_grammar_mismatch_phrase(selectors: &[String]) -> String {
+    let index_grammar = autophagy_events::signature::SIGNATURE_SPEC_VERSION;
+    let mut selector_grammars = selectors
+        .iter()
+        .filter_map(|selector| selector_grammar_token(selector))
+        .filter(|grammar| *grammar != index_grammar)
+        .collect::<Vec<_>>();
+    selector_grammars.sort_unstable();
+    selector_grammars.dedup();
+    let selector_grammar = if selector_grammars.is_empty() {
+        "an older version".to_owned()
+    } else {
+        selector_grammars.join("/")
+    };
+    format!(
+        "selector uses signature grammar {selector_grammar} but the index is {index_grammar} \
+         — re-propose from current findings to measure efficacy"
+    )
+}
+
+/// The `v<n>` grammar token of a trigger selector (`failure/v1|…` → `v1`), or
+/// `None` when the selector carries no such token.
+fn selector_grammar_token(selector: &str) -> Option<&str> {
+    let after_kind = selector.split_once('/')?.1;
+    let token = after_kind.split('|').next()?;
+    if token.starts_with('v') && token[1..].chars().all(|c| c.is_ascii_digit()) && token.len() > 1 {
+        Some(token)
+    } else {
+        None
+    }
 }
 
 /// Present the verdict enum in prose.
@@ -2830,6 +2883,7 @@ fn execute_mutation_action(
                 .unwrap_or("0.0.0")
                 .to_owned();
             let bounds = WindowBounds::derive(installed_at, now)?;
+            let index_grammar_versions = store.signature_grammar_versions()?;
             let gathered = store.efficacy_occurrences(&selectors, bounds.pre_start, bounds.now)?;
             let mut occurrences = Vec::with_capacity(gathered.occurrences.len());
             for occurrence in gathered.occurrences {
@@ -2855,6 +2909,7 @@ fn execute_mutation_action(
                     classifiable_failures: gathered.classifiable_failures,
                     total_failures: gathered.total_failures,
                 },
+                index_grammar_versions,
             };
             let evaluation = evaluate_efficacy(&observations, installed_at, now)?;
             let report = serde_json::to_value(&evaluation)?;
