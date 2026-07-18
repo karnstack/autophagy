@@ -42,6 +42,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "post-install mutation efficacy tracking",
         sql: include_str!("../migrations/0003_mutation_efficacy.sql"),
     },
+    Migration {
+        version: 4,
+        description: "origin-claimed mutation attestations",
+        sql: include_str!("../migrations/0004_mutation_attestations.sql"),
+    },
 ];
 
 /// SHA-256 checksums of the eight pre-release development migrations, in order

@@ -536,6 +536,76 @@ pub struct MutationDetails {
     pub installations: Vec<MutationInstallationRecord>,
     /// Post-install efficacy reports in creation order (oldest first).
     pub efficacies: Vec<MutationEfficacyRecord>,
+    /// Origin-claimed, display-only verification attestations carried in from an
+    /// imported genome. These NEVER advance the lifecycle; the receiver must
+    /// re-verify locally. Empty for locally-generated candidates.
+    pub attestations: Vec<MutationAttestationRecord>,
+}
+
+/// Owned input for one origin-claimed attestation carried by an imported genome.
+///
+/// An attestation is a museum label: it records that the genome's origin ran a
+/// replay or shadow evaluation and what that evaluation claimed, so a reviewer
+/// can see the provenance. It never advances the local lifecycle — the receiver
+/// must re-run the gate against local evidence. See ADR 0016.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttestationRegistration {
+    /// Mutation the attestation is claimed for. Must already exist locally.
+    pub mutation_id: String,
+    /// Evaluation family: `replay` or `shadow`.
+    pub kind: String,
+    /// Stable identity of the genome's origin (`origin.instance_key`).
+    pub origin_instance: String,
+    /// Stable scenario/observation set hash the origin evaluated.
+    pub set_hash: String,
+    /// Complete versioned report exactly as carried in the bundle.
+    pub report: Value,
+    /// SHA-256 of the carried report bytes, for the transit-integrity check.
+    pub content_hash: [u8; 32],
+    /// Whether the origin claimed the evaluation passed.
+    pub passed: bool,
+    /// Whether the carried report bytes still hash to `content_hash`.
+    pub hash_verified: bool,
+}
+
+/// One persisted origin-claimed attestation.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MutationAttestationRecord {
+    /// Stable attestation identity (`att_%`).
+    pub attestation_id: String,
+    /// Attested mutation identity.
+    pub mutation_id: String,
+    /// Evaluation family: `replay` or `shadow`.
+    pub kind: String,
+    /// Stable identity of the genome's origin.
+    pub origin_instance: String,
+    /// Stable scenario/observation set hash the origin evaluated.
+    pub set_hash: String,
+    /// Complete versioned report exactly as imported.
+    pub report: Value,
+    /// Whether the origin claimed the evaluation passed.
+    pub passed: bool,
+    /// Whether the carried report bytes hashed to their carried content hash on
+    /// import — a transit-integrity check, NOT a local re-verification.
+    pub hash_verified: bool,
+    /// Canonical import timestamp.
+    pub imported_at: String,
+}
+
+/// Idempotent attestation persistence result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AttestationRegisterOutcome {
+    /// A new attestation row was stored.
+    Inserted {
+        /// Stable attestation identity.
+        attestation_id: String,
+    },
+    /// An attestation for this mutation, kind, and set already existed.
+    Duplicate {
+        /// Existing attestation identity.
+        attestation_id: String,
+    },
 }
 
 /// Idempotent lifecycle transition result.

@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, collections::BTreeSet, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap, collections::BTreeSet, fmt::Write as _, path::Path, time::Duration,
+};
 
 use autophagy_events::{Event, EventKind};
 use rusqlite::{
@@ -8,13 +10,14 @@ use rusqlite::{
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    AdapterActivity, DeleteAllSummary, DeleteSummary, DetectionFingerprint, EfficacyOccurrence,
-    EfficacyOccurrences, EfficacyRegisterOutcome, EfficacyRegistration, EfficacyStatusSummary,
-    InsertOutcome, InstallationRegistration, InstallationTransitionOutcome, MutationDetails,
-    MutationEfficacyRecord, MutationInstallationRecord, MutationRecord, MutationRegisterOutcome,
-    MutationRegistration, MutationReplayRecord, MutationShadowRecord, MutationTransition,
-    MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal, RankingSignalKind,
-    RebuildSummary, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
+    AdapterActivity, AttestationRegisterOutcome, AttestationRegistration, DeleteAllSummary,
+    DeleteSummary, DetectionFingerprint, EfficacyOccurrence, EfficacyOccurrences,
+    EfficacyRegisterOutcome, EfficacyRegistration, EfficacyStatusSummary, InsertOutcome,
+    InstallationRegistration, InstallationTransitionOutcome, MutationAttestationRecord,
+    MutationDetails, MutationEfficacyRecord, MutationInstallationRecord, MutationRecord,
+    MutationRegisterOutcome, MutationRegistration, MutationReplayRecord, MutationShadowRecord,
+    MutationTransition, MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal,
+    RankingSignalKind, RebuildSummary, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
     RetrievalFilterField, RetrievalHit, RetrievalMatchKind, RetrievalQuery, SearchHit,
     SearchProjection, SessionSummary, ShadowRegisterOutcome, ShadowRegistration, SourceCursor,
     SourceIdentity, StoreError, StoreStats, migration, util,
@@ -1109,6 +1112,21 @@ impl EventStore {
         rows.map(|row| mutation_record(row?)).collect()
     }
 
+    /// The set of mutation ids carrying at least one origin-claimed attestation.
+    ///
+    /// Cheap enough to call alongside [`list_mutations`](Self::list_mutations) so
+    /// a listing can mark imported candidates without loading each one's audit.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for a database failure.
+    pub fn mutations_with_attestations(&self) -> Result<BTreeSet<String>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT DISTINCT mutation_id FROM mutation_attestations")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<BTreeSet<_>, _>>()?)
+    }
+
     /// Return one candidate and its complete lifecycle audit.
     ///
     /// # Errors
@@ -1237,6 +1255,7 @@ impl EventStore {
             .map(|row| installation_record(row?))
             .collect::<Result<Vec<_>, StoreError>>()?;
         let efficacies = self.efficacy_records(mutation_id)?;
+        let attestations = self.attestation_records(mutation_id)?;
         Ok(MutationDetails {
             mutation,
             transitions,
@@ -1244,7 +1263,130 @@ impl EventStore {
             shadows,
             installations,
             efficacies,
+            attestations,
         })
+    }
+
+    /// Every origin-claimed attestation for one mutation, in stable order.
+    fn attestation_records(
+        &self,
+        mutation_id: &str,
+    ) -> Result<Vec<MutationAttestationRecord>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT attestation_id, mutation_id, kind, origin_instance, set_hash,
+                    report_json, passed, hash_verified, imported_at
+             FROM mutation_attestations WHERE mutation_id = ?1
+             ORDER BY kind, set_hash, attestation_id",
+        )?;
+        let rows = statement.query_map([mutation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, bool>(6)?,
+                row.get::<_, bool>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (
+                attestation_id,
+                mutation_id,
+                kind,
+                origin_instance,
+                set_hash,
+                report,
+                passed,
+                hash_verified,
+                imported_at,
+            ) = row?;
+            Ok(MutationAttestationRecord {
+                attestation_id,
+                mutation_id,
+                kind,
+                origin_instance,
+                set_hash,
+                report: serde_json::from_str(&report)?,
+                passed,
+                hash_verified,
+                imported_at,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()
+    }
+
+    /// Persist one origin-claimed, display-only attestation carried by a genome.
+    ///
+    /// Attestations never advance the lifecycle (see ADR 0016): this method
+    /// inserts a museum-label row and performs no state transition. The
+    /// `UNIQUE(mutation_id, kind, set_hash)` constraint makes re-importing the
+    /// same genome idempotent — a matching attestation is a no-op
+    /// [`AttestationRegisterOutcome::Duplicate`]. The mutation must already exist
+    /// locally; the foreign key rejects an orphan attestation.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for an invalid attestation kind, a missing mutation,
+    /// serialization failure, or a database failure.
+    pub fn register_attestation(
+        &mut self,
+        registration: &AttestationRegistration,
+    ) -> Result<AttestationRegisterOutcome, StoreError> {
+        if registration.kind != "replay" && registration.kind != "shadow" {
+            return Err(StoreError::InvalidAttestationKind {
+                kind: registration.kind.clone(),
+            });
+        }
+        let attestation_id = attestation_id(
+            &registration.mutation_id,
+            &registration.kind,
+            &registration.set_hash,
+        );
+        let report_json = serde_json::to_string(&registration.report)?;
+        let now = util::now_timestamp()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if transaction
+            .query_row(
+                "SELECT 1 FROM mutation_candidates WHERE mutation_id = ?1",
+                [&registration.mutation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            return Err(StoreError::MutationNotFound {
+                mutation_id: registration.mutation_id.clone(),
+            });
+        }
+        let inserted = transaction.execute(
+            "INSERT INTO mutation_attestations(
+                attestation_id, mutation_id, kind, origin_instance, set_hash,
+                report_json, content_hash, passed, hash_verified, imported_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(mutation_id, kind, set_hash) DO NOTHING",
+            params![
+                attestation_id,
+                registration.mutation_id,
+                registration.kind,
+                registration.origin_instance,
+                registration.set_hash,
+                report_json,
+                registration.content_hash.as_slice(),
+                registration.passed,
+                registration.hash_verified,
+                now,
+            ],
+        )?;
+        transaction.commit()?;
+        if inserted == 0 {
+            Ok(AttestationRegisterOutcome::Duplicate { attestation_id })
+        } else {
+            Ok(AttestationRegisterOutcome::Inserted { attestation_id })
+        }
     }
 
     /// Every efficacy report for one mutation, oldest first.
@@ -2341,6 +2483,20 @@ fn insert_mutation_evidence(
         )?;
     }
     Ok(())
+}
+
+/// Deterministic attestation identity from its natural key. Making the id a
+/// pure function of `(mutation_id, kind, set_hash)` means re-importing the same
+/// genome derives the same id, so the insert is an idempotent no-op.
+fn attestation_id(mutation_id: &str, kind: &str, set_hash: &str) -> String {
+    let material = format!("attestation/v1\0{mutation_id}\0{kind}\0{set_hash}");
+    let digest = util::sha256(material.as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2 + 4);
+    encoded.push_str("att_");
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
 }
 
 fn count_mutations(transaction: &Transaction<'_>) -> Result<i64, rusqlite::Error> {

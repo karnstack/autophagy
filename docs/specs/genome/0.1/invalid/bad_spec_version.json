@@ -1,0 +1,87 @@
+{
+  "spec_version": "genome/0.2",
+  "genome_id": "gen_fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "exported_at": "2026-07-19T12:00:00Z",
+  "origin": {
+    "instance_key": "laptop-xyz",
+    "autophagy_version": "0.1.0"
+  },
+  "mutation": {
+    "spec_version": "mutation/0.1",
+    "mutation_id": "mut_b13f28789cdae90dd6837572975bca5bf73e6b45f6e36730f7ff4d37cefa8e41",
+    "version": "0.1.0",
+    "state": "candidate",
+    "generated_by": "deterministic_template_v1",
+    "source_finding_id": "find_secondfinding",
+    "source_detector": "repeated_command_failure",
+    "title": "Prevent repeated command failure: shell: cargo test",
+    "hypothesis": {
+      "statement": "The recurring cargo test failure is caused by unchanged retries.",
+      "expected_result": "Matching cargo test attempts avoid repeated exit-code-101 failures.",
+      "supporting_event_ids": [
+        "evt_only_one",
+        "evt_only_two"
+      ],
+      "counterexample_event_ids": [],
+      "failure_cases": [
+        "The same command text can represent different intent."
+      ]
+    },
+    "triggers": [
+      {
+        "type": "tool_call",
+        "selector": "failure/v2|shell|cargo test|exit:101"
+      }
+    ],
+    "exclusions": [
+      "Do not block execution; this instruction is advisory."
+    ],
+    "intervention": {
+      "type": "agent_instruction",
+      "instruction": "Before running `cargo test`, verify its required preconditions."
+    },
+    "permissions": {
+      "filesystem_read": [],
+      "filesystem_write": [],
+      "commands": [],
+      "environment": [],
+      "network": false
+    },
+    "promotion": {
+      "minimum_replays": 5,
+      "minimum_success_rate_bps": 8000,
+      "maximum_false_positive_rate_bps": 1000
+    }
+  },
+  "evidence_events": [
+    {
+      "spec_version": "aep/0.1",
+      "event_id": "evt_only_one",
+      "session_id": "ses_gamma",
+      "timestamp": "2026-06-01T09:00:00Z",
+      "source": "codex",
+      "type": "tool.failed"
+    },
+    {
+      "spec_version": "aep/0.1",
+      "event_id": "evt_only_two",
+      "session_id": "ses_delta",
+      "timestamp": "2026-06-02T09:00:00Z",
+      "source": "codex",
+      "type": "tool.failed"
+    }
+  ],
+  "attestations": [],
+  "transitions": [
+    {
+      "from_state": null,
+      "to_state": "candidate",
+      "reason": "generated from evidence",
+      "occurred_at": "2026-06-03T09:00:00Z"
+    }
+  ],
+  "redaction": {
+    "redacted_fields": 2,
+    "policy": "built-in secret rules + import.exclude_paths"
+  }
+}

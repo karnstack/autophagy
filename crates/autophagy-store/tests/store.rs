@@ -6,12 +6,12 @@ use autophagy_events::{
     Artifact, ArtifactKind, Event, EventId, EventKind, SessionId, SpecVersion, ToolCall,
 };
 use autophagy_store::{
-    DeleteAllSummary, DeleteSummary, EfficacyRegisterOutcome, EfficacyRegistration, EventStore,
-    InsertOutcome, InstallationRegistration, InstallationTransitionOutcome,
-    MutationRegisterOutcome, MutationRegistration, PruneSummary, RebuildSummary,
-    ReplayRegisterOutcome, ReplayRegistration, RetrievalMatchKind, RetrievalOutcome,
-    RetrievalQuery, SearchProjection, ShadowRegisterOutcome, ShadowRegistration, SourceCursor,
-    SourceIdentity, StoreError, StoreStats,
+    AttestationRegisterOutcome, AttestationRegistration, DeleteAllSummary, DeleteSummary,
+    EfficacyRegisterOutcome, EfficacyRegistration, EventStore, InsertOutcome,
+    InstallationRegistration, InstallationTransitionOutcome, MutationRegisterOutcome,
+    MutationRegistration, PruneSummary, RebuildSummary, ReplayRegisterOutcome, ReplayRegistration,
+    RetrievalMatchKind, RetrievalOutcome, RetrievalQuery, SearchProjection, ShadowRegisterOutcome,
+    ShadowRegistration, SourceCursor, SourceIdentity, StoreError, StoreStats,
 };
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -31,7 +31,7 @@ fn migrations_persist_and_reopen_cleanly() {
 
     {
         let mut store = EventStore::open(&database).expect("store should open");
-        assert_eq!(store.schema_version().expect("schema version"), 3);
+        assert_eq!(store.schema_version().expect("schema version"), 4);
         assert!(matches!(
             store
                 .insert_event(&source, &event, &SearchProjection::default())
@@ -41,7 +41,7 @@ fn migrations_persist_and_reopen_cleanly() {
     }
 
     let reopened = EventStore::open(&database).expect("store should reopen");
-    assert_eq!(reopened.schema_version().expect("schema version"), 3);
+    assert_eq!(reopened.schema_version().expect("schema version"), 4);
     assert_eq!(
         reopened
             .get_event(event.event_id.as_str())
@@ -1068,6 +1068,89 @@ fn findings_cache_round_trips_and_collects_stale_generations() {
         store.cached_findings(&key_c).expect("hit c").as_deref(),
         Some("{\"findings\":[2]}")
     );
+}
+
+#[test]
+fn attestations_are_display_only_and_idempotent() {
+    let mut store = EventStore::open_in_memory().expect("store");
+    let source = source("instance-attest");
+    for (event_id, session_id, timestamp) in [
+        ("evt_mutation-support-a", "ses_a", "2026-07-16T06:00:00Z"),
+        ("evt_mutation-support-b", "ses_b", "2026-07-16T06:01:00Z"),
+        ("evt_mutation-counter", "ses_c", "2026-07-16T06:02:00Z"),
+    ] {
+        store
+            .insert_event(
+                &source,
+                &session_event(
+                    event_id,
+                    session_id,
+                    EventKind::DecisionRecorded,
+                    timestamp,
+                    0,
+                ),
+                &SearchProjection::default(),
+            )
+            .expect("evidence event");
+    }
+    store
+        .register_mutation(&mutation_registration(
+            "mut_attest",
+            "fnd_attest",
+            "eqv_attest",
+        ))
+        .expect("register");
+
+    let registration = AttestationRegistration {
+        mutation_id: "mut_attest".to_owned(),
+        kind: "replay".to_owned(),
+        origin_instance: "laptop-origin".to_owned(),
+        set_hash: "scenarioset0001".to_owned(),
+        report: json!({"replay_id": "rep_x", "passed": true}),
+        content_hash: [7_u8; 32],
+        passed: true,
+        hash_verified: true,
+    };
+    let first = store
+        .register_attestation(&registration)
+        .expect("first attestation");
+    let attestation_id = match &first {
+        AttestationRegisterOutcome::Inserted { attestation_id } => attestation_id.clone(),
+        AttestationRegisterOutcome::Duplicate { .. } => panic!("first insert must be Inserted"),
+    };
+    assert!(attestation_id.starts_with("att_"));
+
+    // Re-registering the same (mutation, kind, set) is an idempotent no-op.
+    assert_eq!(
+        store
+            .register_attestation(&registration)
+            .expect("re-register"),
+        AttestationRegisterOutcome::Duplicate { attestation_id }
+    );
+
+    // The attestation surfaces on the mutation but never advances its state.
+    let details = store.get_mutation("mut_attest").expect("details");
+    assert_eq!(details.mutation.state, "candidate");
+    assert_eq!(details.attestations.len(), 1);
+    assert_eq!(details.attestations[0].kind, "replay");
+    assert_eq!(details.attestations[0].origin_instance, "laptop-origin");
+    assert!(details.attestations[0].passed);
+    assert!(details.attestations[0].hash_verified);
+
+    // An unsupported kind is rejected, and an orphan attestation is refused.
+    let mut bad_kind = registration.clone();
+    bad_kind.kind = "efficacy".to_owned();
+    bad_kind.set_hash = "other".to_owned();
+    assert!(matches!(
+        store.register_attestation(&bad_kind),
+        Err(StoreError::InvalidAttestationKind { .. })
+    ));
+    let mut orphan = registration.clone();
+    orphan.mutation_id = "mut_missing".to_owned();
+    assert!(matches!(
+        store.register_attestation(&orphan),
+        Err(StoreError::MutationNotFound { .. })
+    ));
 }
 
 fn source(instance_key: &str) -> SourceIdentity {

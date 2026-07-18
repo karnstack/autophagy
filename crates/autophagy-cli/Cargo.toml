@@ -20,7 +20,9 @@ autophagy-adapter-pi = { path = "../../adapters/pi" }
 autophagy-core = { path = "../autophagy-core" }
 autophagy-efficacy = { path = "../autophagy-efficacy" }
 autophagy-events = { path = "../autophagy-events" }
+autophagy-genome = { path = "../autophagy-genome" }
 autophagy-install = { path = "../autophagy-install" }
+autophagy-redaction = { path = "../autophagy-redaction" }
 autophagy-mutations = { path = "../autophagy-mutations" }
 autophagy-patterns = { path = "../autophagy-patterns" }
 autophagy-replay = { path = "../autophagy-replay" }

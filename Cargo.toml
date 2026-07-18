@@ -10,6 +10,7 @@ members = [
   "crates/autophagy-core",
   "crates/autophagy-efficacy",
   "crates/autophagy-events",
+  "crates/autophagy-genome",
   "crates/autophagy-install",
   "crates/autophagy-mutations",
   "crates/autophagy-patterns",

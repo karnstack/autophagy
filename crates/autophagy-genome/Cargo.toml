@@ -1,0 +1,24 @@
+[package]
+name = "autophagy-genome"
+description = "Portable, redaction-gated mutation genome bundle format for Autophagy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+autophagy-events = { path = "../autophagy-events" }
+autophagy-mutations = { path = "../autophagy-mutations" }
+autophagy-redaction = { path = "../autophagy-redaction" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+jsonschema = { version = "0.47", default-features = false }
+
+[lints]
+workspace = true

@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autophagy.sh/specs/genome/0.1/bundle.schema.json",
+  "title": "Autophagy Team Genome Bundle v0.1",
+  "description": "A self-contained, redaction-gated export of one mutation candidate, its redacted evidence events, origin-claimed verification attestations, and lifecycle history. The mutation package and evidence events are governed by their own contracts (mutation/*, aep/*); this schema governs the genome envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version",
+    "genome_id",
+    "exported_at",
+    "origin",
+    "mutation",
+    "evidence_events",
+    "attestations",
+    "transitions",
+    "redaction"
+  ],
+  "properties": {
+    "spec_version": { "const": "genome/0.1" },
+    "genome_id": { "type": "string", "pattern": "^gen_[a-f0-9]{64}$" },
+    "exported_at": { "type": "string", "format": "date-time" },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_key", "autophagy_version"],
+      "properties": {
+        "instance_key": { "type": "string", "minLength": 1 },
+        "autophagy_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "mutation": {
+      "type": "object",
+      "description": "A full mutation package (mutation/0.1 or mutation/0.2).",
+      "required": [
+        "spec_version",
+        "mutation_id",
+        "title",
+        "hypothesis",
+        "triggers",
+        "intervention",
+        "permissions",
+        "promotion"
+      ],
+      "properties": {
+        "mutation_id": { "type": "string", "pattern": "^mut_[A-Za-z0-9._:-]+$" }
+      }
+    },
+    "evidence_events": {
+      "type": "array",
+      "description": "Redacted AEP events cited by the hypothesis and attestations, in stable event-id order.",
+      "items": {
+        "type": "object",
+        "required": ["spec_version", "event_id", "session_id", "type"],
+        "properties": {
+          "event_id": { "type": "string", "pattern": "^evt_[A-Za-z0-9._:-]+$" }
+        }
+      }
+    },
+    "attestations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/attestation" }
+    },
+    "transitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transition" }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["redacted_fields", "policy"],
+      "properties": {
+        "redacted_fields": { "type": "integer", "minimum": 0 },
+        "policy": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "set_hash",
+        "report_json",
+        "content_hash",
+        "passed",
+        "created_at"
+      ],
+      "properties": {
+        "kind": { "enum": ["replay", "shadow"] },
+        "id": { "type": "string", "minLength": 1 },
+        "set_hash": { "type": "string", "minLength": 1 },
+        "report_json": { "type": "object" },
+        "content_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "passed": { "type": "boolean" },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_state", "to_state", "reason", "occurred_at"],
+      "properties": {
+        "from_state": { "type": ["string", "null"] },
+        "to_state": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string" },
+        "occurred_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

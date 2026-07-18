@@ -2748,3 +2748,233 @@ fn propose_and_synthesize_survive_immutable_template_conflicts() {
                 .contains(&mutation_id))
     );
 }
+
+/// Drive one mutation to `shadow_passed` (candidate → challenge → replay →
+/// shadow) so it carries both a replay and a shadow report, then export it as a
+/// genome, import it into a fresh database, and confirm the round-trip preserves
+/// evidence and carries the reports as display-only attestations.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn genome_export_import_round_trip_preserves_evidence_and_attestations() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let origin_db = directory.path().join("origin.db");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/findings/deterministic.jsonl");
+    run_json(
+        &origin_db,
+        ["import", fixture.to_str().expect("UTF-8 path")],
+    );
+    run_json(&origin_db, ["mutations", "propose"]);
+
+    let registry = run_json(&origin_db, ["mutations", "list"]);
+    let mutation_id = registry["result"]
+        .as_array()
+        .expect("registry")
+        .iter()
+        .find(|mutation| mutation["source_detector"] == "repeated_command_failure")
+        .expect("failure mutation")["mutation_id"]
+        .as_str()
+        .expect("mutation id")
+        .to_owned();
+
+    run_json(
+        &origin_db,
+        [
+            "mutations",
+            "challenge",
+            &mutation_id,
+            "--check",
+            "coincidence-considered",
+            "--check",
+            "sessions-comparable",
+            "--check",
+            "trigger-observable",
+            "--check",
+            "legitimate-uses-bounded",
+            "--check",
+            "equivalent-searched",
+            "--check",
+            "counterexamples-reviewed",
+        ],
+    );
+    let passing_replay = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/replay/command-preflight-pass.json");
+    run_json(
+        &origin_db,
+        [
+            "mutations",
+            "replay",
+            &mutation_id,
+            "--suite",
+            passing_replay.to_str().expect("UTF-8 path"),
+        ],
+    );
+    let passing_shadow = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../evals/fixtures/shadow/command-preflight-pass.json");
+    run_json(
+        &origin_db,
+        [
+            "mutations",
+            "shadow",
+            &mutation_id,
+            "--suite",
+            passing_shadow.to_str().expect("UTF-8 path"),
+        ],
+    );
+
+    // Export the shadow-passed mutation as a genome.
+    let bundle_path = directory.path().join("mutation.genome.json");
+    let exported = run_json(
+        &origin_db,
+        [
+            "genome",
+            "export",
+            &mutation_id,
+            "--out",
+            bundle_path.to_str().expect("UTF-8 path"),
+        ],
+    );
+    assert_eq!(exported["command"], "genome_export");
+    assert!(
+        exported["result"]["event_count"].as_u64().expect("events") >= 1,
+        "genome must carry evidence events"
+    );
+    assert_eq!(exported["result"]["attestation_count"], 2);
+
+    // The bundle is a schema-shaped file: correct envelope, both attestations,
+    // and lifecycle state that does NOT travel.
+    let bundle: Value =
+        serde_json::from_slice(&fs::read(&bundle_path).expect("read bundle")).expect("bundle JSON");
+    assert_eq!(bundle["spec_version"], "genome/0.1");
+    assert!(
+        bundle["genome_id"]
+            .as_str()
+            .expect("genome id")
+            .starts_with("gen_")
+    );
+    let kinds: Vec<&str> = bundle["attestations"]
+        .as_array()
+        .expect("attestations")
+        .iter()
+        .map(|attestation| attestation["kind"].as_str().expect("kind"))
+        .collect();
+    assert!(kinds.contains(&"replay") && kinds.contains(&"shadow"));
+
+    // Re-export without --force refuses to clobber the existing file.
+    let refused = command(&origin_db)
+        .args([
+            "genome",
+            "export",
+            &mutation_id,
+            "--out",
+            bundle_path.to_str().expect("UTF-8 path"),
+        ])
+        .output()
+        .expect("genome export no force");
+    assert!(
+        !refused.status.success(),
+        "genome export must not overwrite without --force"
+    );
+
+    // Import into a fresh, empty database. A dry run writes nothing.
+    let receiver_db = directory.path().join("receiver.db");
+    let dry = run_json(
+        &receiver_db,
+        [
+            "genome",
+            "import",
+            bundle_path.to_str().expect("UTF-8 path"),
+            "--dry-run",
+        ],
+    );
+    assert_eq!(dry["command"], "genome_import");
+    assert_eq!(dry["result"]["dry_run"], true);
+    assert_eq!(dry["result"]["mutation_outcome"], "registered");
+    // A dry run must not create the mutation.
+    let empty = run_json(&receiver_db, ["mutations", "list"]);
+    assert!(empty["result"].as_array().expect("empty list").is_empty());
+
+    // The real import registers a fresh candidate and stores both attestations.
+    let imported = run_json(
+        &receiver_db,
+        [
+            "genome",
+            "import",
+            bundle_path.to_str().expect("UTF-8 path"),
+        ],
+    );
+    assert_eq!(imported["result"]["mutation_outcome"], "registered");
+    assert_eq!(imported["result"]["mutation_id"], mutation_id.as_str());
+    assert!(
+        imported["result"]["events_inserted"]
+            .as_u64()
+            .expect("inserted")
+            >= 1
+    );
+    assert_eq!(
+        imported["result"]["attestations"]
+            .as_array()
+            .expect("attestations")
+            .len(),
+        2
+    );
+    assert!(
+        imported["result"]["attestations"]
+            .as_array()
+            .expect("attestations")
+            .iter()
+            .all(
+                |attestation| attestation["hash_verified"] == true && attestation["stored"] == true
+            )
+    );
+
+    // The candidate lands as `candidate` — lifecycle state never travels — and
+    // its show output carries the origin-claimed attestations honestly.
+    let shown = run_json(&receiver_db, ["mutations", "show", &mutation_id]);
+    assert_eq!(shown["result"]["mutation"]["state"], "candidate");
+    assert_eq!(
+        shown["result"]["attestations"]
+            .as_array()
+            .expect("attestations")
+            .len(),
+        2
+    );
+
+    // The text `show` labels attestations as origin-claimed, not verified.
+    let shown_text = command(&receiver_db)
+        .args(["mutations", "show", &mutation_id])
+        .output()
+        .expect("show text");
+    assert!(shown_text.status.success());
+    let shown_text = String::from_utf8_lossy(&shown_text.stdout);
+    assert!(
+        shown_text.contains("origin-claimed, not locally verified"),
+        "show must label attestations honestly: {shown_text}"
+    );
+
+    // `mutations list` marks the imported candidate.
+    let listed = command(&receiver_db)
+        .args(["mutations", "list"])
+        .output()
+        .expect("list text");
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("(imported)"));
+
+    // Re-importing the same bundle is idempotent: the mutation is a duplicate
+    // and the attestations are already present.
+    let reimported = run_json(
+        &receiver_db,
+        [
+            "genome",
+            "import",
+            bundle_path.to_str().expect("UTF-8 path"),
+        ],
+    );
+    assert_eq!(reimported["result"]["mutation_outcome"], "duplicate");
+    assert!(
+        reimported["result"]["attestations"]
+            .as_array()
+            .expect("attestations")
+            .iter()
+            .all(|attestation| attestation["stored"] == false)
+    );
+}
