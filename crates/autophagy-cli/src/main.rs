@@ -1347,17 +1347,38 @@ fn match_kind_label(kind: autophagy_store::RetrievalMatchKind) -> &'static str {
 /// framing characters are stripped so plain metadata text remains.
 fn clean_snippet(snippet: &str) -> String {
     if let Some(command) = extract_command_value(snippet) {
-        let trimmed = command.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_owned();
+        let collapsed = collapse_whitespace(&command);
+        if !collapsed.is_empty() {
+            return collapsed;
         }
     }
     let stripped: String = snippet
-        .trim()
         .chars()
         .filter(|character| !matches!(character, '{' | '}' | '"'))
         .collect();
-    stripped.trim().to_owned()
+    collapse_whitespace(&stripped)
+}
+
+/// Collapse every run of whitespace — including embedded newlines and tabs —
+/// into a single space and trim the ends, so a cleaned snippet always renders on
+/// exactly one row. Codex-adapter events carry multiline snippets that would
+/// otherwise break the aligned single-row search layout. Display-only: the raw
+/// snippet is preserved under `--output json`.
+fn collapse_whitespace(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_whitespace() {
+            pending_space = true;
+        } else {
+            if pending_space && !result.is_empty() {
+                result.push(' ');
+            }
+            pending_space = false;
+            result.push(character);
+        }
+    }
+    result
 }
 
 /// Extract the `command` field's string value from a (possibly truncated) FTS
@@ -3073,11 +3094,26 @@ fn write_search_hits(writer: &mut impl Write, hits: &[RetrievalHit]) -> io::Resu
         })
         .collect();
 
-    let column_width = |column: &[String]| column.iter().map(String::len).max().unwrap_or(0);
+    // Measure width in characters, matching how the formatter pads: `{:<w$}`
+    // counts characters, not bytes. Byte length over-counts multibyte cells
+    // (mixed adapters, unicode project names), padding the column wider than its
+    // content; character counts keep each column exactly as wide as its widest
+    // displayed cell.
+    let column_width = |column: &[String]| {
+        column
+            .iter()
+            .map(|value| value.chars().count())
+            .max()
+            .unwrap_or(0)
+    };
     let id_w = column_width(&ids);
     let time_w = column_width(&times);
     let project_w = column_width(&projects);
-    let kind_w = kinds.iter().map(|kind| kind.len()).max().unwrap_or(0);
+    let kind_w = kinds
+        .iter()
+        .map(|kind| kind.chars().count())
+        .max()
+        .unwrap_or(0);
     let score_w = column_width(&scores);
 
     for index in 0..hits.len() {
@@ -3564,8 +3600,8 @@ fn write_import_summary(writer: &mut impl Write, summary: &ImportSummary) -> io:
 #[cfg(test)]
 mod tests {
     use super::{
-        MIN_SHORT_PREFIX, clean_snippet, percent, project_basename, resolve_stored_id, short_id,
-        shorten_project, truncate_words,
+        MIN_SHORT_PREFIX, clean_snippet, collapse_whitespace, percent, project_basename,
+        resolve_stored_id, short_id, shorten_project, truncate_words,
     };
 
     const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -3625,6 +3661,44 @@ mod tests {
     #[test]
     fn clean_snippet_leaves_plain_text_alone() {
         assert_eq!(clean_snippet("cargo [test] failed"), "cargo [test] failed");
+    }
+
+    #[test]
+    fn clean_snippet_collapses_multiline_content_to_one_row() {
+        // Codex-adapter snippets embed literal newlines and tabs; they must
+        // collapse to single spaces so the result stays on one row.
+        let raw = "first line\n\tsecond   line\r\nthird";
+        let cleaned = clean_snippet(raw);
+        assert_eq!(cleaned, "first line second line third");
+        assert!(!cleaned.contains(['\n', '\r', '\t']));
+    }
+
+    #[test]
+    fn clean_snippet_collapses_newlines_inside_command_value() {
+        let raw = "{\"command\":\"echo one\necho [two]\"}";
+        assert_eq!(clean_snippet(raw), "echo one echo [two]");
+    }
+
+    #[test]
+    fn collapse_whitespace_trims_and_squeezes_runs() {
+        assert_eq!(collapse_whitespace("  a \n\n b\t\tc  "), "a b c");
+        assert_eq!(collapse_whitespace("\n\t "), "");
+        assert_eq!(collapse_whitespace("solo"), "solo");
+    }
+
+    #[test]
+    fn column_width_counts_characters_not_bytes() {
+        // `format!` pads a `&str` by character count, so the width budget the
+        // renderer computes must too. A byte-length budget over-counts a
+        // multibyte cell and pads the column wider than its displayed content;
+        // a character-count budget equal to the value's own width adds nothing.
+        let value = "café—münchen".to_owned();
+        let char_width = value.chars().count();
+        assert!(char_width < value.len(), "sample must be multibyte");
+        assert_eq!(format!("{value:<char_width$}|"), format!("{value}|"));
+        // The byte-length budget would inject spurious trailing spaces.
+        let byte_width = value.len();
+        assert!(format!("{value:<byte_width$}|").ends_with(" |"));
     }
 
     #[test]
