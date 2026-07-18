@@ -1,0 +1,56 @@
+{
+  "spec_version": "efficacy/0.1",
+  "efficacy_id": "eff_e88853216dc0a71e56da0adc54560d5531fcd9aa04734773fd13de947615ed58",
+  "mutation_id": "mut_a87b7c83aa9bf78169c01c2ad73b02c1",
+  "mutation_version": "0.1.0",
+  "signature_selectors": [
+    "failure/v2|shell|cd $PROJECT && go build ./... 2>&1|exit:1"
+  ],
+  "matching_rule": "model_judgment",
+  "installed_at": "2026-04-15T00:00:00Z",
+  "evaluated_at": "2026-07-15T00:00:00Z",
+  "windows": {
+    "pre": {
+      "start": "2026-01-14T00:00:00Z",
+      "end": "2026-04-15T00:00:00Z",
+      "duration_seconds": 7862400,
+      "occurrences": 6,
+      "distinct_sessions": 3,
+      "rate_per_week_milli": 461
+    },
+    "post": {
+      "start": "2026-04-15T00:00:00Z",
+      "end": "2026-07-15T00:00:00Z",
+      "duration_seconds": 7862400,
+      "occurrences": 1,
+      "distinct_sessions": 1,
+      "rate_per_week_milli": 76
+    }
+  },
+  "rate_delta_bps": -8351,
+  "coverage": {
+    "classifiable_failures": 118,
+    "total_failures": 124,
+    "coverage_bps": 9516,
+    "complete": false
+  },
+  "verdict": "improved",
+  "insufficient_reasons": [],
+  "evidence": {
+    "pre_event_ids": [
+      "evt_pi_4a98a0e1",
+      "evt_pi_b3d59052",
+      "evt_pi_5ffbc3d1",
+      "evt_pi_1cab776a",
+      "evt_pi_2a7bcdcb",
+      "evt_pi_0a991c55"
+    ],
+    "post_event_ids": [
+      "evt_pi_ed88be62"
+    ],
+    "pre_event_count": 6,
+    "post_event_count": 1,
+    "listing_cap": 50
+  },
+  "model_used": false
+}

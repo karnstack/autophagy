@@ -645,10 +645,41 @@ fn milestone_demo_digests_exports_deletes_and_prunes_offline() {
             .contains("Mutation: `mut_")
     );
 
+    // Post-install efficacy: an observational, model-free recurrence report that
+    // registers without changing any lifecycle state. Evaluated at install time
+    // the post-window is empty, so the honest verdict is insufficient_data.
+    let efficacy = run_json(&database, ["mutations", "efficacy", &failure_id]);
+    assert_eq!(
+        efficacy["result"]["evaluation"]["spec_version"],
+        "efficacy/0.1"
+    );
+    assert_eq!(efficacy["result"]["evaluation"]["model_used"], false);
+    assert_eq!(
+        efficacy["result"]["evaluation"]["matching_rule"],
+        "failure_signature_recurrence"
+    );
+    assert_eq!(efficacy["result"]["registration"]["status"], "inserted");
+    let measured = run_json(&database, ["mutations", "show", &failure_id]);
+    assert_eq!(measured["result"]["mutation"]["state"], "active");
+    assert_eq!(
+        measured["result"]["efficacies"]
+            .as_array()
+            .expect("efficacies")
+            .len(),
+        1
+    );
+
     let uninstalled = run_json(&database, ["mutations", "uninstall", &failure_id]);
     assert_eq!(uninstalled["result"]["mutation_state"], "retired");
     assert_eq!(uninstalled["result"]["installation_state"], "uninstalled");
     assert!(!installed_path.exists());
+
+    // Efficacy measures post-install recurrence, so a retired mutation is refused.
+    let refused_efficacy = command(&database)
+        .args(["mutations", "efficacy", &failure_id])
+        .output()
+        .expect("efficacy after uninstall");
+    assert!(!refused_efficacy.status.success());
 
     let retired = run_json(&database, ["mutations", "show", &failure_id]);
     assert_eq!(retired["result"]["mutation"]["state"], "retired");

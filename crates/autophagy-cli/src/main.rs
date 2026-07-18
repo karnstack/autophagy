@@ -32,6 +32,10 @@ use autophagy_core::{
     ImportOptions, ImportSummary, ReindexError, ReindexOptions, ReindexSummary, import_jsonl,
     reindex,
 };
+use autophagy_efficacy::{
+    CoverageInput, EfficacyError, EfficacyObservations, EfficacyReport, FailureOccurrence,
+    InsufficientReason, MatchingRule, Verdict, WindowBounds, evaluate as evaluate_efficacy,
+};
 use autophagy_events::Event;
 use autophagy_install::{
     InstallError, InstallTarget, InstalledArtifact, SkillPlan, SupervisorError, materialize,
@@ -52,11 +56,11 @@ use autophagy_shadow::{
     evaluate as evaluate_shadow, extract_observation_draft,
 };
 use autophagy_store::{
-    DeleteAllSummary, DeleteSummary, EventStore, InstallationRegistration,
-    InstallationTransitionOutcome, MutationDetails, MutationRecord, MutationRegisterOutcome,
-    MutationRegistration, MutationTransitionOutcome, PruneSummary, ReplayRegisterOutcome,
-    ReplayRegistration, RetrievalHit, RetrievalOutcome, RetrievalQuery, SessionSummary,
-    ShadowRegisterOutcome, ShadowRegistration, StoreError,
+    DeleteAllSummary, DeleteSummary, EfficacyRegisterOutcome, EfficacyRegistration, EventStore,
+    InstallationRegistration, InstallationTransitionOutcome, MutationDetails, MutationRecord,
+    MutationRegisterOutcome, MutationRegistration, MutationTransitionOutcome, PruneSummary,
+    ReplayRegisterOutcome, ReplayRegistration, RetrievalHit, RetrievalOutcome, RetrievalQuery,
+    SessionSummary, ShadowRegisterOutcome, ShadowRegistration, StoreError,
 };
 use autophagy_synthesis::{
     AgentCliProvider, Capability, DeterministicReferenceProvider, EndpointLocality, ManifestError,
@@ -622,6 +626,16 @@ enum MutationAction {
         #[arg(long, alias = "observations", value_name = "PATH")]
         suite: PathBuf,
     },
+    /// Measure whether the addressed failure recurs less since install.
+    Efficacy {
+        /// Stable mutation identity.
+        mutation_id: String,
+
+        /// Evaluation clock (RFC 3339). Defaults to the current time; override
+        /// for a reproducible or backdated report.
+        #[arg(long, value_name = "RFC3339")]
+        now: Option<String>,
+    },
     /// Install one shadow-passed mutation as a repo-scoped coding-agent skill.
     Install {
         /// Stable mutation identity.
@@ -765,6 +779,8 @@ enum CommandReport {
     MutationShadowDraft(MutationShadowDraftReport),
     #[serde(rename = "mutations_shadow")]
     MutationShadow(MutationShadowReport),
+    #[serde(rename = "mutations_efficacy")]
+    MutationEfficacy(MutationEfficacyReport),
     #[serde(rename = "mutations_install")]
     MutationInstall(MutationInstallReport),
     #[serde(rename = "mutations_uninstall")]
@@ -976,6 +992,12 @@ struct MutationShadowReport {
 }
 
 #[derive(Debug, Serialize)]
+struct MutationEfficacyReport {
+    evaluation: EfficacyReport,
+    registration: EfficacyRegisterOutcome,
+}
+
+#[derive(Debug, Serialize)]
 struct MutationInstallReport {
     installation_id: String,
     target: &'static str,
@@ -1017,6 +1039,9 @@ impl CommandReport {
             Self::Import(summary) => summary.has_issues(),
             Self::MutationReplay(report) => !report.evaluation.passed,
             Self::MutationShadow(report) => !report.evaluation.passed,
+            Self::MutationEfficacy(report) => {
+                matches!(report.evaluation.verdict, Verdict::Regressed)
+            }
             Self::Watch(report) => report.has_issues(),
             Self::Sessions(_)
             | Self::Search(_)
@@ -1127,6 +1152,8 @@ enum CliError {
     DataDirectoryUnavailable,
     #[error("could not format report timestamp: {0}")]
     TimeFormat(#[from] time::error::Format),
+    #[error("could not parse a stored timestamp: {0}")]
+    TimeParse(#[from] time::error::Parse),
     #[error("deleting all data requires --confirm delete-all")]
     DeleteAllConfirmation,
     #[error("challenge is incomplete; missing checks: {0}")]
@@ -1139,6 +1166,16 @@ enum CliError {
     ShadowDraft(#[from] ShadowDraftError),
     #[error(transparent)]
     Shadow(#[from] ShadowEvaluationError),
+    #[error(transparent)]
+    Efficacy(#[from] EfficacyError),
+    #[error(
+        "mutation '{0}' is not installed; efficacy measures post-install recurrence, so install it first"
+    )]
+    MutationNotInstalled(String),
+    #[error("mutation '{0}' carries no trigger selectors to measure")]
+    EfficacyNoSelectors(String),
+    #[error("could not parse the --now evaluation clock '{0}' as an RFC 3339 timestamp")]
+    InvalidNowTimestamp(String),
     #[error(transparent)]
     Install(#[from] InstallError),
     #[error(transparent)]
@@ -1296,6 +1333,93 @@ fn compact_time(timestamp: &str, now: OffsetDateTime) -> String {
 /// the spec-versioned JSON surface unchanged.
 fn percent(bps: u32) -> String {
     format!("{:.1}%", f64::from(bps) / 100.0)
+}
+
+/// Format a milli-occurrences-per-week rate for humans (`1810` → `1.8/wk`).
+#[allow(clippy::cast_precision_loss)]
+fn per_week(milli: i64) -> String {
+    format!("{:.1}/wk", milli as f64 / 1000.0)
+}
+
+/// Format a signed basis-points change as a signed percentage (`-8700` →
+/// `-87.0%`).
+#[allow(clippy::cast_precision_loss)]
+fn signed_percent(bps: i32) -> String {
+    format!("{:+.1}%", f64::from(bps) / 100.0)
+}
+
+/// Turn an insufficiency reason into a plain-language "needs" phrase.
+const fn efficacy_reason_phrase(reason: InsufficientReason) -> &'static str {
+    match reason {
+        InsufficientReason::PostWindowTooShort => "a longer post-install window",
+        InsufficientReason::SparseOccurrences => "more observed occurrences",
+        InsufficientReason::PartialIndexCoverage => "fuller command-index coverage",
+    }
+}
+
+/// One humanized post-install recurrence summary from a typed efficacy report:
+/// verdict, pre/post rates, relative change, and index coverage.
+fn efficacy_summary_line(report: &EfficacyReport) -> String {
+    let mut parts = vec![format!(
+        "{} · {} → {} failures ({} → {})",
+        efficacy_verdict_label(report.verdict),
+        report.windows.pre.occurrences,
+        report.windows.post.occurrences,
+        per_week(report.windows.pre.rate_per_week_milli),
+        per_week(report.windows.post.rate_per_week_milli),
+    )];
+    if let Some(delta) = report.rate_delta_bps {
+        parts.push(signed_percent(delta));
+    } else if report.windows.pre.occurrences == 0 {
+        parts.push("no prior baseline".to_owned());
+    }
+    parts.push(format!(
+        "{} classifiable",
+        percent(report.coverage.coverage_bps)
+    ));
+    if report.verdict == Verdict::InsufficientData && !report.insufficient_reasons.is_empty() {
+        let needs = report
+            .insufficient_reasons
+            .iter()
+            .map(|reason| efficacy_reason_phrase(*reason))
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("needs {needs}"));
+    }
+    parts.join(" · ")
+}
+
+/// Present the verdict enum in prose.
+const fn efficacy_verdict_label(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Improved => "improved",
+        Verdict::Regressed => "regressed",
+        Verdict::Unchanged => "unchanged",
+        Verdict::InsufficientData => "insufficient data",
+    }
+}
+
+/// Render the `mutations efficacy` result as one humanized line.
+fn write_mutation_efficacy(
+    writer: &mut impl Write,
+    report: &MutationEfficacyReport,
+) -> io::Result<()> {
+    let duplicate = matches!(
+        report.registration,
+        EfficacyRegisterOutcome::Duplicate { .. }
+    );
+    let window_days = report.evaluation.windows.post.duration_seconds / 86_400;
+    writeln!(
+        writer,
+        "{}\t{}\t{window_days}d window\tmodel_used=false{}",
+        report.evaluation.efficacy_id,
+        efficacy_summary_line(&report.evaluation),
+        if duplicate {
+            " · already recorded"
+        } else {
+            ""
+        },
+    )
 }
 
 /// Rewrite an absolute project path into a `~`-relative form when it lives under
@@ -2441,6 +2565,82 @@ fn execute_mutation_action(
                 requested_id,
             }))
         }
+        MutationAction::Efficacy { mutation_id, now } => {
+            let mutation_id = resolve_mutation_id(&store, &mutation_id)?;
+            let installation = store.get_installation(&mutation_id)?;
+            if installation.state != "installed" {
+                return Err(CliError::MutationNotInstalled(mutation_id));
+            }
+            let installed_at = OffsetDateTime::parse(&installation.installed_at, &Rfc3339)?;
+            let now = match now {
+                Some(raw) => OffsetDateTime::parse(&raw, &Rfc3339)
+                    .map_err(|_| CliError::InvalidNowTimestamp(raw))?,
+                None => OffsetDateTime::now_utc(),
+            };
+            let details = store.get_mutation(&mutation_id)?;
+            let package = &details.mutation.package;
+            let selectors = package
+                .get("triggers")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|trigger| trigger.get("selector").and_then(serde_json::Value::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if selectors.is_empty() {
+                return Err(CliError::EfficacyNoSelectors(mutation_id));
+            }
+            let mutation_version = package
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("0.0.0")
+                .to_owned();
+            let bounds = WindowBounds::derive(installed_at, now)?;
+            let gathered = store.efficacy_occurrences(&selectors, bounds.pre_start, bounds.now)?;
+            let mut occurrences = Vec::with_capacity(gathered.occurrences.len());
+            for occurrence in gathered.occurrences {
+                let occurred_at = OffsetDateTime::parse(&occurrence.occurred_at, &Rfc3339)?;
+                occurrences.push(FailureOccurrence {
+                    event_id: occurrence.event_id,
+                    session_id: occurrence.session_id,
+                    occurred_at,
+                });
+            }
+            let mut source_event_ids = occurrences
+                .iter()
+                .map(|occurrence| occurrence.event_id.clone())
+                .collect::<Vec<_>>();
+            source_event_ids.sort();
+            let observations = EfficacyObservations {
+                mutation_id: mutation_id.clone(),
+                mutation_version,
+                signature_selectors: selectors,
+                matching_rule: MatchingRule::FailureSignatureRecurrence,
+                occurrences,
+                coverage: CoverageInput {
+                    classifiable_failures: gathered.classifiable_failures,
+                    total_failures: gathered.total_failures,
+                },
+            };
+            let evaluation = evaluate_efficacy(&observations, installed_at, now)?;
+            let report = serde_json::to_value(&evaluation)?;
+            let verdict = report
+                .get("verdict")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let registration = store.register_efficacy(&EfficacyRegistration {
+                efficacy_id: evaluation.efficacy_id.clone(),
+                mutation_id: evaluation.mutation_id.clone(),
+                verdict,
+                report,
+                source_event_ids,
+            })?;
+            Ok(CommandReport::MutationEfficacy(MutationEfficacyReport {
+                evaluation,
+                registration,
+            }))
+        }
         MutationAction::Install {
             mutation_id,
             repository,
@@ -2741,6 +2941,21 @@ fn write_report(
                         installation.relative_path
                     )?;
                 }
+                // The latest efficacy report, if any: a one-line post-install
+                // recurrence summary in the same audit column.
+                if let Some(latest) = details.efficacies.last() {
+                    let summary = serde_json::from_value::<EfficacyReport>(latest.report.clone())
+                        .map_or_else(
+                            |_| latest.verdict.clone(),
+                            |report| efficacy_summary_line(&report),
+                        );
+                    writeln!(
+                        writer,
+                        "{}\tefficacy {}\t{summary}",
+                        compact_time(&latest.created_at, OffsetDateTime::now_utc()),
+                        latest.efficacy_id,
+                    )?;
+                }
             }
             CommandReport::MutationTransition(report) => writeln!(
                 writer,
@@ -2788,6 +3003,9 @@ fn write_report(
                 percent(u32::from(report.evaluation.summary.recall_bps)),
                 report.evaluation.summary.false_positives
             )?,
+            CommandReport::MutationEfficacy(report) => {
+                write_mutation_efficacy(&mut writer, report)?;
+            }
             CommandReport::MutationInstall(report) => writeln!(
                 writer,
                 "{}\t{}\t{}\t{}\t{}",

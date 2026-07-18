@@ -80,6 +80,12 @@ pub enum StoreError {
         /// Rejected zero-based evidence position.
         ordinal: usize,
     },
+    /// An efficacy evidence position cannot fit `SQLite`'s integer representation.
+    #[error("efficacy evidence ordinal {ordinal} exceeds SQLite's integer range")]
+    EfficacyEvidenceOrdinalOutOfRange {
+        /// Rejected zero-based evidence position.
+        ordinal: usize,
+    },
     /// An incremental cursor cannot fit `SQLite`'s signed integer representation.
     #[error("cursor {field} value {value} exceeds SQLite's integer range")]
     CursorOutOfRange {
@@ -163,6 +169,15 @@ pub enum StoreError {
     ShadowContentConflict {
         /// Conflicting shadow identity.
         shadow_id: String,
+    },
+    /// Efficacy identity, mutation identity, hash, or verdict disagreed with its report.
+    #[error("efficacy registration does not match its versioned report")]
+    InvalidEfficacyRegistration,
+    /// Immutable efficacy content changed under the same ID.
+    #[error("efficacy '{efficacy_id}' already exists with different report content")]
+    EfficacyContentConflict {
+        /// Conflicting efficacy identity.
+        efficacy_id: String,
     },
     /// Installation registration violated the supported target contract.
     #[error("installation registration is invalid")]

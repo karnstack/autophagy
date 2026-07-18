@@ -1,0 +1,51 @@
+{
+  "spec_version": "efficacy/0.1",
+  "efficacy_id": "eff_293df1750a2cb9ff4634b4e9121473fd95e4c7ae37ca3f9fe757c1416a532f67",
+  "mutation_id": "mut_c0ffee00000000000000000000000000",
+  "mutation_version": "0.2.1",
+  "signature_selectors": [
+    "operation/v2|shell|pytest -q"
+  ],
+  "matching_rule": "failure_signature_recurrence",
+  "installed_at": "2026-02-01T00:00:00Z",
+  "evaluated_at": "2026-05-02T00:00:00Z",
+  "windows": {
+    "pre": {
+      "start": "2025-11-02T00:00:00Z",
+      "end": "2026-02-01T00:00:00Z",
+      "duration_seconds": 7862400,
+      "occurrences": 0,
+      "distinct_sessions": 0,
+      "rate_per_week_milli": 0
+    },
+    "post": {
+      "start": "2026-02-01T00:00:00Z",
+      "end": "2026-05-02T00:00:00Z",
+      "duration_seconds": 7862400,
+      "occurrences": 4,
+      "distinct_sessions": 2,
+      "rate_per_week_milli": 307
+    }
+  },
+  "coverage": {
+    "classifiable_failures": 40,
+    "total_failures": 40,
+    "coverage_bps": 10000,
+    "complete": true
+  },
+  "verdict": "regressed",
+  "insufficient_reasons": [],
+  "evidence": {
+    "pre_event_ids": [],
+    "post_event_ids": [
+      "evt_a1",
+      "evt_b7",
+      "evt_c3",
+      "evt_d9"
+    ],
+    "pre_event_count": 0,
+    "post_event_count": 4,
+    "listing_cap": 50
+  },
+  "model_used": false
+}

@@ -37,6 +37,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "derived detection-findings cache",
         sql: include_str!("../migrations/0002_findings_cache.sql"),
     },
+    Migration {
+        version: 3,
+        description: "post-install mutation efficacy tracking",
+        sql: include_str!("../migrations/0003_mutation_efficacy.sql"),
+    },
 ];
 
 /// SHA-256 checksums of the eight pre-release development migrations, in order

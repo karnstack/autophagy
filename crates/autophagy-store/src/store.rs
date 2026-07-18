@@ -5,18 +5,19 @@ use rusqlite::{
     Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
     types::Value as SqlValue,
 };
-use time::OffsetDateTime;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    AdapterActivity, DeleteAllSummary, DeleteSummary, DetectionFingerprint, InsertOutcome,
-    InstallationRegistration, InstallationTransitionOutcome, MutationDetails,
-    MutationInstallationRecord, MutationRecord, MutationRegisterOutcome, MutationRegistration,
-    MutationReplayRecord, MutationShadowRecord, MutationTransition, MutationTransitionOutcome,
-    PruneSummary, RankingExplanation, RankingSignal, RankingSignalKind, RebuildSummary,
-    ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter, RetrievalFilterField, RetrievalHit,
-    RetrievalMatchKind, RetrievalQuery, SearchHit, SearchProjection, SessionSummary,
-    ShadowRegisterOutcome, ShadowRegistration, SourceCursor, SourceIdentity, StoreError,
-    StoreStats, migration, util,
+    AdapterActivity, DeleteAllSummary, DeleteSummary, DetectionFingerprint, EfficacyOccurrence,
+    EfficacyOccurrences, EfficacyRegisterOutcome, EfficacyRegistration, EfficacyStatusSummary,
+    InsertOutcome, InstallationRegistration, InstallationTransitionOutcome, MutationDetails,
+    MutationEfficacyRecord, MutationInstallationRecord, MutationRecord, MutationRegisterOutcome,
+    MutationRegistration, MutationReplayRecord, MutationShadowRecord, MutationTransition,
+    MutationTransitionOutcome, PruneSummary, RankingExplanation, RankingSignal, RankingSignalKind,
+    RebuildSummary, ReplayRegisterOutcome, ReplayRegistration, RetrievalFilter,
+    RetrievalFilterField, RetrievalHit, RetrievalMatchKind, RetrievalQuery, SearchHit,
+    SearchProjection, SessionSummary, ShadowRegisterOutcome, ShadowRegistration, SourceCursor,
+    SourceIdentity, StoreError, StoreStats, migration, util,
 };
 
 /// Score contribution for an exact normalized-signature match, in basis points.
@@ -1235,13 +1236,47 @@ impl EventStore {
         let installations = rows
             .map(|row| installation_record(row?))
             .collect::<Result<Vec<_>, StoreError>>()?;
+        let efficacies = self.efficacy_records(mutation_id)?;
         Ok(MutationDetails {
             mutation,
             transitions,
             replays,
             shadows,
             installations,
+            efficacies,
         })
+    }
+
+    /// Every efficacy report for one mutation, oldest first.
+    fn efficacy_records(
+        &self,
+        mutation_id: &str,
+    ) -> Result<Vec<MutationEfficacyRecord>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT efficacy_id, mutation_id, verdict, report_json, created_at
+             FROM mutation_efficacy WHERE mutation_id = ?1
+             ORDER BY created_at, efficacy_id",
+        )?;
+        let rows = statement.query_map([mutation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (efficacy_id, mutation_id, verdict, report, created_at) = row?;
+            Ok(MutationEfficacyRecord {
+                efficacy_id,
+                mutation_id,
+                verdict,
+                report: serde_json::from_str(&report)?,
+                created_at,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()
     }
 
     /// Persist one immutable replay report and advance a challenged candidate only on pass.
@@ -1470,6 +1505,230 @@ impl EventStore {
             advanced: registration.passed,
             mutation_state: mutation_state.to_owned(),
         })
+    }
+
+    /// Persist one immutable post-install efficacy report.
+    ///
+    /// Efficacy is observational: registration performs no lifecycle transition
+    /// and never advances or retires the mutation. History accumulates — a
+    /// mutation may carry many reports over time — but re-registering an
+    /// identical report (same `efficacy_id`, same bytes) is a no-op, and reusing
+    /// an `efficacy_id` for different content is a conflict.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for inconsistent metadata, content conflicts,
+    /// a missing mutation, or database failures.
+    pub fn register_efficacy(
+        &mut self,
+        registration: &EfficacyRegistration,
+    ) -> Result<EfficacyRegisterOutcome, StoreError> {
+        if !efficacy_report_matches_registration(registration) {
+            return Err(StoreError::InvalidEfficacyRegistration);
+        }
+        let report_json = serde_json::to_string(&registration.report)?;
+        let content_hash = util::sha256(report_json.as_bytes());
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing_hash) = transaction
+            .query_row(
+                "SELECT content_hash FROM mutation_efficacy WHERE efficacy_id = ?1",
+                [&registration.efficacy_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+        {
+            if existing_hash.as_slice() != content_hash {
+                return Err(StoreError::EfficacyContentConflict {
+                    efficacy_id: registration.efficacy_id.clone(),
+                });
+            }
+            return Ok(EfficacyRegisterOutcome::Duplicate {
+                efficacy_id: registration.efficacy_id.clone(),
+            });
+        }
+        // Confirm the mutation exists but never inspect or change its state:
+        // efficacy is decoupled from the lifecycle by design (ADR 0015).
+        transaction
+            .query_row(
+                "SELECT 1 FROM mutation_candidates WHERE mutation_id = ?1",
+                [&registration.mutation_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::MutationNotFound {
+                mutation_id: registration.mutation_id.clone(),
+            })?;
+        let now = util::now_timestamp()?;
+        transaction.execute(
+            "INSERT INTO mutation_efficacy(
+                efficacy_id, mutation_id, report_json, content_hash, verdict, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                registration.efficacy_id,
+                registration.mutation_id,
+                report_json,
+                content_hash.as_slice(),
+                registration.verdict,
+                now,
+            ],
+        )?;
+        for (ordinal, event_id) in registration.source_event_ids.iter().enumerate() {
+            let stored_ordinal = i64::try_from(ordinal)
+                .map_err(|_| StoreError::EfficacyEvidenceOrdinalOutOfRange { ordinal })?;
+            transaction.execute(
+                "INSERT INTO mutation_efficacy_evidence(efficacy_id, event_id, ordinal)
+                 VALUES (?1, ?2, ?3)",
+                params![registration.efficacy_id, event_id, stored_ordinal],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(EfficacyRegisterOutcome::Inserted {
+            efficacy_id: registration.efficacy_id.clone(),
+        })
+    }
+
+    /// Every efficacy report for one mutation, oldest first.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database or deserialization failures.
+    pub fn list_efficacy(
+        &self,
+        mutation_id: &str,
+    ) -> Result<Vec<MutationEfficacyRecord>, StoreError> {
+        self.efficacy_records(mutation_id)
+    }
+
+    /// Gather matched failure occurrences and index-coverage counts for one
+    /// evaluated span, for the pure efficacy evaluator to consume.
+    ///
+    /// Each selector is decomposed by the deterministic failure-matching rule:
+    /// a `failure/<v>|<tool>|<command>|exit:<code>` selector yields the operation
+    /// signature `operation/<v>|<tool>|<command>` and an exit code, and matches
+    /// the `tool.failed` events indexed under that operation signature with that
+    /// exit code. An `operation/<v>|…` selector matches any indexed `tool.failed`
+    /// event for that operation. Selectors that parse as neither are returned in
+    /// `unparsed_selectors` and contribute no occurrences.
+    ///
+    /// Timestamps are compared as parsed instants (never lexically), so mixed
+    /// sub-second precision in stored events cannot misclassify a boundary.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database failures.
+    pub fn efficacy_occurrences(
+        &self,
+        selectors: &[String],
+        span_start: OffsetDateTime,
+        span_end: OffsetDateTime,
+    ) -> Result<EfficacyOccurrences, StoreError> {
+        let mut matched: BTreeMap<String, EfficacyOccurrence> = BTreeMap::new();
+        let mut unparsed_selectors = Vec::new();
+        let mut statement = self.connection.prepare(
+            "SELECT e.event_id, e.session_id, e.occurred_at, e.exit_code
+             FROM event_signatures s
+             JOIN events e ON e.row_id = s.event_row_id
+             WHERE s.signature = ?1 AND e.event_type = 'tool.failed'",
+        )?;
+        for selector in selectors {
+            let Some(rule) = FailureSelector::parse(selector) else {
+                unparsed_selectors.push(selector.clone());
+                continue;
+            };
+            let rows = statement.query_map([&rule.operation_signature], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (event_id, session_id, occurred_at, exit_code) = row?;
+                if let Some(required) = rule.exit_code {
+                    if exit_code != Some(required) {
+                        continue;
+                    }
+                }
+                if !within_span(&occurred_at, span_start, span_end) {
+                    continue;
+                }
+                matched
+                    .entry(event_id.clone())
+                    .or_insert(EfficacyOccurrence {
+                        event_id,
+                        session_id,
+                        occurred_at,
+                    });
+            }
+        }
+        let (classifiable_failures, total_failures) =
+            self.failure_coverage(span_start, span_end)?;
+        Ok(EfficacyOccurrences {
+            occurrences: matched.into_values().collect(),
+            classifiable_failures,
+            total_failures,
+            unparsed_selectors,
+        })
+    }
+
+    /// Count in-span `tool.failed` events, and how many carry an index row.
+    fn failure_coverage(
+        &self,
+        span_start: OffsetDateTime,
+        span_end: OffsetDateTime,
+    ) -> Result<(u32, u32), StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT e.occurred_at,
+                    EXISTS(SELECT 1 FROM event_signatures s WHERE s.event_row_id = e.row_id)
+             FROM events e WHERE e.event_type = 'tool.failed'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+        })?;
+        let mut classifiable = 0u32;
+        let mut total = 0u32;
+        for row in rows {
+            let (occurred_at, indexed) = row?;
+            if within_span(&occurred_at, span_start, span_end) {
+                total = total.saturating_add(1);
+                if indexed {
+                    classifiable = classifiable.saturating_add(1);
+                }
+            }
+        }
+        Ok((classifiable, total))
+    }
+
+    /// Summarize efficacy coverage across currently-installed mutations, using
+    /// each mutation's most recent efficacy verdict. `None`-style aggregation is
+    /// avoided: mutations with no report count toward `not_measured`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] for database failures.
+    pub fn efficacy_status_summary(&self) -> Result<EfficacyStatusSummary, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT (
+                SELECT verdict FROM mutation_efficacy me
+                WHERE me.mutation_id = i.mutation_id
+                ORDER BY created_at DESC, efficacy_id DESC LIMIT 1
+             )
+             FROM mutation_installations i WHERE i.state = 'installed'",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, Option<String>>(0))?;
+        let mut summary = EfficacyStatusSummary::default();
+        for row in rows {
+            summary.installed = summary.installed.saturating_add(1);
+            match row?.as_deref() {
+                Some("improved") => summary.improved = summary.improved.saturating_add(1),
+                Some("regressed") => summary.regressed = summary.regressed.saturating_add(1),
+                Some("unchanged") => summary.unchanged = summary.unchanged.saturating_add(1),
+                Some("insufficient_data") => {
+                    summary.insufficient_data = summary.insufficient_data.saturating_add(1);
+                }
+                _ => summary.not_measured = summary.not_measured.saturating_add(1),
+            }
+        }
+        Ok(summary)
     }
 
     /// Record a completed Codex repo-skill materialization and activate the mutation.
@@ -2263,6 +2522,109 @@ fn shadow_report_matches_registration(registration: &ShadowRegistration) -> bool
         && report_event_ids.len() == report_event_values.len()
         && report_event_ids.len() == registration.source_event_ids.len()
         && report_event_ids == registered_event_ids
+}
+
+/// A mutation trigger selector decomposed into an occurrence-matching query.
+///
+/// Both selector grammars minted by the signature spec are supported:
+/// `failure/<v>|<tool>|<command>|exit:<code>` (the common case) yields the
+/// operation signature and an exit-code filter; `operation/<v>|<tool>|<command>`
+/// yields the operation signature with no exit filter. Command text may itself
+/// contain `|` (shell pipes), so the failure form is parsed by trimming the
+/// trailing `|exit:<code>` rather than splitting on `|`.
+struct FailureSelector {
+    operation_signature: String,
+    exit_code: Option<i64>,
+}
+
+impl FailureSelector {
+    fn parse(selector: &str) -> Option<Self> {
+        if let Some(rest) = selector.strip_prefix("failure/") {
+            // rest = "<v>|<tool>|<command>|exit:<code>"
+            let (version, tail) = rest.split_once('|')?;
+            let (body, exit) = tail.rsplit_once("|exit:")?;
+            let exit_code = exit.parse::<i64>().ok()?;
+            // Require a tool|command boundary inside the body.
+            body.split_once('|')?;
+            Some(Self {
+                operation_signature: format!("operation/{version}|{body}"),
+                exit_code: Some(exit_code),
+            })
+        } else if selector.starts_with("operation/") {
+            Some(Self {
+                operation_signature: selector.to_owned(),
+                exit_code: None,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Whether an RFC 3339 timestamp string falls in `[start, end]`, compared as
+/// parsed instants. Unparseable timestamps are treated as out of span.
+fn within_span(occurred_at: &str, start: OffsetDateTime, end: OffsetDateTime) -> bool {
+    match OffsetDateTime::parse(occurred_at, &Rfc3339) {
+        Ok(at) => at >= start && at <= end,
+        Err(_) => false,
+    }
+}
+
+fn efficacy_report_matches_registration(registration: &EfficacyRegistration) -> bool {
+    if registration
+        .report
+        .get("efficacy_id")
+        .and_then(serde_json::Value::as_str)
+        != Some(&registration.efficacy_id)
+        || registration
+            .report
+            .get("mutation_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(&registration.mutation_id)
+        || registration
+            .report
+            .get("verdict")
+            .and_then(serde_json::Value::as_str)
+            != Some(&registration.verdict)
+    {
+        return false;
+    }
+    let Some(evidence) = registration.report.get("evidence") else {
+        return false;
+    };
+    let count = |field: &str| {
+        evidence
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+    };
+    let (Some(pre), Some(post)) = (count("pre_event_count"), count("post_event_count")) else {
+        return false;
+    };
+    // The report lists a capped subset of evidence ids; the registration carries
+    // the exact, deduplicated union. Require the exact counts to agree and every
+    // listed id to appear in the registered set.
+    let registered = registration
+        .source_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if registered.len() != registration.source_event_ids.len()
+        || registered.len() != pre.saturating_add(post)
+    {
+        return false;
+    }
+    ["pre_event_ids", "post_event_ids"]
+        .into_iter()
+        .flat_map(|field| {
+            evidence
+                .get(field)
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+        })
+        .all(|id| registered.contains(id))
 }
 
 fn valid_installation_registration(registration: &InstallationRegistration) -> bool {
